@@ -38,6 +38,7 @@ enum exynos_mipi_phy_regmap_id {
 
 struct mipi_phy_device_desc {
 	int num_phys;
+	bool exynos7420_dsim_pair;
 	int num_regmaps;
 	const char *regmap_names[EXYNOS_MIPI_REGMAPS_NUM];
 	struct exynos_mipi_phy_desc {
@@ -213,7 +214,16 @@ static const struct mipi_phy_device_desc exynos5433_mipi_phy = {
 	},
 };
 
+/* 7420 vendor helper enables both DSIM PHYs, never uses 5433 sysreg. */
+static const struct mipi_phy_device_desc exynos7420_mipi_phy = {
+	.num_regmaps = 2,
+	.regmap_names = { "samsung,pmu-syscon", "samsung,disp-sysreg" },
+	.num_phys = 1,
+	.exynos7420_dsim_pair = true,
+};
+
 struct exynos_mipi_video_phy {
+	bool exynos7420_dsim_pair;
 	struct regmap *regmaps[EXYNOS_MIPI_REGMAPS_NUM];
 	int num_phys;
 	struct video_phy_desc {
@@ -224,11 +234,45 @@ struct exynos_mipi_video_phy {
 	spinlock_t slock;
 };
 
+static int exynos7420_dsim_pair_enable(struct exynos_mipi_video_phy *state)
+{
+	unsigned int id, value;
+	int ret;
+
+	for (id = 0; id < 2; id++) {
+		unsigned int reg = 0x070c + 4 * id;
+		unsigned int reset = BIT(4 * id);
+
+		ret = regmap_read(state->regmaps[0], reg, &value);
+		if (ret)
+			return ret;
+		/* Preserve U-Boot's already enabled M4S4/M4S0 PHY, vendor path. */
+		if (value & BIT(0))
+			continue;
+		ret = regmap_update_bits(state->regmaps[0], reg, BIT(0), BIT(0));
+		if (ret)
+			return ret;
+		ret = regmap_update_bits(state->regmaps[1], 0x2930, reset, 0);
+		if (ret)
+			return ret;
+		ret = regmap_update_bits(state->regmaps[1], 0x2930, reset, reset);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static int __set_phy_state(const struct exynos_mipi_phy_desc *data,
 			   struct exynos_mipi_video_phy *state, unsigned int on)
 {
 	struct regmap *enable_map = state->regmaps[data->enable_map];
 	struct regmap *resetn_map = state->regmaps[data->resetn_map];
+
+	/* No CSI consumer is registered by this display-only provider. Keep the
+	 * shared bootloader PHY powered on off; ownership is not transferred.
+	 */
+	if (state->exynos7420_dsim_pair)
+		return on ? exynos7420_dsim_pair_enable(state) : 0;
 
 	spin_lock(&state->slock);
 
@@ -317,6 +361,7 @@ static int exynos_mipi_video_phy_probe(struct platform_device *pdev)
 			return PTR_ERR(state->regmaps[i]);
 	}
 	state->num_phys = phy_dev->num_phys;
+	state->exynos7420_dsim_pair = phy_dev->exynos7420_dsim_pair;
 	spin_lock_init(&state->slock);
 
 	dev_set_drvdata(dev, state);
@@ -352,6 +397,8 @@ static const struct of_device_id exynos_mipi_video_phy_of_match[] = {
 		.compatible = "samsung,exynos5433-mipi-video-phy",
 		.data = &exynos5433_mipi_phy,
 	},
+	{ .compatible = "samsung,exynos7420-mipi-video-phy",
+	  .data = &exynos7420_mipi_phy },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, exynos_mipi_video_phy_of_match);

@@ -39,11 +39,14 @@ static int exynos_dsi_host_attach(struct samsung_dsim *dsim,
 	struct exynos_dsi *dsi = dsim->priv;
 	struct drm_encoder *encoder = &dsi->encoder;
 	struct drm_device *drm = encoder->dev;
+	int ret;
 
-	drm_bridge_attach(encoder, &dsim->bridge,
+	ret = drm_bridge_attach(encoder, &dsim->bridge,
 			  list_first_entry_or_null(&encoder->bridge_chain,
 						   struct drm_bridge,
 						   chain_node), 0);
+	if (ret)
+		return dev_err_probe(dsim->dev, ret, "DSI bridge chain attach failed\n");
 
 	mutex_lock(&drm->mode_config.mutex);
 
@@ -154,6 +157,11 @@ static const struct samsung_dsim_plat_data exynos5433_dsi_pdata = {
 	.host_ops = &exynos_dsi_exynos_host_ops,
 };
 
+static const struct samsung_dsim_plat_data exynos7420_dsi_pdata = {
+	.hw_type = DSIM_TYPE_EXYNOS7420,
+	.host_ops = &exynos_dsi_exynos_host_ops,
+};
+
 static const struct of_device_id exynos_dsi_of_match[] = {
 	{
 		.compatible = "samsung,exynos3250-mipi-dsi",
@@ -174,6 +182,9 @@ static const struct of_device_id exynos_dsi_of_match[] = {
 	{
 		.compatible = "samsung,exynos5433-mipi-dsi",
 		.data = &exynos5433_dsi_pdata,
+	}, {
+		.compatible = "samsung,exynos7420-mipi-dsi",
+		.data = &exynos7420_dsi_pdata,
 	},
 	{ /* sentinel. */ }
 };

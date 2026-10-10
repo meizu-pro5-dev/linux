@@ -836,3 +836,8 @@ config DRM_PANEL_XINPENG_XPP055C272
 	  XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
 	  system interfaces.
 endmenu
+
+config DRM_PANEL_M86_S6E3FA3
+	tristate "Meizu PRO 5 S6E3FA3 panel"
+	depends on OF && DRM_MIPI_DSI && BACKLIGHT_CLASS_DEVICE
+	select VIDEOMODE_HELPERS

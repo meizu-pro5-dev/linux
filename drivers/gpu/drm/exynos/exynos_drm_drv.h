@@ -227,6 +227,19 @@ void exynos_drm_unregister_dma(struct drm_device *drm, struct device *dev,
 			       void **dma_priv);
 void exynos_drm_cleanup_dma(struct drm_device *drm);
 
+#if IS_ENABLED(CONFIG_EXYNOS_IOMMU)
+void exynos_iommu_master_ready(struct device *master);
+int exynos_iommu_map_identity(struct device *master, phys_addr_t phys,
+			      size_t size);
+#else
+static inline void exynos_iommu_master_ready(struct device *master) { }
+static inline int exynos_iommu_map_identity(struct device *master,
+					    phys_addr_t phys, size_t size)
+{
+	return -ENODEV;
+}
+#endif
+
 #ifdef CONFIG_DRM_EXYNOS_DPI
 struct drm_encoder *exynos_dpi_probe(struct device *dev);
 int exynos_dpi_remove(struct drm_encoder *encoder);

@@ -96,12 +96,20 @@ static int exynos_dpi_create_connector(struct drm_encoder *encoder)
 	struct exynos_dpi *ctx = encoder_to_dpi(encoder);
 	struct drm_connector *connector = &ctx->connector;
 	int ret;
+	int connector_type = DRM_MODE_CONNECTOR_VGA;
+
+	/* m86 reuses the timing-only DPI handoff for its built-in DSI panel.
+	 * Expose that identity so compositors map touch and rotate it together
+	 * with the panel. This does not change the existing scanout path.
+	 */
+	if (of_machine_is_compatible("meizu,m86") && ctx->vm)
+		connector_type = DRM_MODE_CONNECTOR_DSI;
 
 	connector->polled = DRM_CONNECTOR_POLL_HPD;
 
 	ret = drm_connector_init(encoder->dev, connector,
 				 &exynos_dpi_connector_funcs,
-				 DRM_MODE_CONNECTOR_VGA);
+				 connector_type);
 	if (ret) {
 		DRM_DEV_ERROR(ctx->dev,
 			      "failed to initialize connector with drm\n");

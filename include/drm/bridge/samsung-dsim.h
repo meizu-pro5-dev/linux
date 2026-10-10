@@ -27,13 +27,14 @@ enum samsung_dsim_type {
 	DSIM_TYPE_EXYNOS5410,
 	DSIM_TYPE_EXYNOS5422,
 	DSIM_TYPE_EXYNOS5433,
+	DSIM_TYPE_EXYNOS7420,
 	DSIM_TYPE_IMX8MM,
 	DSIM_TYPE_IMX8MP,
 	DSIM_TYPE_COUNT,
 };
 
 #define samsung_dsim_hw_is_exynos(hw) \
-	((hw) >= DSIM_TYPE_EXYNOS3250 && (hw) <= DSIM_TYPE_EXYNOS5433)
+	((hw) >= DSIM_TYPE_EXYNOS3250 && (hw) <= DSIM_TYPE_EXYNOS7420)
 
 struct samsung_dsim_transfer {
 	struct list_head list;
@@ -99,6 +100,7 @@ struct samsung_dsim {
 	u32 mode_flags;
 	u32 format;
 
+	bool mic_enabled;
 	bool swap_dn_dp_clk;
 	bool swap_dn_dp_data;
 	int state;

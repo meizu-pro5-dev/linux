@@ -346,4 +346,18 @@
 #define DECON_UPDATE_SLAVE_SYNC			(1 << 4)
 #define DECON_UPDATE_STANDALONE_F		(1 << 0)
 
+
+/* Command mode registers, Exynos7420 vendor CAL. */
+#define VIDINTCON0_INT_I80_EN			(1 << 17)
+#define TRIGCON					0x06B0
+#define TRIGCON_SWTRIGCMD_WB			(1 << 23)
+#define TRIGCON_TRIG_SAVE_DISABLE_SYNCMGR	(1 << 13)
+#define TRIGCON_HWTRIG_AUTO_MASK		(1 << 6)
+#define TRIGCON_HWTRIGMASK_DISPIF1		(1 << 5)
+#define TRIGCON_HWTRIGMASK_DISPIF0		(1 << 4)
+#define TRIGCON_HWTRIGEN_I80_RGB		(1 << 3)
+#define TRIGCON_HWTRIG_INV_I80_RGB		(1 << 2)
+#define TRIGCON_SWTRIGCMD_I80_RGB		(1 << 1)
+#define TRIGCON_SWTRIGEN_I80_RGB		(1 << 0)
+
 #endif /* EXYNOS_REGS_DECON7_H */
