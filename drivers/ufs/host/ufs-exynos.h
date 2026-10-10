@@ -9,6 +9,9 @@
 #ifndef _UFS_EXYNOS_H_
 #define _UFS_EXYNOS_H_
 
+#include <linux/pm_qos.h>
+#include <linux/m86-bus-qos.h>
+
 /*
  * UNIPRO registers
  */
@@ -213,6 +216,10 @@ struct exynos_ufs {
 	const struct exynos_ufs_drv_data *drv_data;
 	struct regmap *sysreg;
 	u32 shareability_reg_offset;
+	struct device *bus_dev;
+	struct dev_pm_qos_request bus_qos_req;
+	bool bus_qos_active;
+	u32 bus_qos_khz;
 
 	u32 opts;
 #define EXYNOS_UFS_OPT_HAS_APB_CLK_CTRL		BIT(0)

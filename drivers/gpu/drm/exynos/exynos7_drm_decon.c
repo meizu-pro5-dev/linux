@@ -16,7 +16,10 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_qos.h>
+#include <linux/m86-bus-qos.h>
 
 #include <video/of_display_timing.h>
 #include <video/of_videomode.h>
@@ -63,6 +66,10 @@ struct decon_context {
 	atomic_t			frame_pending;
 
 	struct drm_encoder *encoder;
+	struct device			*bus_dev;
+	struct dev_pm_qos_request	bus_qos_req;
+	bool				bus_qos_active;
+	u32				cur_bus_qos;
 };
 
 static const struct of_device_id decon_driver_dt_match[] = {
@@ -634,6 +641,11 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	if (!ctx->suspended)
 		return;
 
+	if (ctx->bus_qos_active) {
+		dev_pm_qos_update_request(&ctx->bus_qos_req, 416000);
+		ctx->cur_bus_qos = 416000;
+	}
+
 	ret = pm_runtime_resume_and_get(ctx->dev);
 	if (ret < 0) {
 		DRM_DEV_ERROR(ctx->dev, "failed to enable DECON device.\n");
@@ -694,6 +706,11 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 		decon_disable_plane(crtc, &ctx->planes[i]);
 
 	pm_runtime_put_sync(ctx->dev);
+
+	if (ctx->bus_qos_active) {
+		dev_pm_qos_update_request(&ctx->bus_qos_req, 0);
+		ctx->cur_bus_qos = 0;
+	}
 
 	ctx->suspended = true;
 }
@@ -892,10 +909,39 @@ static int decon_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, ctx);
 
+	{
+		struct device_node *bnode = of_parse_phandle(dev->of_node, "samsung,bus", 0);
+		if (bnode) {
+			struct platform_device *bsup = of_find_device_by_node(bnode);
+			of_node_put(bnode);
+			if (!bsup) {
+				ret = -EPROBE_DEFER;
+				goto err_iounmap;
+			}
+			if (device_link_add(dev, &bsup->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+				ctx->bus_dev = &bsup->dev;
+			put_device(&bsup->dev);
+		}
+		if (!ctx->bus_dev)
+			ctx->bus_dev = exynos_bus_get_dev("bus-mif");
+		if (!ctx->bus_dev)
+			ctx->bus_dev = exynos_bus_get_dev(NULL);
+		if (ctx->bus_dev) {
+			ctx->cur_bus_qos = 416000;
+			ret = dev_pm_qos_add_request(ctx->bus_dev, &ctx->bus_qos_req,
+						     DEV_PM_QOS_MIN_FREQUENCY, ctx->cur_bus_qos);
+			if (ret >= 0) {
+				ctx->bus_qos_active = true;
+				dev_info(dev, "registered DECON PM QoS request on %s: %u kHz\n",
+					 dev_name(ctx->bus_dev), ctx->cur_bus_qos);
+			}
+		}
+	}
+
 	ctx->encoder = exynos_dpi_probe(dev);
 	if (IS_ERR(ctx->encoder)) {
 		ret = PTR_ERR(ctx->encoder);
-		goto err_iounmap;
+		goto err_remove_qos;
 	}
 
 	pm_runtime_enable(dev);
@@ -909,6 +955,12 @@ static int decon_probe(struct platform_device *pdev)
 err_disable_pm_runtime:
 	pm_runtime_disable(dev);
 
+err_remove_qos:
+	if (ctx->bus_qos_active) {
+		dev_pm_qos_remove_request(&ctx->bus_qos_req);
+		ctx->bus_qos_active = false;
+	}
+
 err_iounmap:
 	iounmap(ctx->regs);
 
@@ -920,6 +972,11 @@ static int decon_remove(struct platform_device *pdev)
 	struct decon_context *ctx = dev_get_drvdata(&pdev->dev);
 
 	pm_runtime_disable(&pdev->dev);
+
+	if (ctx && ctx->bus_qos_active) {
+		dev_pm_qos_remove_request(&ctx->bus_qos_req);
+		ctx->bus_qos_active = false;
+	}
 
 	iounmap(ctx->regs);
 
