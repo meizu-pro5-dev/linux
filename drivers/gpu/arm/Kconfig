@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# ARM Mali GPU drivers.
+#
+# The Mali Midgard (t7xx) kernel driver is used on Meizu PRO 5 (Exynos 7420 /
+# Mali-T760) to keep the vendor r22p0 userspace graphics stack working while
+# the rest of the system moves to a modern kernel.
+#
+# Only the kernel driver is provided here; the matching userspace libraries
+# are part of the device vendor tree.
+
+source "drivers/gpu/arm/t7xx/r22p0/Kconfig"

@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Mali Midgard (t7xx) kernel drivers.
+#
+# The r22p0 driver is the one that matches the PRO 5 vendor userspace
+# (BASE_UK_VERSION 11.5) and is the only revision built here.
+
+obj-$(CONFIG_MALI_MIDGARD) += r22p0/

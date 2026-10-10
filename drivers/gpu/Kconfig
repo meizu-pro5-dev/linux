@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# GPU drivers that are not part of the DRM subsystem.
+#
+# The Mali Midgard driver attaches to dma-buf and sync_file directly, so it
+# deliberately lives outside drivers/gpu/drm/ and is reachable on its own.
+
+source "drivers/gpu/arm/Kconfig"
