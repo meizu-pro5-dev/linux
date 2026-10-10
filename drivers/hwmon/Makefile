@@ -226,3 +226,5 @@ obj-$(CONFIG_SENSORS_PECI)	+= peci/
 obj-$(CONFIG_PMBUS)		+= pmbus/
 
 ccflags-$(CONFIG_HWMON_DEBUG_CHIP) := -DDEBUG
+
+obj-$(CONFIG_M86_TMU_MONITOR) += m86_tmu_monitor.o

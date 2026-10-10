@@ -48,6 +48,12 @@ enum fixed_addresses {
 	FIX_EARLYCON_MEM_BASE,
 	FIX_TEXT_POKE0,
 
+#ifdef CONFIG_M86_SECLOG
+	/* Permanent SSCR log window; indices grow toward lower addresses. */
+	FIX_M86_SECLOG_END,
+	FIX_M86_SECLOG_BEGIN = FIX_M86_SECLOG_END + SZ_512K / PAGE_SIZE - 1,
+#endif
+
 #ifdef CONFIG_ACPI_APEI_GHES
 	/* Used for GHES mapping from assorted contexts */
 	FIX_APEI_GHES_IRQ,

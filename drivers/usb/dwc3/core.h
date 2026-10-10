@@ -32,6 +32,7 @@
 #include <linux/phy/phy.h>
 
 #include <linux/power_supply.h>
+#include <linux/regulator/consumer.h>
 
 #define DWC3_MSG_MAX	500
 
@@ -1181,6 +1182,7 @@ struct dwc3 {
 	enum usb_phy_interface	hsphy_mode;
 	struct usb_role_switch	*role_sw;
 	enum usb_dr_mode	role_switch_default_mode;
+	struct regulator	*vbus_reg;
 
 	struct power_supply	*usb_psy;
 

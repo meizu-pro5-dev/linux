@@ -965,7 +965,8 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_disable_auto_ctrl_hcc(ufs);
 		exynos_ufs_ungate_clks(ufs);
-	} else if (!on && status == POST_CHANGE) {
+	} else if (!on && status == PRE_CHANGE) {
+		/* Access HCI registers before the core disables the APB clock. */
 		exynos_ufs_gate_clks(ufs);
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_enable_auto_ctrl_hcc(ufs);

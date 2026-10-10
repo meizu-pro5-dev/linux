@@ -444,7 +444,9 @@ static arm_lpae_iopte arm_lpae_prot_to_pte(struct arm_lpae_io_pgtable *data,
 	 * "outside the GPU" (i.e. either the Inner or System domain in CPU
 	 * terms, depending on coherency).
 	 */
-	if (prot & IOMMU_CACHE && data->iop.fmt != ARM_MALI_LPAE)
+	if ((prot & IOMMU_CACHE && data->iop.fmt != ARM_MALI_LPAE) ||
+	    (data->iop.fmt == ARM_MALI_LPAE &&
+	     (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE)))
 		pte |= ARM_LPAE_PTE_SH_IS;
 	else
 		pte |= ARM_LPAE_PTE_SH_OS;
@@ -1025,8 +1027,8 @@ arm_mali_lpae_alloc_pgtable(struct io_pgtable_cfg *cfg, void *cookie)
 {
 	struct arm_lpae_io_pgtable *data;
 
-	/* No quirks for Mali (hopefully) */
-	if (cfg->quirks)
+	/* Only the Mali leaf-shareability quirk is supported. */
+	if (cfg->quirks & ~IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE)
 		return NULL;
 
 	if (cfg->ias > 48 || cfg->oas > 40)

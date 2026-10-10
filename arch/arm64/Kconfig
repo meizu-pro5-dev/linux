@@ -2314,3 +2314,27 @@ source "drivers/acpi/Kconfig"
 
 source "arch/arm64/kvm/Kconfig"
 
+
+config M86_BUILTIN_DTB
+	bool "Use an embedded m86 first-boot device tree"
+	depends on ARCH_EXYNOS && !EFI
+	select RELOCATABLE
+	help
+	  Use the project-generated m86 DTB at primary kernel entry. This
+	  leaves the shared firmware DTB partition intact for vendor Recovery.
+	  The vendor loader places Image at RAM + 512 KiB; relocatable kernel
+	  mapping handles this offset even with address randomization disabled.
+	  Build the m86 DTB before Image, with initrd addresses matching the
+	  exact ramdisk in the Android boot image. This is board-specific.
+
+config M86_SECLOG
+	bool "PRO 5 early SSCR-compatible persistent console"
+	depends on M86_BUILTIN_DTB && PRINTK
+	default n
+	help
+	  Diagnostic console for the measured PRO 5 SECLOG region at
+	  0xf9780000, size 512 KiB. The private DT must reserve this range
+	  with no-map. Reuses the vendor CLOG/LLOG protocol so the existing
+	  Recovery /dev/panic_msg can report this kernel after a warm reset.
+	  Explicit cache writeback adds logging overhead. This console stays
+	  registered at runtime; it does not provide a memory read interface.

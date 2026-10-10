@@ -146,6 +146,8 @@ static void __dwc3_set_mode(struct work_struct *work)
 	switch (dwc->current_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
 		dwc3_host_exit(dwc);
+		if (dwc->vbus_reg && regulator_is_enabled(dwc->vbus_reg))
+			regulator_disable(dwc->vbus_reg);
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
 		dwc3_gadget_exit(dwc);
@@ -194,8 +196,15 @@ static void __dwc3_set_mode(struct work_struct *work)
 
 	switch (desired_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
+		if (dwc->vbus_reg) {
+			ret = regulator_enable(dwc->vbus_reg);
+			if (ret)
+				dev_err(dwc->dev, "failed to enable vbus: %d\n", ret);
+		}
 		ret = dwc3_host_init(dwc);
 		if (ret) {
+			if (dwc->vbus_reg && regulator_is_enabled(dwc->vbus_reg))
+				regulator_disable(dwc->vbus_reg);
 			dev_err(dwc->dev, "failed to initialize host\n");
 		} else {
 			if (dwc->usb2_phy)
@@ -216,6 +225,8 @@ static void __dwc3_set_mode(struct work_struct *work)
 
 		if (dwc->usb2_phy)
 			otg_set_vbus(dwc->usb2_phy->otg, false);
+		if (dwc->vbus_reg && regulator_is_enabled(dwc->vbus_reg))
+			regulator_disable(dwc->vbus_reg);
 		phy_set_mode(dwc->usb2_generic_phy, PHY_MODE_USB_DEVICE);
 		phy_set_mode(dwc->usb3_generic_phy, PHY_MODE_USB_DEVICE);
 
@@ -1369,6 +1380,11 @@ static int dwc3_core_init_mode(struct dwc3 *dwc)
 
 		if (dwc->usb2_phy)
 			otg_set_vbus(dwc->usb2_phy->otg, true);
+		if (dwc->vbus_reg) {
+			ret = regulator_enable(dwc->vbus_reg);
+			if (ret)
+				dev_err(dwc->dev, "failed to enable vbus: %d\n", ret);
+		}
 		phy_set_mode(dwc->usb2_generic_phy, PHY_MODE_USB_HOST);
 		phy_set_mode(dwc->usb3_generic_phy, PHY_MODE_USB_HOST);
 
@@ -1406,6 +1422,9 @@ static void dwc3_core_exit_mode(struct dwc3 *dwc)
 		/* do nothing */
 		break;
 	}
+
+	if (dwc->vbus_reg && regulator_is_enabled(dwc->vbus_reg))
+		regulator_disable(dwc->vbus_reg);
 
 	/* de-assert DRVVBUS for HOST and OTG mode */
 	dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_DEVICE);
@@ -1902,6 +1921,14 @@ static int dwc3_probe(struct platform_device *pdev)
 	ret = dwc3_get_dr_mode(dwc);
 	if (ret)
 		goto err_free_event_buffers;
+
+	dwc->vbus_reg = devm_regulator_get_optional(dev, "vbus");
+	if (IS_ERR(dwc->vbus_reg)) {
+		ret = PTR_ERR(dwc->vbus_reg);
+		if (ret == -EPROBE_DEFER)
+			goto err_free_event_buffers;
+		dwc->vbus_reg = NULL;
+	}
 
 	ret = dwc3_core_init(dwc);
 	if (ret) {

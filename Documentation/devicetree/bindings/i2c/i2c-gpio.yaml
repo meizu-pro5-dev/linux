@@ -11,11 +11,31 @@ maintainers:
 
 allOf:
   - $ref: /schemas/i2c/i2c-controller.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: meizu,m86-pmic-i2c
+    then:
+      required:
+        - meizu,pmu
+      properties:
+        pinctrl-0: false
+    else:
+      properties:
+        meizu,pmu: false
 
 properties:
   compatible:
-    items:
+    oneOf:
       - const: i2c-gpio
+      - items:
+          - const: meizu,m86-pmic-i2c
+          - const: i2c-gpio
+
+  meizu,pmu:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Exynos7420 PMU syscon for Cortex-M3 APM ownership checks.
 
   sda-gpios:
     description:

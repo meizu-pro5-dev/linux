@@ -59,7 +59,11 @@
 	 */
 	efi_signature_nop			// special NOP to identity as PE/COFF executable
 	b	primary_entry			// branch to kernel start, magic
+#ifdef CONFIG_M86_BUILTIN_DTB
+	.quad	0x80000				// legacy m86 U-Boot fixed load offset
+#else
 	.quad	0				// Image load offset from start of RAM, little-endian
+#endif
 	le64sym	_kernel_size_le			// Effective size of kernel image, little-endian
 	le64sym	_kernel_flags_le		// Informative flags, little-endian
 	.quad	0				// reserved
@@ -89,6 +93,10 @@
 SYM_CODE_START(primary_entry)
 	bl	record_mmu_state
 	bl	preserve_boot_args
+#ifdef CONFIG_M86_BUILTIN_DTB
+	/* Save firmware x0 in boot_args before using our private FDT. */
+	adr_l	x21, __m86_builtin_dtb
+#endif
 	bl	create_idmap
 
 	/*

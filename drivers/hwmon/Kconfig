@@ -2432,3 +2432,9 @@ config SENSORS_HP_WMI
 endif # ACPI
 
 endif # HWMON
+
+config M86_TMU_MONITOR
+	tristate "PRO 5 m86_tmu_monitor monitor"
+	depends on OF && HAS_IOMEM && THERMAL
+	help
+	  Board-specific read-only monitor for Meizu PRO 5 bring-up.
