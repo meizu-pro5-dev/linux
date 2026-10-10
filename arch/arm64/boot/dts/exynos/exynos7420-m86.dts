@@ -414,11 +414,12 @@
 &sysmmu_disp_ro { status = "okay"; };
 &sysmmu_disp_rw { status = "okay"; };
 &decon {
- compatible = "samsung,exynos7-decon";
- clocks = <&cmu_disp CLK_PCLK_DECON0>, <&cmu_disp CLK_ACLK_DECON0>,
-          <&cmu_disp CLK_SCLK_DECON0_ECLK>, <&cmu_disp CLK_SCLK_DECON0_VCLK>;
- clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
- status = "okay";
+	compatible = "samsung,exynos7-decon";
+	clocks = <&cmu_disp CLK_PCLK_DECON0>, <&cmu_disp CLK_ACLK_DECON0>,
+	         <&cmu_disp CLK_SCLK_DECON0_ECLK>, <&cmu_disp CLK_SCLK_DECON0_VCLK>;
+	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
+	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
+	status = "okay";
  display-timings {
   native-mode = <&m86_handoff_timing>;
   m86_handoff_timing: timing {
@@ -536,15 +537,15 @@
  };
 };
 
-/* Command-only backlight shares the existing, exclusive DSIM resource. */
+/* S6E3FA3 command-mode panel and backlight controller */
 &m86_dsim {
- compatible = "meizu,m86-dsim-handoff-backlight";
- /delete-property/ pinctrl-names;
- /delete-property/ pinctrl-0;
- /delete-property/ assigned-clocks;
- /delete-property/ assigned-clock-parents;
- default-brightness = <68>;
- status = "okay";
+	compatible = "meizu,m86-s6e3fa3-panel", "meizu,m86-dsim-handoff-backlight";
+	/delete-property/ pinctrl-names;
+	/delete-property/ pinctrl-0;
+	/delete-property/ assigned-clocks;
+	/delete-property/ assigned-clock-parents;
+	default-brightness = <68>;
+	status = "okay";
 };
 
 /* Experimental retained-power GPU bring-up only.

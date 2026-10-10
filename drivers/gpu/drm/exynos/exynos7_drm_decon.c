@@ -10,6 +10,8 @@
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -56,6 +58,9 @@ struct decon_context {
 	bool				suspended;
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
+	struct gpio_desc		*te_gpio;
+	int				te_irq;
+	atomic_t			frame_pending;
 
 	struct drm_encoder *encoder;
 };
@@ -513,24 +518,31 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	writel(val, ctx->regs + DECON_UPDATE);
 }
 
-static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
+static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 {
-	struct decon_context *ctx = crtc->ctx;
-	int i;
+	struct decon_context *ctx = dev_id;
 
-	if (ctx->suspended)
-		return;
-
-	for (i = 0; i < WINDOWS_NR; i++)
-		decon_shadow_protect_win(ctx, i, false);
+	if (ctx->suspended || !ctx->drm_dev)
+		return IRQ_HANDLED;
 
 	/*
-	 * Command mode has no vsync: kick off one frame transmission now.
-	 * The trigger sequence mirrors what the bootloader/simpledrm uses to
-	 * push a frame to the command-mode panel.  The resulting frame-done
-	 * interrupt feeds vblank and completes the pending atomic commit.
+	 * True hardware VBLANK: Panel physical TE pin asserted at V-Blank.
+	 * Feed DRM CRTC vblank to align compositor flips with panel refresh.
 	 */
-	if (ctx->i80_if) {
+	if (test_bit(0, &ctx->irq_flags))
+		drm_crtc_handle_vblank(&ctx->crtc->base);
+
+	/* set wait vsync event to zero and wake up queue. */
+	if (atomic_read(&ctx->wait_vsync_event)) {
+		atomic_set(&ctx->wait_vsync_event, 0);
+		wake_up(&ctx->wait_vsync_queue);
+	}
+
+	/*
+	 * If a new frame is pending from atomic_flush, trigger DECON transmission
+	 * during this V-Blank interval.
+	 */
+	if (atomic_xchg(&ctx->frame_pending, 0)) {
 		u32 val = readl(ctx->regs + TRIGCON);
 
 		val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
@@ -544,6 +556,47 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 		       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
 		writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
 		       ctx->regs + TRIGCON);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
+{
+	struct decon_context *ctx = crtc->ctx;
+	int i;
+
+	if (ctx->suspended)
+		return;
+
+	for (i = 0; i < WINDOWS_NR; i++)
+		decon_shadow_protect_win(ctx, i, false);
+
+	writel(readl(ctx->regs + DECON_UPDATE) |
+	       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
+
+	/*
+	 * Command mode has no continuous vsync from controller:
+	 * If physical TE pin IRQ is registered, gate transmission on the next
+	 * TE rising edge (V-Blank) to eliminate tearing.
+	 * Otherwise fall back to blind software trigger.
+	 */
+	if (ctx->i80_if) {
+		if (ctx->te_irq > 0) {
+			atomic_set(&ctx->frame_pending, 1);
+		} else {
+			u32 val = readl(ctx->regs + TRIGCON);
+
+			val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
+				 TRIGCON_HWTRIGMASK_DISPIF0 |
+				 TRIGCON_HWTRIGMASK_DISPIF1);
+			val |= TRIGCON_SWTRIGEN_I80_RGB | TRIGCON_SWTRIGCMD_I80_RGB |
+			       TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
+			       TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_HWTRIG_AUTO_MASK;
+			writel(val, ctx->regs + TRIGCON);
+			writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
+			       ctx->regs + TRIGCON);
+		}
 	}
 
 	exynos_crtc_handle_event(crtc);
@@ -673,16 +726,17 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 		goto out;
 
 	/*
-	 * In command (i80) mode the frame-done interrupt plays the role of
-	 * the vsync interrupt, so it must feed vblank as well, otherwise the
-	 * DRM atomic commit never completes.
+	 * If TE IRQ is active, TE handler drives vblank at true 60Hz.
+	 * Only use frame-done (INT_I80) as fallback when TE IRQ is unavailable.
 	 */
-	drm_crtc_handle_vblank(&ctx->crtc->base);
+	if (ctx->te_irq <= 0) {
+		drm_crtc_handle_vblank(&ctx->crtc->base);
 
-	/* set wait vsync event to zero and wake up queue. */
-	if (atomic_read(&ctx->wait_vsync_event)) {
-		atomic_set(&ctx->wait_vsync_event, 0);
-		wake_up(&ctx->wait_vsync_queue);
+		/* set wait vsync event to zero and wake up queue. */
+		if (atomic_read(&ctx->wait_vsync_event)) {
+			atomic_set(&ctx->wait_vsync_event, 0);
+			wake_up(&ctx->wait_vsync_queue);
+		}
 	}
 out:
 	return IRQ_HANDLED;
@@ -810,6 +864,28 @@ static int decon_probe(struct platform_device *pdev)
 		dev_err(dev, "irq request failed.\n");
 		goto err_iounmap;
 	}
+
+	ctx->te_gpio = devm_gpiod_get_optional(dev, "te", GPIOD_IN);
+	if (IS_ERR(ctx->te_gpio)) {
+		ret = dev_err_probe(dev, PTR_ERR(ctx->te_gpio), "failed to get te gpio\n");
+		goto err_iounmap;
+	}
+
+	if (ctx->te_gpio) {
+		ctx->te_irq = gpiod_to_irq(ctx->te_gpio);
+		if (ctx->te_irq > 0) {
+			ret = devm_request_irq(dev, ctx->te_irq, decon_te_irq_handler,
+					       IRQF_TRIGGER_RISING, "decon_te", ctx);
+			if (ret) {
+				dev_err(dev, "failed to request te irq: %d\n", ret);
+				ctx->te_irq = 0;
+			} else {
+				dev_info(dev, "hardware TE interrupt registered (irq %d)\n",
+					 ctx->te_irq);
+			}
+		}
+	}
+	atomic_set(&ctx->frame_pending, 0);
 
 	init_waitqueue_head(&ctx->wait_vsync_queue);
 	atomic_set(&ctx->wait_vsync_event, 0);
