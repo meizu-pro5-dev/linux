@@ -798,6 +798,36 @@
 			#thermal-sensor-cells = <0>;
 		};
 
+		tmuctrl_1: tmu@10064000 {
+			compatible = "samsung,exynos7-tmu";
+			reg = <0x10064000 0x200>;
+			interrupts = <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_peris PCLK_TMU>,
+				 <&clock_peris SCLK_TMU>;
+			clock-names = "tmu_apbif", "tmu_sclk";
+			#thermal-sensor-cells = <0>;
+		};
+
+		tmuctrl_2: tmu@10068000 {
+			compatible = "samsung,exynos7-tmu";
+			reg = <0x10068000 0x200>;
+			interrupts = <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_peris PCLK_TMU>,
+				 <&clock_peris SCLK_TMU>;
+			clock-names = "tmu_apbif", "tmu_sclk";
+			#thermal-sensor-cells = <0>;
+		};
+
+		tmuctrl_3: tmu@1006c000 {
+			compatible = "samsung,exynos7-tmu";
+			reg = <0x1006c000 0x200>;
+			interrupts = <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_peris PCLK_TMU>,
+				 <&clock_peris SCLK_TMU>;
+			clock-names = "tmu_apbif", "tmu_sclk";
+			#thermal-sensor-cells = <0>;
+		};
+
 		ufs: ufs@15570000 {
 			compatible = "samsung,exynos7-ufs";
 			reg = <0x15570000 0x100>,  /* 0: HCI standard */

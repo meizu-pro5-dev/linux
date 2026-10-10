@@ -229,6 +229,9 @@
 &adma { status = "disabled"; };
 &pwm { status = "disabled"; };
 &tmuctrl_0 { status = "disabled"; };
+&tmuctrl_1 { status = "disabled"; };
+&tmuctrl_2 { status = "disabled"; };
+&tmuctrl_3 { status = "disabled"; };
 &atlas_thermal { status = "disabled"; };
 &cmu_g3d { status = "okay"; };
 &cmu_aud { status = "disabled"; };
@@ -360,6 +363,9 @@
 };
 
 &tmuctrl_0 { status = "disabled"; };
+&tmuctrl_1 { status = "disabled"; };
+&tmuctrl_2 { status = "disabled"; };
+&tmuctrl_3 { status = "disabled"; };
 
 /* Replace the empty regulators child on the board's existing S2MPS15 node.
  * These voltage constraints can write voltage at probe if firmware differs.
