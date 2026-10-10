@@ -24,6 +24,7 @@
 #include "m86-g3d-domain-platform.h"
 #include "m86-g3d-cmu-context.h"
 #include "m86-g3d-clock-owner.h"
+#include <linux/m86-bus-qos.h>
 struct gpu_rate { unsigned long hz; u32 uv, mif, int_qos; u16 m; u8 p, s, hpm; };
 /* Vendor table_g3d, v15 group10, hpm_freq_table. 852 is ASV-only, not vendor DVFS. */
 static const struct gpu_rate rates[] = {
@@ -55,6 +56,10 @@ struct gpu_dvfs {
  struct device_node *domain_node;
  bool external_domain, mmio_quiesced;
  int domain_error;
+ struct device *bus_dev;
+ struct dev_pm_qos_request bus_qos_req;
+ bool bus_qos_active;
+ u32 cur_mif_qos;
 };
 static DEFINE_MUTEX(instance_lock);
 static struct gpu_dvfs *instance;
@@ -529,6 +534,10 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
  dev_info(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
  if(r->hz>old) {
+  if(d->bus_qos_active && r->mif > d->cur_mif_qos) {
+   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
+   d->cur_mif_qos = r->mif;
+  }
   stage="up-voltage";
   ret=set_voltage(d,r->uv);if(ret)goto fault;
   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
@@ -540,6 +549,10 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
   stage="down-voltage";
   ret=set_voltage(d,r->uv);if(ret)goto fault;
+  if(d->bus_qos_active && r->mif < d->cur_mif_qos) {
+   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
+   d->cur_mif_qos = r->mif;
+  }
  }
  if(d->normal_on_voltage) {
   stage="normal-pair-after";
@@ -916,6 +929,25 @@ static int gpu_probe(struct platform_device *pdev)
  ret=clk_rate_exclusive_get(d->clock);if(ret)return ret;
  ret=devm_add_action_or_reset(&pdev->dev,put_exclusive,d->clock);if(ret)return ret;
  ret=devm_of_clk_add_hw_provider(&pdev->dev,of_clk_hw_simple_get,&d->hw);if(ret)return ret;
+ {
+  struct device_node *bnode=of_parse_phandle(pdev->dev.of_node,"samsung,bus",0);
+  if(bnode) {
+   struct platform_device *bsup=of_find_device_by_node(bnode);
+   of_node_put(bnode);
+   if(bsup) {
+    if(device_link_add(&pdev->dev,&bsup->dev,DL_FLAG_AUTOREMOVE_CONSUMER))
+     d->bus_dev=&bsup->dev;
+    put_device(&bsup->dev);
+   }
+  }
+  if(!d->bus_dev)d->bus_dev=exynos_bus_get_dev("bus-mif");
+  if(!d->bus_dev)d->bus_dev=exynos_bus_get_dev(NULL);
+  if(d->bus_dev) {
+   d->cur_mif_qos=rates[0].mif;
+   ret=dev_pm_qos_add_request(d->bus_dev,&d->bus_qos_req,DEV_PM_QOS_MIN_FREQUENCY,d->cur_mif_qos);
+   if(ret >= 0)d->bus_qos_active=true;
+  }
+ }
  mutex_lock(&instance_lock);
  if(instance){mutex_unlock(&instance_lock);return -EBUSY;}
  instance=d;platform_set_drvdata(pdev,d);mutex_unlock(&instance_lock);
@@ -933,6 +965,11 @@ static int gpu_probe(struct platform_device *pdev)
 }
 static int gpu_remove(struct platform_device *pdev)
 {
+ struct gpu_dvfs *d = platform_get_drvdata(pdev);
+ if (d && d->bus_qos_active) {
+  dev_pm_qos_remove_request(&d->bus_qos_req);
+  d->bus_qos_active = false;
+ }
  mutex_lock(&instance_lock);instance=NULL;mutex_unlock(&instance_lock);
  return 0; /* No voltage/clock/EMA changes during remove. */
 }

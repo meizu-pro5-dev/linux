@@ -714,6 +714,104 @@
  * Add label m86_tmu_monitor to existing sensor node separately before inclusion.
  */
 / {
+	bus_mif_opp_table: bus-mif-opp-table {
+		compatible = "operating-points-v2";
+
+		opp-100000000 {
+			opp-hz = /bits/ 64 <100000000>;
+		};
+		opp-133000000 {
+			opp-hz = /bits/ 64 <133000000>;
+		};
+		opp-167000000 {
+			opp-hz = /bits/ 64 <167000000>;
+		};
+		opp-276000000 {
+			opp-hz = /bits/ 64 <276000000>;
+		};
+		opp-348000000 {
+			opp-hz = /bits/ 64 <348000000>;
+		};
+		opp-416000000 {
+			opp-hz = /bits/ 64 <416000000>;
+		};
+		opp-543000000 {
+			opp-hz = /bits/ 64 <543000000>;
+		};
+		opp-632000000 {
+			opp-hz = /bits/ 64 <632000000>;
+		};
+		opp-828000000 {
+			opp-hz = /bits/ 64 <828000000>;
+		};
+		opp-1026000000 {
+			opp-hz = /bits/ 64 <1026000000>;
+		};
+		opp-1264000000 {
+			opp-hz = /bits/ 64 <1264000000>;
+		};
+		opp-1456000000 {
+			opp-hz = /bits/ 64 <1456000000>;
+		};
+		opp-1552000000 {
+			opp-hz = /bits/ 64 <1552000000>;
+		};
+	};
+
+	bus_int_opp_table: bus-int-opp-table {
+		compatible = "operating-points-v2";
+
+		opp-100000000 {
+			opp-hz = /bits/ 64 <100000000>;
+		};
+		opp-200000000 {
+			opp-hz = /bits/ 64 <200000000>;
+		};
+		opp-266000000 {
+			opp-hz = /bits/ 64 <266000000>;
+		};
+		opp-334000000 {
+			opp-hz = /bits/ 64 <334000000>;
+		};
+		opp-400000000 {
+			opp-hz = /bits/ 64 <400000000>;
+		};
+		opp-500000000 {
+			opp-hz = /bits/ 64 <500000000>;
+		};
+		opp-510000000 {
+			opp-hz = /bits/ 64 <510000000>;
+		};
+		opp-520000000 {
+			opp-hz = /bits/ 64 <520000000>;
+		};
+		opp-530000000 {
+			opp-hz = /bits/ 64 <530000000>;
+		};
+		opp-540000000 {
+			opp-hz = /bits/ 64 <540000000>;
+		};
+		opp-550000000 {
+			opp-hz = /bits/ 64 <550000000>;
+		};
+		opp-560000000 {
+			opp-hz = /bits/ 64 <560000000>;
+		};
+	};
+
+	bus_mif: bus-mif {
+		compatible = "samsung,exynos-bus";
+		operating-points-v2 = <&bus_mif_opp_table>;
+		status = "okay";
+	};
+
+	bus_int: bus-int {
+		compatible = "samsung,exynos-bus";
+		operating-points-v2 = <&bus_int_opp_table>;
+		devfreq = <&bus_mif>;
+		status = "okay";
+	};
+
 	m86_cpu_dvfs: m86-cpu-coordinator {
 		compatible = "meizu,m86-cpu-coordinator";
 		meizu,ema-syscon = <&m86_disp_sysreg>;
@@ -737,7 +835,7 @@
 	meizu,cpu-dvfs-active;
 	meizu,validated-asv-bin = <15 8>;
 	meizu,validated-zero-cpu-ema;
-	meizu,validated-fixed-bus-qos-floor = <1552000>;
+	samsung,bus = <&bus_mif>;
 	meizu,max-validated-khz = <2100000 1500000>;
 };
 
@@ -760,6 +858,7 @@
   #clock-cells = <0>;
   clocks = <&fin_pll>, <&m86_apollo_clk>;
   clock-names = "fin", "apollo";
+  samsung,bus = <&bus_mif>;
   meizu,gpu = <&gpu>;
   meizu,sysreg = <&m86_disp_sysreg>;
   meizu,retained-g3d-ownership;

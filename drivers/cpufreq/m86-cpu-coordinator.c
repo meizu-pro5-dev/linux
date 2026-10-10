@@ -21,6 +21,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/thermal.h>
 #include <linux/workqueue.h>
+#include <linux/m86-bus-qos.h>
 
 struct m86_opp { unsigned int khz, uv, bus_qos; };
 #include "m86-opp.h"
@@ -37,6 +38,7 @@ struct m86_cluster {
 	struct mutex lock;
 	unsigned int cur_khz;
 	unsigned int cur_uv;
+	unsigned int cur_bus_qos;
 };
 struct m86_coord {
 	struct device *dev;
@@ -49,6 +51,10 @@ struct m86_coord {
 	struct delayed_work thermal_work;
 	bool faulted, registered;
 	unsigned int required_bus_qos;
+	struct device *bus_dev;
+	struct dev_pm_qos_request bus_qos_req;
+	bool bus_qos_active;
+	unsigned int cur_bus_qos;
 };
 static struct m86_coord *coordinator;
 /* First bring-up only; disable after collecting manual transition evidence. */
@@ -198,6 +204,8 @@ static void fail_closed(struct m86_coord *d, int error)
 	if (d->faulted)
 		return;
 	d->faulted = true;
+	if (d->bus_qos_active)
+		dev_pm_qos_update_request(&d->bus_qos_req, 1552000);
 	for (i = 0; i < 2; i++) {
 		int r;
 		mutex_lock(&d->cluster[i].lock);
@@ -300,6 +308,10 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		ret = verify_ema(d, ci, old_uv);
 		if (ret) goto fault;
 	}
+	unsigned int target_bus_qos = c->opp[index].bus_qos;
+	unsigned int other_bus_qos = d->cluster[1 - ci].cur_bus_qos;
+	unsigned int max_bus_qos = max(target_bus_qos, other_bus_qos);
+
 	if (target * 1000UL < old_hz) {
 		/* Lower clock/readback first; target low-voltage EMA then rail. */
 		phase = "linear down clock";
@@ -308,7 +320,20 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		phase = "linear down voltage/EMA";
 		ret = set_voltage_ema(d, ci, c->opp[index].uv, target * 1000UL);
 		if (ret) goto fault;
+		c->cur_bus_qos = target_bus_qos;
+		if (max_bus_qos < d->cur_bus_qos) {
+			if (d->bus_qos_active)
+				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
+			d->cur_bus_qos = max_bus_qos;
+			d->required_bus_qos = max_bus_qos;
+		}
 	} else if (target * 1000UL > old_hz) {
+		if (max_bus_qos > d->cur_bus_qos) {
+			if (d->bus_qos_active)
+				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
+			d->cur_bus_qos = max_bus_qos;
+			d->required_bus_qos = max_bus_qos;
+		}
 		/* Raise rail/readback and EMA at old OPP before clock increase. */
 		phase = "linear up voltage/EMA";
 		ret = set_voltage_ema(d, ci, c->opp[index].uv, old_hz);
@@ -316,8 +341,10 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		phase = "linear up clock";
 		ret = set_rate_checked(c, target);
 		if (ret) goto fault;
+		c->cur_bus_qos = target_bus_qos;
 	} else {
 		ret = 0; /* Known exact clock/rail OPP, no hardware transaction. */
+		c->cur_bus_qos = target_bus_qos;
 	}
 	c->cur_khz = target;
 	c->cur_uv = c->opp[index].uv;
@@ -608,13 +635,14 @@ static int m86_probe(struct platform_device *pdev)
 	if (!IS_ENABLED(CONFIG_CPU_FREQ) || !IS_ENABLED(CONFIG_CPU_FREQ_THERMAL) ||
 	    !IS_ENABLED(CONFIG_ENERGY_MODEL))
 		return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap CPU_FREQ/CPU_FREQ_THERMAL config at source line %u\n", __LINE__);
+	bool has_fixed_floor = !of_property_read_u32(pdev->dev.of_node, "meizu,validated-fixed-bus-qos-floor", &bus_floor);
+	if (!has_fixed_floor)
+		bus_floor = 100000;
 	if (of_property_read_u32_array(pdev->dev.of_node, "meizu,validated-asv-bin", bin, 2) ||
 	    bin[0] != 15 || bin[1] != 8 ||
 	    !of_property_read_bool(pdev->dev.of_node, "meizu,validated-zero-cpu-ema") ||
-	    of_property_read_u32(pdev->dev.of_node, "meizu,validated-fixed-bus-qos-floor", &bus_floor) ||
-	    bus_floor < 828000 ||
 	    of_property_read_u32_array(pdev->dev.of_node, "meizu,max-validated-khz", ceilings, 2))
-		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap ASV/EMA/MIF/ceiling DT calibration at source line %u\n", __LINE__);
+		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap ASV/EMA/ceiling DT calibration at source line %u\n", __LINE__);
 	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
 	if (!d) return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap gate at source line %u\n", __LINE__);
 	d->dev = &pdev->dev;
@@ -629,6 +657,26 @@ static int m86_probe(struct platform_device *pdev)
 	if (!d->topc) return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap TOPC mapping at source line %u\n", __LINE__);
 	d->ema = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "meizu,ema-syscon");
 	if (IS_ERR(d->ema)) return dev_err_probe(&pdev->dev, PTR_ERR(d->ema), "bootstrap EMA syscon at source line %u\n", __LINE__);
+	/* Attach to Exynos Bus Device PM QoS provider if specified or present */
+	node = of_parse_phandle(pdev->dev.of_node, "samsung,bus", 0);
+	if (node) {
+		supplier = of_find_device_by_node(node);
+		of_node_put(node);
+		if (!supplier)
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap bus supplier at source line %u\n", __LINE__);
+		if (!device_link_add(&pdev->dev, &supplier->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+			put_device(&supplier->dev);
+			return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap bus device link at source line %u\n", __LINE__);
+		}
+		d->bus_dev = &supplier->dev;
+		put_device(&supplier->dev);
+	}
+	if (!d->bus_dev)
+		d->bus_dev = exynos_bus_get_dev("bus-mif");
+	if (!d->bus_dev)
+		d->bus_dev = exynos_bus_get_dev(NULL);
+	if (!d->bus_dev && has_fixed_floor && bus_floor < 828000)
+		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap static bus floor too low without bus QoS at source line %u\n", __LINE__);
 	/* Supplier link ensures consumer removal precedes TMU resource teardown. */
 	node = of_parse_phandle(pdev->dev.of_node, "meizu,thermal-monitor", 0);
 	if (!node) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap thermal monitor phandle at source line %u\n", __LINE__);
@@ -682,8 +730,10 @@ static int m86_probe(struct platform_device *pdev)
 		c->max_khz = ceilings[i];
 		while (c->nr && c->opp[c->nr - 1].khz > c->max_khz) c->nr--;
 		if (!c->nr || c->opp[c->nr - 1].khz != c->max_khz) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap validated ceiling absent from OPP table at source line %u\n", __LINE__);
-		for (j = 0; j < c->nr; j++)
-			if (c->opp[j].bus_qos > bus_floor) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap OPP bus vote exceeds fixed MIF floor at source line %u\n", __LINE__);
+		if (!d->bus_dev) {
+			for (j = 0; j < c->nr; j++)
+				if (c->opp[j].bus_qos > bus_floor) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap OPP bus vote exceeds fixed MIF floor at source line %u\n", __LINE__);
+		}
 		ret = link_clock_supplier(pdev, i);
 		if (ret) return dev_err_probe(&pdev->dev, ret, "bootstrap clock supplier link at source line %u\n", __LINE__);
 		c->clk = devm_clk_get(&pdev->dev, name);
@@ -707,8 +757,10 @@ static int m86_probe(struct platform_device *pdev)
 		c->cur_khz = clk_get_rate(c->clk) / 1000;
 		/* No registration-time voltage/clock/EMA write. Require known boot OPP. */
 		for (j = 0; j < c->nr; j++)
-			if (clk_get_rate(c->clk) == c->opp[j].khz * 1000UL && uv == c->opp[j].uv)
+			if (clk_get_rate(c->clk) == c->opp[j].khz * 1000UL && uv == c->opp[j].uv) {
 				known = true;
+				c->cur_bus_qos = c->opp[j].bus_qos;
+			}
 		if (!known) dev_err(d->dev, "bootstrap cluster=%s unknown clock=%lu uv=%d\n", name, clk_get_rate(c->clk), uv);
 		if (!known) return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap unknown boot frequency/voltage OPP at source line %u\n", __LINE__);
 		/* Boot EMA must already match the measured zero-fuse vendor policy.
@@ -738,10 +790,33 @@ static int m86_probe(struct platform_device *pdev)
 		c->table[c->nr].frequency = CPUFREQ_TABLE_END;
 		c->thermal_cap = cap_for_temp(c, temp);
 	}
+	d->cur_bus_qos = max(d->cluster[0].cur_bus_qos, d->cluster[1].cur_bus_qos);
+	if (!d->cur_bus_qos)
+		d->cur_bus_qos = bus_floor;
+	d->required_bus_qos = d->cur_bus_qos;
+
+	if (d->bus_dev) {
+		ret = dev_pm_qos_add_request(d->bus_dev, &d->bus_qos_req,
+					     DEV_PM_QOS_MIN_FREQUENCY, d->cur_bus_qos);
+		if (ret >= 0) {
+			d->bus_qos_active = true;
+			dev_info(d->dev, "Device PM QoS request registered on %s: initial floor %u kHz\n",
+				 dev_name(d->bus_dev), d->cur_bus_qos);
+		} else {
+			dev_warn(d->dev, "Device PM QoS add request failed (%d)\n", ret);
+		}
+	}
 	coordinator = d;
 	platform_set_drvdata(pdev, d);
 	ret = cpufreq_register_driver(&m86_cpufreq);
-	if (ret) { coordinator = NULL; return dev_err_probe(&pdev->dev, ret, "bootstrap cpufreq registration at source line %u\n", __LINE__); }
+	if (ret) {
+		if (d->bus_qos_active) {
+			dev_pm_qos_remove_request(&d->bus_qos_req);
+			d->bus_qos_active = false;
+		}
+		coordinator = NULL;
+		return dev_err_probe(&pdev->dev, ret, "bootstrap cpufreq registration at source line %u\n", __LINE__);
+	}
 	d->registered = true;
 	schedule_delayed_work(&d->thermal_work, 0);
 	return 0;
@@ -761,6 +836,10 @@ static int m86_remove(struct platform_device *pdev)
 		orderly_poweroff(true);
 	mutex_unlock(&d->lock);
 	if (d->registered) cpufreq_unregister_driver(&m86_cpufreq);
+	if (d->bus_qos_active) {
+		dev_pm_qos_remove_request(&d->bus_qos_req);
+		d->bus_qos_active = false;
+	}
 	coordinator = NULL;
 	return 0;
 }
