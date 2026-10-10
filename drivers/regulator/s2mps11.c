@@ -4,6 +4,12 @@
 //              http://www.samsung.com
 
 #include <linux/bug.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
+#include <linux/clk-provider.h>
+#include <linux/clk.h>
+#include <linux/sched.h>
+#include <linux/regulator/consumer.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/slab.h>
@@ -24,6 +30,14 @@
 /* The highest number of possible regulators for supported devices. */
 #define S2MPS_REGULATOR_MAX		S2MPS13_REGULATOR_MAX
 struct s2mps11_info {
+	struct mutex m86_cpu_lock;
+	u32 m86_cpu_ctrl[2];
+	bool m86_cpu_faulted;
+	bool m86_cpu_authorized;
+	void *m86_cpu_authorized_context;
+	struct task_struct *m86_cpu_authorized_task;
+	struct clk *m86_cpu_authorized_clock;
+	unsigned int m86_cpu_authorized_uv;
 	int ramp_delay2;
 	int ramp_delay34;
 	int ramp_delay5;
@@ -45,6 +59,8 @@ struct s2mps11_info {
 	 */
 	struct gpio_desc **ext_control_gpiod;
 };
+
+#include "m86-cpu-buck-active.h"
 
 static int get_ramp_delay(int ramp_delay)
 {
@@ -706,6 +722,13 @@ static const struct regulator_ops s2mps15_reg_ldo_ops = {
 	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
 };
 
+/* Experimental m86 CPU rail observation: no hardware write callbacks. */
+static const struct regulator_ops m86_cpu_buck_readonly_ops = {
+	.list_voltage = regulator_list_voltage_linear_range,
+	.is_enabled = regulator_is_enabled_regmap,
+	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+};
+
 static const struct regulator_ops s2mps15_reg_buck_ops = {
 	.list_voltage		= regulator_list_voltage_linear_range,
 	.map_voltage		= regulator_map_voltage_linear_range,
@@ -1132,6 +1155,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 	if (!s2mps11)
 		return -ENOMEM;
 
+	mutex_init(&s2mps11->m86_cpu_lock);
 	s2mps11->dev_type = platform_get_device_id(pdev)->driver_data;
 	switch (s2mps11->dev_type) {
 	case S2MPS11X:
@@ -1188,6 +1212,96 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 	config.driver_data = s2mps11;
 	for (i = 0; i < rdev_num; i++) {
 		struct regulator_dev *regulator;
+		const struct regulator_desc *desc = &regulators[i];
+		config.driver_data = s2mps11;
+
+		/* M86 bring-up must leave undescribed firmware-owned rails alone. */
+		if (iodev->device_type == S2MPS15X &&
+		    of_machine_is_compatible("meizu,m86") && !rdata[i].of_node)
+			continue;
+
+		if (iodev->device_type == S2MPS15X &&
+		    of_machine_is_compatible("meizu,m86") &&
+		    (of_property_read_bool(rdata[i].of_node, "meizu,cpu-read-only") ||
+		     of_property_read_bool(rdata[i].of_node, "meizu,cpu-dvfs-active"))) {
+			struct regulator_desc *cpu_desc;
+			struct linear_range *range;
+			u32 base, revision;
+
+			if (i != S2MPS15_BUCK2 && i != S2MPS15_BUCK3) {
+				ret = -EINVAL;
+				goto out;
+			}
+			/* Vendor uses the nonzero silicon revision's Rev1 range. */
+			ret = regmap_read(iodev->regmap_pmic, S2MPS15_REG_ID,
+					  &revision);
+			if (ret)
+				goto out;
+			base = (revision & 0xf) ? 300000 : 400000;
+			cpu_desc = devm_kmemdup(&pdev->dev, desc,
+					       sizeof(*cpu_desc), GFP_KERNEL);
+			range = devm_kzalloc(&pdev->dev, sizeof(*range), GFP_KERNEL);
+			if (!cpu_desc || !range) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			*range = (struct linear_range)
+				REGULATOR_LINEAR_RANGE(base, 0, 0xff, 6250);
+			cpu_desc->ops = &m86_cpu_buck_readonly_ops;
+			if (of_property_read_bool(rdata[i].of_node,
+						  "meizu,cpu-dvfs-active")) {
+				unsigned int ctrl, dvs, idx;
+				struct m86_cpu_rail_context *ctx;
+
+				idx = i == S2MPS15_BUCK2 ? 0 : 1;
+				if (revision != 0x12) {
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
+				ret = regmap_read(iodev->regmap_pmic,
+						  desc->enable_reg, &ctrl);
+				if (ret)
+					goto out;
+				ret = regmap_read(iodev->regmap_pmic,
+					idx ? S2MPS15_REG_LDODVS3 :
+					S2MPS15_REG_LDODVS1, &dvs);
+				if (ret)
+					goto out;
+				/* Accept both Standby-ON (0x78/0x58) and Normal-ON (0xf8/0xd8), plus unnamed bit0. */
+				if ((ctrl & 0x7e) != (idx ? 0x58 : 0x78) ||
+				    (dvs & 0xe3) != 0x80) {
+					ret = -EOPNOTSUPP;
+					goto out;
+				}
+				ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
+				if (!ctx) { ret = -ENOMEM; goto out; }
+				ctx->info = s2mps11;
+				ctx->index = idx;
+				mutex_lock(&m86_context_lock);
+				if (m86_active_context[idx]) {
+					mutex_unlock(&m86_context_lock);
+					ret = -EBUSY;
+					goto out;
+				}
+				m86_active_context[idx] = ctx;
+				mutex_unlock(&m86_context_lock);
+				ret = devm_add_action_or_reset(&pdev->dev, m86_clear_context, ctx);
+				if (ret) goto out;
+				config.driver_data = ctx;
+				s2mps11->m86_cpu_ctrl[idx] = ctrl;
+				cpu_desc->ops = &m86_cpu_buck_active_ops;
+				dev_info(&pdev->dev,
+					 "CPU voltage-only candidate enabled; inherited ctrl=%#x dvs=%#x\n",
+					 ctrl, dvs);
+			}
+
+			cpu_desc->linear_ranges = range;
+			cpu_desc->n_linear_ranges = 1;
+			cpu_desc->n_voltages = 256;
+			desc = cpu_desc;
+			dev_info(&pdev->dev, "%s active DVFS decode base=%u uV\n",
+				 desc->name, base);
+		}
 
 		config.init_data = rdata[i].init_data;
 		config.of_node = rdata[i].of_node;
@@ -1199,7 +1313,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 		if (config.ena_gpiod)
 			devm_gpiod_unhinge(&pdev->dev, config.ena_gpiod);
 		regulator = devm_regulator_register(&pdev->dev,
-						&regulators[i], &config);
+						desc, &config);
 		if (IS_ERR(regulator)) {
 			ret = PTR_ERR(regulator);
 			dev_err(&pdev->dev, "regulator init failed for %d\n",

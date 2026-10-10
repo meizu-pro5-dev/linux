@@ -102,3 +102,27 @@ config TESLA_FSD_COMMON_CLK
 	help
 	  Support for the clock controller present on the Tesla FSD SoC.
 	  Choose Y here only if you build for this SoC.
+
+config M86_CPU_CLOCKS
+	tristate "Meizu PRO 5 CPU clocks"
+	depends on EXYNOS_ARM64_COMMON_CLK && SMP
+	help
+	  Explicit CPU clock transitions for the two Exynos7420 clusters.
+
+config M86_GPU_DVFS
+	tristate "PRO5 retained GPU clock/MCS coordination (experimental)"
+	depends on ARCH_EXYNOS && PM && PM_OPP && THERMAL && I2C && CPU_FREQ && REGULATOR && MFD_SEC_CORE
+	depends on MFD_SYSCON
+	select REGULATOR_M86_GPU_READONLY
+	help
+	  Explicit retained-domain PRO5 GPU CCF and Panfrost target transactions.
+	  No probe voltage/clock writes; active voltage requires separately validated
+	  BUCK6 ownership and an explicit DT flag. Keep the first ceiling266MHz.
+
+config M86_G3D_DOMAIN_EXPERIMENT
+ bool "PRO5 experimental retained-rail G3D provider"
+ depends on ARCH_EXYNOS && PM_GENERIC_DOMAINS && OF
+ depends on M86_GPU_DVFS=y && M86_TMU_MONITOR=y && DRM_PANFROST=y
+ help
+   Independent compile/integration candidate. Requires the companion clock,
+   TMU, consumer idle and coordinator glue patches. No board DT enables this.

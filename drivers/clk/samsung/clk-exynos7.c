@@ -6,6 +6,12 @@
 
 #include <linux/clk-provider.h>
 #include <linux/of.h>
+#include <linux/io.h>
+#include <linux/math64.h>
+#include <linux/lockdep.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/regmap.h>
 
 #include "clk.h"
 #include <dt-bindings/clock/exynos7-clk.h>
@@ -33,6 +39,11 @@
 #define ENABLE_SCLK_TOPC1	0x0A04
 
 static const struct samsung_fixed_factor_clock topc_fixed_factor_clks[] __initconst = {
+	FFACTOR(0, "ffac_topc_bus1_pll_div4", "ffac_topc_bus1_pll_div2", 1, 2, 0),
+	FFACTOR(0, "ffac_topc_cc_pll_div4", "ffac_topc_cc_pll_div2", 1, 2, 0),
+	FFACTOR(0, "ffac_topc_mfc_pll_div4", "ffac_topc_mfc_pll_div2", 1, 2, 0),
+	FFACTOR(0, "ffac_topc_bus0_half_div2", "mout_topc_bus0_pll_half", 1, 2, 0),
+	FFACTOR(0, "ffac_topc_bus0_half_div4", "ffac_topc_bus0_half_div2", 1, 2, 0),
 	FFACTOR(0, "ffac_topc_bus0_pll_div2", "mout_topc_bus0_pll", 1, 2, 0),
 	FFACTOR(0, "ffac_topc_bus0_pll_div4",
 		"ffac_topc_bus0_pll_div2", 1, 2, 0),
@@ -65,6 +76,14 @@ PNAME(mout_topc_mfc_pll_half_p) = { "mout_topc_mfc_pll",
 PNAME(mout_topc_bus0_pll_out_p) = {"mout_topc_bus0_pll",
 	"ffac_topc_bus0_pll_div2"};
 
+/* 7420 BUS0 selector has twelve sources, distinct from the four-source group. */
+PNAME(mout_aclk_bus0_532_p) = { "mout_topc_bus0_pll_half",
+	"mout_topc_bus1_pll", "mout_topc_cc_pll", "mout_topc_mfc_pll",
+	"ffac_topc_bus0_half_div2", "ffac_topc_bus1_pll_div2",
+	"ffac_topc_cc_pll_div2", "ffac_topc_mfc_pll_div2",
+	"ffac_topc_bus0_half_div4", "ffac_topc_bus1_pll_div4",
+	"ffac_topc_cc_pll_div4", "ffac_topc_mfc_pll_div4" };
+
 static const unsigned long topc_clk_regs[] __initconst = {
 	CC_PLL_LOCK,
 	BUS0_PLL_LOCK,
@@ -85,7 +104,18 @@ static const unsigned long topc_clk_regs[] __initconst = {
 	DIV_TOPC3,
 };
 
+PNAME(m86_topc_cpu_safe_p) = { "mout_topc_bus0_pll",
+	"ffac_topc_bus0_pll_div2", "mout_topc_bus1_pll", "mout_topc_cc_pll" };
+
 static const struct samsung_mux_clock topc_mux_clks[] __initconst = {
+	MUX_F(CLK_MOUT_SCLK_BUS_PLL_G3D, "mout_sclk_bus_pll_g3d", m86_topc_cpu_safe_p,
+		MUX_SEL_TOPC1, 20, 2, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+	MUX_F(CLK_MOUT_BUS0_ATLAS, "mout_sclk_bus0_pll_atlas", m86_topc_cpu_safe_p,
+		MUX_SEL_TOPC1, 4, 2, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+	MUX_F(CLK_MOUT_BUS0_APOLLO, "mout_sclk_bus0_pll_apollo", m86_topc_cpu_safe_p,
+		MUX_SEL_TOPC1, 8, 2, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+	MUX(CLK_MOUT_ACLK_BUS0_532, "mout_aclk_bus0_532", mout_aclk_bus0_532_p,
+		MUX_SEL_TOPC2, 8, 4),
 	MUX(0, "mout_topc_bus0_pll", mout_topc_bus0_pll_ctrl_p,
 		MUX_SEL_TOPC0, 0, 1),
 	MUX(0, "mout_topc_bus1_pll", mout_topc_bus1_pll_ctrl_p,
@@ -115,6 +145,11 @@ static const struct samsung_mux_clock topc_mux_clks[] __initconst = {
 };
 
 static const struct samsung_div_clock topc_div_clks[] __initconst = {
+	DIV_F(CLK_DOUT_SCLK_BUS_PLL_G3D, "dout_sclk_bus_pll_g3d",
+		"mout_sclk_bus_pll_g3d", DIV_TOPC3, 20, 4,
+		CLK_GET_RATE_NOCACHE, CLK_DIVIDER_READ_ONLY),
+	DIV(CLK_DOUT_ACLK_BUS0_532, "dout_aclk_bus0_532", "mout_aclk_bus0_532",
+		DIV_TOPC0, 8, 4),
 	DIV(DOUT_ACLK_CCORE_133, "dout_aclk_ccore_133", "mout_aclk_ccore_133",
 		DIV_TOPC0, 4, 4),
 
@@ -141,6 +176,10 @@ static const struct samsung_pll_rate_table pll1460x_24mhz_tbl[] __initconst = {
 };
 
 static const struct samsung_gate_clock topc_gate_clks[] __initconst = {
+	GATE(CLK_TOP_SCLK_BUS_PLL_G3D, "top_sclk_bus_pll_g3d",
+		"dout_sclk_bus_pll_g3d", ENABLE_SCLK_TOPC1, 9, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_BUS0_532, "top_aclk_bus0_532", "dout_aclk_bus0_532",
+		ENABLE_ACLK_TOPC0, 8, CLK_IS_CRITICAL, 0),
 	GATE(ACLK_CCORE_133, "aclk_ccore_133", "dout_aclk_ccore_133",
 		ENABLE_ACLK_TOPC0, 4, CLK_IS_CRITICAL, 0),
 
@@ -148,7 +187,7 @@ static const struct samsung_gate_clock topc_gate_clks[] __initconst = {
 		ENABLE_ACLK_TOPC1, 20, 0, 0),
 
 	GATE(ACLK_PERIS_66, "aclk_peris_66", "dout_aclk_peris_66",
-		ENABLE_ACLK_TOPC1, 24, 0, 0),
+		ENABLE_ACLK_TOPC1, 24, CLK_IS_CRITICAL, 0),
 
 	GATE(SCLK_AUD_PLL, "sclk_aud_pll", "dout_sclk_aud_pll",
 		ENABLE_SCLK_TOPC1, 20, 0, 0),
@@ -215,12 +254,15 @@ CLK_OF_DECLARE(exynos7_clk_topc, "samsung,exynos7-clock-topc",
 #define MUX_SEL_TOP0_PERIC1		0x0234
 #define MUX_SEL_TOP0_PERIC2		0x0238
 #define MUX_SEL_TOP0_PERIC3		0x023C
+#define MUX_SEL_TOP0_DISP		0x0220
 #define DIV_TOP03			0x060C
 #define DIV_TOP0_PERIC0			0x0630
 #define DIV_TOP0_PERIC1			0x0634
 #define DIV_TOP0_PERIC2			0x0638
 #define DIV_TOP0_PERIC3			0x063C
+#define DIV_TOP0_DISP			0x0620
 #define ENABLE_ACLK_TOP03		0x080C
+#define ENABLE_SCLK_TOP0_DISP		0x0A20
 #define ENABLE_SCLK_TOP0_PERIC0		0x0A30
 #define ENABLE_SCLK_TOP0_PERIC1		0x0A34
 #define ENABLE_SCLK_TOP0_PERIC2		0x0A38
@@ -252,19 +294,32 @@ PNAME(mout_top0_group3) = {"ioclk_audiocdclk0",
 PNAME(mout_top0_group4) = {"ioclk_audiocdclk1", "mout_top0_aud_pll_user",
 	"mout_top0_bus0_pll_half", "mout_top0_bus1_pll_half"};
 
+PNAME(mout_top0_disp_p) = {"mout_top0_bus0_pll_half",
+	"mout_top0_bus1_pll_half", "mout_top0_cc_pll_half",
+	"mout_top0_mfc_pll_half"};
+PNAME(mout_aclk_disp_400_p) = {"mout_top0_bus0_pll_user",
+	"mout_top0_bus1_pll_user", "mout_top0_cc_pll_user",
+	"mout_top0_mfc_pll_user", "ffac_top0_bus0_pll_div2",
+	"ffac_top0_bus1_pll_div2", "ffac_top0_cc_pll_div2",
+	"ffac_top0_mfc_pll_div2"};
+
 static const unsigned long top0_clk_regs[] __initconst = {
 	MUX_SEL_TOP00,
 	MUX_SEL_TOP01,
 	MUX_SEL_TOP03,
+	MUX_SEL_TOP0_DISP,
 	MUX_SEL_TOP0_PERIC0,
 	MUX_SEL_TOP0_PERIC1,
 	MUX_SEL_TOP0_PERIC2,
 	MUX_SEL_TOP0_PERIC3,
 	DIV_TOP03,
+	DIV_TOP0_DISP,
 	DIV_TOP0_PERIC0,
 	DIV_TOP0_PERIC1,
 	DIV_TOP0_PERIC2,
 	DIV_TOP0_PERIC3,
+	ENABLE_ACLK_TOP03,
+	ENABLE_SCLK_TOP0_DISP,
 	ENABLE_SCLK_TOP0_PERIC0,
 	ENABLE_SCLK_TOP0_PERIC1,
 	ENABLE_SCLK_TOP0_PERIC2,
@@ -272,6 +327,8 @@ static const unsigned long top0_clk_regs[] __initconst = {
 };
 
 static const struct samsung_mux_clock top0_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_SCLK_DSD, "mout_sclk_dsd", mout_top0_disp_p,
+		MUX_SEL_TOP0_DISP, 16, 2),
 	MUX(0, "mout_top0_aud_pll_user", mout_top0_aud_pll_user_p,
 		MUX_SEL_TOP00, 0, 1),
 	MUX(0, "mout_top0_mfc_pll_user", mout_top0_mfc_pll_user_p,
@@ -287,7 +344,7 @@ static const struct samsung_mux_clock top0_mux_clks[] __initconst = {
 		MUX_SEL_TOP01, 4, 1),
 	MUX(0, "mout_top0_cc_pll_half", mout_top0_cc_pll_half_p,
 		MUX_SEL_TOP01, 8, 1),
-	MUX(0, "mout_top0_bus1_pll_half", mout_top0_bus1_pll_half_p,
+	MUX(CLK_MOUT_TOP0_BUS1_PLL_HALF, "mout_top0_bus1_pll_half", mout_top0_bus1_pll_half_p,
 		MUX_SEL_TOP01, 12, 1),
 	MUX(0, "mout_top0_bus0_pll_half", mout_top0_bus0_pll_half_p,
 		MUX_SEL_TOP01, 16, 1),
@@ -309,9 +366,18 @@ static const struct samsung_mux_clock top0_mux_clks[] __initconst = {
 	MUX(0, "mout_sclk_uart1", mout_top0_group1, MUX_SEL_TOP0_PERIC3, 12, 2),
 	MUX(0, "mout_sclk_uart0", mout_top0_group1, MUX_SEL_TOP0_PERIC3, 16, 2),
 	MUX(0, "mout_sclk_spi4", mout_top0_group1, MUX_SEL_TOP0_PERIC3, 20, 2),
+
+	MUX(CLK_MOUT_ACLK_DISP_400, "mout_aclk_disp_400", mout_aclk_disp_400_p,
+		MUX_SEL_TOP03, 28, 3),
+	MUX(CLK_MOUT_SCLK_DECON_INT_ECLK, "mout_sclk_decon_int_eclk",
+		mout_top0_disp_p, MUX_SEL_TOP0_DISP, 28, 2),
+	MUX(CLK_MOUT_SCLK_DECON_VCLK, "mout_sclk_decon_vclk",
+		mout_top0_disp_p, MUX_SEL_TOP0_DISP, 20, 2),
 };
 
 static const struct samsung_div_clock top0_div_clks[] __initconst = {
+	DIV(CLK_DOUT_SCLK_DSD, "dout_sclk_dsd", "mout_sclk_dsd",
+		DIV_TOP0_DISP, 16, 4),
 	DIV(DOUT_ACLK_PERIC1, "dout_aclk_peric1_66", "mout_aclk_peric1_66",
 		DIV_TOP03, 12, 6),
 	DIV(DOUT_ACLK_PERIC0, "dout_aclk_peric0_66", "mout_aclk_peric0_66",
@@ -332,13 +398,30 @@ static const struct samsung_div_clock top0_div_clks[] __initconst = {
 	DIV(0, "dout_sclk_uart1", "mout_sclk_uart1", DIV_TOP0_PERIC3, 12, 4),
 	DIV(0, "dout_sclk_uart0", "mout_sclk_uart0", DIV_TOP0_PERIC3, 16, 4),
 	DIV(0, "dout_sclk_spi4", "mout_sclk_spi4", DIV_TOP0_PERIC3, 20, 12),
+
+	DIV(CLK_DOUT_ACLK_DISP_400, "dout_aclk_disp_400", "mout_aclk_disp_400",
+		DIV_TOP03, 28, 4),
+	DIV(CLK_DOUT_SCLK_DECON_INT_ECLK, "dout_sclk_decon_int_eclk",
+		"mout_sclk_decon_int_eclk", DIV_TOP0_DISP, 28, 4),
+	DIV(CLK_DOUT_SCLK_DECON_VCLK, "dout_sclk_decon_vclk",
+		"mout_sclk_decon_vclk", DIV_TOP0_DISP, 20, 4),
 };
 
 static const struct samsung_gate_clock top0_gate_clks[] __initconst = {
+	GATE(CLK_TOP_SCLK_DSD, "top_sclk_dsd", "dout_sclk_dsd",
+		ENABLE_SCLK_TOP0_DISP, 16, 0, 0),
+	/*
+	 * These clocks are required for the CMU_PERIC0/1 registers access,
+	 * keep them enabled permanently until proper runtime PM support is
+	 * added. Otherwise disabling a PERIC child clock (e.g. an UART gate)
+	 * gates the CMU register interface and the next access hangs the bus.
+	 */
 	GATE(CLK_ACLK_PERIC0_66, "aclk_peric0_66", "dout_aclk_peric0_66",
-		ENABLE_ACLK_TOP03, 20, CLK_SET_RATE_PARENT, 0),
+		ENABLE_ACLK_TOP03, 20, CLK_SET_RATE_PARENT |
+		CLK_IS_CRITICAL, 0),
 	GATE(CLK_ACLK_PERIC1_66, "aclk_peric1_66", "dout_aclk_peric1_66",
-		ENABLE_ACLK_TOP03, 12, CLK_SET_RATE_PARENT, 0),
+		ENABLE_ACLK_TOP03, 12, CLK_SET_RATE_PARENT |
+		CLK_IS_CRITICAL, 0),
 
 	GATE(CLK_SCLK_SPDIF, "sclk_spdif", "dout_sclk_spdif",
 		ENABLE_SCLK_TOP0_PERIC0, 4, CLK_SET_RATE_PARENT, 0),
@@ -366,6 +449,13 @@ static const struct samsung_gate_clock top0_gate_clks[] __initconst = {
 		ENABLE_SCLK_TOP0_PERIC3, 16, 0, 0),
 	GATE(CLK_SCLK_SPI4, "sclk_spi4", "dout_sclk_spi4",
 		ENABLE_SCLK_TOP0_PERIC3, 20, CLK_SET_RATE_PARENT, 0),
+
+	GATE(CLK_ACLK_DISP_400, "top_aclk_disp_400", "dout_aclk_disp_400",
+		ENABLE_ACLK_TOP03, 28, 0, 0),
+	GATE(CLK_SCLK_DECON_INT_ECLK, "top_sclk_decon_int_eclk",
+		"dout_sclk_decon_int_eclk", ENABLE_SCLK_TOP0_DISP, 28, 0, 0),
+	GATE(CLK_SCLK_DECON_VCLK, "top_sclk_decon_vclk",
+		"dout_sclk_decon_vclk", ENABLE_SCLK_TOP0_DISP, 20, 0, 0),
 };
 
 static const struct samsung_fixed_factor_clock top0_fixed_factor_clks[] __initconst = {
@@ -595,6 +685,7 @@ PNAME(mout_aclk_ccore_133_user_p)	= { "fin_pll", "aclk_ccore_133" };
 
 static const unsigned long ccore_clk_regs[] __initconst = {
 	MUX_SEL_CCORE,
+	ENABLE_ACLK_CCORE0,
 	ENABLE_PCLK_CCORE,
 };
 
@@ -606,6 +697,15 @@ static const struct samsung_mux_clock ccore_mux_clks[] __initconst = {
 static const struct samsung_gate_clock ccore_gate_clks[] __initconst = {
 	GATE(PCLK_RTC, "pclk_rtc", "mout_aclk_ccore_133_user",
 		ENABLE_PCLK_CCORE, 8, 0, 0),
+	/*
+	 * G3D async-bridge (LH) clocks.  The vendor enables them as part of the
+	 * G3D power-on sequence; the GPU needs them for its bus accesses.  Keep
+	 * them always on so the Mali GPU does not hit bus faults / job timeouts.
+	 */
+	GATE(0, "aclk_lh_g3d0", "mout_aclk_ccore_133_user",
+		ENABLE_ACLK_CCORE0, 22, CLK_IS_CRITICAL, 0),
+	GATE(0, "aclk_lh_g3d1", "mout_aclk_ccore_133_user",
+		ENABLE_ACLK_CCORE0, 23, CLK_IS_CRITICAL, 0),
 };
 
 static const struct samsung_cmu_info ccore_cmu_info __initconst = {
@@ -841,6 +941,8 @@ static const struct samsung_mux_clock peris_mux_clks[] __initconst = {
 };
 
 static const struct samsung_gate_clock peris_gate_clks[] __initconst = {
+	GATE(PCLK_MCT, "pclk_mct", "mout_aclk_peris_66_user",
+		ENABLE_PCLK_PERIS, 5, 0, 0),
 	GATE(PCLK_WDT, "pclk_wdt", "mout_aclk_peris_66_user",
 		ENABLE_PCLK_PERIS, 6, 0, 0),
 	GATE(PCLK_TMU, "pclk_tmu_apbif", "mout_aclk_peris_66_user",
@@ -999,6 +1101,9 @@ CLK_OF_DECLARE(exynos7_clk_fsys0, "samsung,exynos7-clock-fsys0",
 PNAME(mout_aclk_fsys1_200_user_p)	= { "fin_pll", "aclk_fsys1_200" };
 PNAME(mout_fsys1_group_p)	= { "fin_pll", "fin_pll_26m",
 				"sclk_phy_fsys1_26m" };
+PNAME(mout_pcie_wifi1_tx0_p) = { "fin_pll", "phyclk_pcie_wifi1_tx0" };
+PNAME(mout_pcie_wifi1_rx0_p) = { "fin_pll", "phyclk_pcie_wifi1_rx0" };
+PNAME(mout_sclk_phy_fsys1_user_p) = { "fin_pll", "sclk_phy_fsys1" };
 PNAME(mout_sclk_mmc0_user_p)		= { "fin_pll", "sclk_mmc0" };
 PNAME(mout_sclk_mmc1_user_p)		= { "fin_pll", "sclk_mmc1" };
 PNAME(mout_sclk_ufsunipro20_user_p)  = { "fin_pll", "sclk_ufsunipro20" };
@@ -1008,6 +1113,9 @@ PNAME(mout_phyclk_ufs20_rx1_user_p) = { "fin_pll", "phyclk_ufs20_rx1_symbol" };
 
 /* fixed rate clocks used in the FSYS1 block */
 static const struct samsung_fixed_rate_clock fixed_rate_clks_fsys1[] __initconst = {
+	/* Actual PHY output rate from official7420 vendor clock table. */
+	FRATE(PHYCLK_PCIE_WIFI1_TX0, "phyclk_pcie_wifi1_tx0", NULL, 0, 250000000),
+	FRATE(PHYCLK_PCIE_WIFI1_RX0, "phyclk_pcie_wifi1_rx0", NULL, 0, 250000000),
 	FRATE(PHYCLK_UFS20_TX0_SYMBOL, "phyclk_ufs20_tx0_symbol", NULL,
 			0, 300000000),
 	FRATE(PHYCLK_UFS20_RX0_SYMBOL, "phyclk_ufs20_rx0_symbol", NULL,
@@ -1029,9 +1137,15 @@ static const unsigned long fsys1_clk_regs[] __initconst = {
 };
 
 static const struct samsung_mux_clock fsys1_mux_clks[] __initconst = {
+	MUX(MOUT_PHYCLK_PCIE_WIFI1_TX0_USER, "mout_phyclk_pcie_wifi1_tx0_user",
+		mout_pcie_wifi1_tx0_p, MUX_SEL_FSYS12, 12, 1),
+	MUX(MOUT_PHYCLK_PCIE_WIFI1_RX0_USER, "mout_phyclk_pcie_wifi1_rx0_user",
+		mout_pcie_wifi1_rx0_p, MUX_SEL_FSYS12, 8, 1),
+	MUX(MOUT_SCLK_PHY_FSYS1_USER, "mout_sclk_phy_fsys1_user",
+		mout_sclk_phy_fsys1_user_p, MUX_SEL_FSYS11, 16, 1),
 	MUX(MOUT_FSYS1_PHYCLK_SEL1, "mout_fsys1_phyclk_sel1",
 		mout_fsys1_group_p, MUX_SEL_FSYS10, 16, 2),
-	MUX(0, "mout_fsys1_phyclk_sel0", mout_fsys1_group_p,
+	MUX(MOUT_FSYS1_PHYCLK_SEL0, "mout_fsys1_phyclk_sel0", mout_fsys1_group_p,
 		 MUX_SEL_FSYS10, 20, 2),
 	MUX(0, "mout_aclk_fsys1_200_user", mout_aclk_fsys1_200_user_p,
 		MUX_SEL_FSYS10, 28, 1),
@@ -1052,11 +1166,38 @@ static const struct samsung_mux_clock fsys1_mux_clks[] __initconst = {
 };
 
 static const struct samsung_div_clock fsys1_div_clks[] __initconst = {
+	DIV(DOUT_PCLK_COMBO_PHY_WIFI1, "dout_pclk_combo_phy_wifi1",
+		"mout_aclk_fsys1_200_user", DIV_FSYS1, 8, 2),
 	DIV(DOUT_PCLK_FSYS1, "dout_pclk_fsys1", "mout_aclk_fsys1_200_user",
 		DIV_FSYS1, 0, 2),
 };
 
 static const struct samsung_gate_clock fsys1_gate_clks[] __initconst = {
+	GATE(ACLK_XIU_WIFI1X, "aclk_xiu_wifi1x", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 24, 0, 0),
+	GATE(ACLK_AHB2AXI_PCIE_WIFI1, "aclk_ahb2axi_pcie_wifi1", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 13, 0, 0),
+	GATE(ACLK_PCIE_WIFI1_MSTR, "aclk_pcie_wifi1_mstr_aclk", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 12, 0, 0),
+	GATE(ACLK_PCIE_WIFI1_SLV, "aclk_pcie_wifi1_slv_aclk", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 11, 0, 0),
+	GATE(ACLK_PCIE_WIFI1_DBI, "aclk_pcie_wifi1_dbi_aclk", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 10, 0, 0),
+	GATE(ACLK_COMBO_PHY_PCS_WIFI1, "aclk_combo_phy_pcs_pclk_wifi1", "mout_aclk_fsys1_200_user",
+		ENABLE_ACLK_FSYS1, 9, 0, 0),
+	GATE(PCLK_ASYNC_COMBO_PHY_WIFI1, "pclk_async_combo_phy_wifi1", "dout_pclk_combo_phy_wifi1",
+		ENABLE_PCLK_FSYS1, 22, 0, 0),
+	GATE(SCLK_PCIE_LINK_WIFI1, "sclk_pcie_link_wifi1_gated", "fin_pll",
+		ENABLE_SCLK_FSYS11, 0, 0, 0),
+	GATE(SCLK_COMBO_PHY_WIFI1_26M, "sclk_combo_phy_wifi1_26m_gated", "mout_fsys1_phyclk_sel0",
+		ENABLE_SCLK_FSYS13, 28, 0, 0),
+	GATE(SCLK_PHY_FSYS1_USER, "sclk_phy_fsys1_gated", "mout_sclk_phy_fsys1_user",
+		ENABLE_SCLK_FSYS11, 16, 0, 0),
+	GATE(PHYCLK_PCIE_WIFI1_TX0_USER, "phyclk_pcie_wifi1_tx0_gated", "mout_phyclk_pcie_wifi1_tx0_user",
+		ENABLE_SCLK_FSYS12, 12, 0, 0),
+	GATE(PHYCLK_PCIE_WIFI1_RX0_USER, "phyclk_pcie_wifi1_rx0_gated", "mout_phyclk_pcie_wifi1_rx0_user",
+		ENABLE_SCLK_FSYS12, 8, 0, 0),
+
 	GATE(SCLK_UFSUNIPRO20_USER, "sclk_ufsunipro20_user",
 		"mout_sclk_ufsunipro20_user",
 		ENABLE_SCLK_FSYS11, 20, 0, 0),
@@ -1272,7 +1413,8 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 			ENABLE_SCLK_AUD, 27, CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_I2S, "sclk_i2s", "dout_sclk_i2s",
 			ENABLE_SCLK_AUD, 28, CLK_SET_RATE_PARENT, 0),
-	GATE(0, "sclk_uart", "dout_sclk_uart", ENABLE_SCLK_AUD, 29, 0, 0),
+	GATE(SCLK_UART, "sclk_uart", "dout_sclk_uart",
+			ENABLE_SCLK_AUD, 29, 0, 0),
 	GATE(0, "sclk_slimbus", "dout_sclk_slimbus",
 			ENABLE_SCLK_AUD, 30, 0, 0),
 
@@ -1281,7 +1423,8 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 	GATE(0, "pclk_wdt1", "dout_aclk_aud", ENABLE_PCLK_AUD, 22, 0, 0),
 	GATE(0, "pclk_wdt0", "dout_aclk_aud", ENABLE_PCLK_AUD, 23, 0, 0),
 	GATE(0, "pclk_slimbus", "dout_aclk_aud", ENABLE_PCLK_AUD, 24, 0, 0),
-	GATE(0, "pclk_uart", "dout_aclk_aud", ENABLE_PCLK_AUD, 25, 0, 0),
+	GATE(PCLK_UART, "pclk_uart", "dout_aclk_aud",
+			ENABLE_PCLK_AUD, 25, 0, 0),
 	GATE(PCLK_PCM, "pclk_pcm", "dout_aclk_aud",
 			ENABLE_PCLK_AUD, 26, CLK_SET_RATE_PARENT, 0),
 	GATE(PCLK_I2S, "pclk_i2s", "dout_aclk_aud",
@@ -1314,3 +1457,383 @@ static void __init exynos7_clk_aud_init(struct device_node *np)
 
 CLK_OF_DECLARE(exynos7_clk_aud, "samsung,exynos7-clock-aud",
 		exynos7_clk_aud_init);
+
+/* Register Offset definitions for CMU_G3D (0x14AA0000) */
+#define G3D_PLL_LOCK			0x0000
+#define G3D_PLL_CON0			0x0100
+#define MUX_SEL_G3D			0x0200
+#define MUX_ENABLE_G3D			0x0300
+#define MUX_STAT_G3D			0x0400
+#define DIV_G3D				0x0600
+#define DIV_STAT_G3D			0x0700
+#define ENABLE_ACLK_G3D			0x0800
+#define ENABLE_PCLK_G3D			0x0900
+#define ENABLE_SCLK_G3D			0x0a00
+#define ENABLE_IP_G3D0			0x0b00
+
+/* Read inherited PLL settings; no enable, set_rate or voltage operations. */
+static struct clk_hw g3d_pll_ro_hw;
+static void __iomem *g3d_pll_ro_base;
+
+static unsigned long g3d_pll_ro_recalc_rate(struct clk_hw *hw,
+					 unsigned long parent_rate)
+{
+	u32 con = readl(g3d_pll_ro_base + G3D_PLL_CON0);
+	u32 m = (con >> 16) & 0x3ff;
+	u32 p = (con >> 8) & 0x3f;
+	u32 s = con & 7;
+
+	if (!p || !(con & BIT(31)) || !(con & BIT(29)))
+		return 0;
+	return div_u64((u64)parent_rate * m, p << s);
+}
+
+static const struct clk_ops g3d_pll_ro_ops = {
+	.recalc_rate = g3d_pll_ro_recalc_rate,
+};
+
+static const struct clk_init_data g3d_pll_ro_init = {
+	.name = "fout_g3d_pll",
+	.ops = &g3d_pll_ro_ops,
+	.parent_names = (const char * const[]) { "fin_pll" },
+	.num_parents = 1,
+	.flags = CLK_GET_RATE_NOCACHE,
+};
+
+PNAME(mout_g3d_pll_p) = { "fin_pll", "fout_g3d_pll" };
+PNAME(mout_aclk_g3d_400_p) = { "mout_g3d_pll", "fin_pll" };
+
+static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+	/* Vendor PLL bypass mux bit 0; preserve the inherited selection. */
+	MUX_F(0, "mout_g3d_pll", mout_g3d_pll_p, MUX_SEL_G3D, 0, 1,
+		CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+	/* Vendor mout_g3d is bit 8, not the currently unexplained bit 4. */
+	MUX_F(CLK_MOUT_ACLK_G3D_400, "mout_aclk_g3d_400", mout_aclk_g3d_400_p,
+		MUX_SEL_G3D, 8, 1, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+};
+
+static const struct samsung_div_clock g3d_div_clks[] __initconst = {
+	DIV(CLK_DIV_ACLK_G3D, "div_aclk_g3d", "mout_aclk_g3d_400",
+			DIV_G3D, 0, 3),
+	DIV(CLK_DIV_PCLK_G3D, "div_pclk_g3d", "div_aclk_g3d",
+			DIV_G3D, 4, 3),
+};
+
+static const struct samsung_gate_clock g3d_gate_clks[] __initconst = {
+	GATE(CLK_ACLK_G3D, "aclk_g3d", "div_aclk_g3d",
+			ENABLE_ACLK_G3D, 0, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PCLK_SYSREG_G3D, "pclk_sysreg_g3d", "div_pclk_g3d",
+			ENABLE_PCLK_G3D, 0, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PCLK_PMU_G3D, "pclk_pmu_g3d", "div_pclk_g3d",
+			ENABLE_PCLK_G3D, 1, CLK_IGNORE_UNUSED, 0),
+};
+
+static const unsigned long g3d_clk_regs[] __initconst = {
+	MUX_SEL_G3D,
+	DIV_G3D,
+	ENABLE_ACLK_G3D,
+	ENABLE_PCLK_G3D,
+	ENABLE_SCLK_G3D,
+};
+
+static const struct samsung_cmu_info g3d_cmu_info __initconst = {
+	.mux_clks		= g3d_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(g3d_mux_clks),
+	.div_clks		= g3d_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(g3d_div_clks),
+	.gate_clks		= g3d_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(g3d_gate_clks),
+	.nr_clk_ids		= G3D_NR_CLK,
+	.clk_regs		= g3d_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
+};
+
+/* Domain-only LPI gate has no normal consumer/CCF reference. Keep its
+ * one-bit update under the actual CMU lock shared by ordinary CCF gates.
+ * Full saved-context replay restores the original value on domain-on. */
+static struct samsung_clk_provider *m86_g3d_owner;
+int m86_exynos7_g3d_lpi_clock(struct regmap *pmu, struct mutex *transaction,
+                            struct mutex *hardware, bool *was_enabled)
+{
+ unsigned long flags;
+ unsigned int cfg, status;
+ u32 v;
+ int ret;
+ if (!m86_g3d_owner || !pmu || !transaction || !hardware || !was_enabled)
+  return -EINVAL;
+ lockdep_assert_held(transaction);
+ lockdep_assert_held(hardware);
+ ret = regmap_read(pmu, 0x4100, &cfg);
+ if (!ret)
+  ret = regmap_read(pmu, 0x4104, &status);
+ if (ret)
+  return ret;
+ if ((cfg & 15) != 15 || (status & 15) != 15)
+  return -EHOSTDOWN;
+ spin_lock_irqsave(&m86_g3d_owner->lock, flags);
+ v = readl(m86_g3d_owner->reg_base + ENABLE_ACLK_G3D);
+ *was_enabled = !!(v & BIT(1));
+ writel(v | BIT(1), m86_g3d_owner->reg_base + ENABLE_ACLK_G3D);
+ ret = readl(m86_g3d_owner->reg_base + ENABLE_ACLK_G3D) == (v | BIT(1)) ? 0 : -EIO;
+ spin_unlock_irqrestore(&m86_g3d_owner->lock, flags);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(m86_exynos7_g3d_lpi_clock);
+
+static void __init exynos7_clk_g3d_init(struct device_node *np)
+{
+	struct samsung_clk_provider *ctx;
+	int ret;
+
+	ctx = samsung_cmu_register_one(np, &g3d_cmu_info);
+	if (!ctx)
+		return;
+	m86_g3d_owner = ctx;
+	g3d_pll_ro_base = ctx->reg_base;
+	g3d_pll_ro_hw.init = &g3d_pll_ro_init;
+	ret = clk_hw_register(NULL, &g3d_pll_ro_hw);
+	if (ret) {
+		pr_err("G3D: read-only PLL registration failed: %d\n", ret);
+		return;
+	}
+	samsung_clk_add_lookup(ctx, &g3d_pll_ro_hw, CLK_FOUT_G3D_PLL);
+}
+
+CLK_OF_DECLARE(exynos7_clk_g3d, "samsung,exynos7-clock-g3d",
+		exynos7_clk_g3d_init);
+
+/* Register Offset definitions for CMU_DISP (0x13AD0000) */
+#define DISP_PLL_LOCK			0x0000
+#define DISP_PLL_CON0			0x0100
+#define MUX_SEL_DISP0			0x0200
+#define MUX_SEL_DISP1			0x0204
+#define MUX_SEL_DISP2			0x0208
+#define MUX_SEL_DISP3			0x020C
+#define DIV_DISP			0x0600
+#define ENABLE_ACLK_DISP		0x0800
+#define ENABLE_ACLK_DISP_RO_SMMU	0x0804
+#define ENABLE_ACLK_DISP_RW_SMMU	0x0808
+#define ENABLE_PCLK_DISP		0x0900
+#define ENABLE_PCLK_DISP_RO_SMMU	0x0904
+#define ENABLE_PCLK_DISP_RW_SMMU	0x0908
+#define ENABLE_SCLK_DISP1		0x0A04
+#define ENABLE_SCLK_DISP2		0x0A08
+
+static const struct samsung_pll_rate_table disp_pll_tbl[] __initconst = {
+	PLL_36XX_RATE(24 * MHZ, 252000000, 42, 2, 1, 0),
+	PLL_36XX_RATE(24 * MHZ, 240000000, 20, 1, 1, 0),
+	PLL_36XX_RATE(24 * MHZ, 142000000, 71, 3, 2, 0),
+	PLL_36XX_RATE(24 * MHZ, 126000000, 21, 1, 2, 0),
+	PLL_36XX_RATE(24 * MHZ, 96000000, 32, 1, 3, 0),
+	{},
+};
+
+PNAME(mout_sub_sclk_decon_int_eclk_p) = { "usermux_sclk_decon_int_eclk",
+	"disp_pll" };
+PNAME(mout_sub_sclk_decon_int_vclk_p) = { "usermux_sclk_decon_vclk",
+	"disp_pll" };
+
+/* External clocks are descriptive vendor rates; gates control the inputs. */
+static const struct samsung_fixed_rate_clock disp_fixed_clks[] __initconst = {
+	FRATE(CLK_FOUT_MIPIDPHY0_BIT, "phyclk_mipidphy0_bit", NULL, 0, 187500000),
+	FRATE(CLK_FOUT_MIPIDPHY0_RX, "phyclk_mipidphy0_rx", NULL, 0, 20000000),
+	FRATE(0, "sclk_rgb_vclk0", NULL, 0, 300000000),
+};
+PNAME(mout_mipidphy0_bit_p) = { "fin_pll", "phyclk_mipidphy0_bit" };
+PNAME(mout_mipidphy0_rx_p) = { "fin_pll", "phyclk_mipidphy0_rx" };
+
+static const struct samsung_pll_clock disp_pll_clks[] __initconst = {
+	PLL(pll_1460x, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
+		DISP_PLL_LOCK, DISP_PLL_CON0, disp_pll_tbl),
+};
+
+PNAME(mout_aclk_disp_400_user_p) = { "fin_pll", "top_aclk_disp_400" };
+PNAME(mout_decon_int_eclk_user_p) = { "fin_pll", "top_sclk_decon_int_eclk" };
+PNAME(mout_decon_vclk_user_p) = { "fin_pll", "top_sclk_decon_vclk" };
+
+PNAME(mout_sclk_dsd_user_p) = { "fin_pll", "top_sclk_dsd" };
+
+static const struct samsung_mux_clock disp_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_SCLK_DSD_USER, "usermux_sclk_dsd", mout_sclk_dsd_user_p,
+		MUX_SEL_DISP1, 16, 1),
+	/* 7420 DISP ingress selectors; select TOP explicitly via assigned parents. */
+	MUX(CLK_MOUT_ACLK_DISP_400_USER, "usermux_aclk_disp_400",
+		mout_aclk_disp_400_user_p, MUX_SEL_DISP0, 24, 1),
+	MUX(CLK_MOUT_DECON_INT_ECLK_USER, "usermux_sclk_decon_int_eclk",
+		mout_decon_int_eclk_user_p, MUX_SEL_DISP1, 28, 1),
+	MUX(CLK_MOUT_DECON_VCLK_USER, "usermux_sclk_decon_vclk",
+		mout_decon_vclk_user_p, MUX_SEL_DISP1, 20, 1),
+	MUX(CLK_MOUT_MIPIDPHY0_BIT, "usermux_mipidphy0_bit",
+		mout_mipidphy0_bit_p, MUX_SEL_DISP2, 8, 1),
+	MUX(CLK_MOUT_MIPIDPHY0_RX, "usermux_mipidphy0_rx",
+		mout_mipidphy0_rx_p, MUX_SEL_DISP2, 12, 1),
+	MUX(CLK_MOUT_SUB_SCLK_DECON_INT_ECLK, "mout_sub_sclk_decon_int_eclk",
+		mout_sub_sclk_decon_int_eclk_p, MUX_SEL_DISP3, 20, 1),
+	MUX(CLK_MOUT_SUB_SCLK_DECON_INT_VCLK, "mout_sub_sclk_decon_int_vclk",
+		mout_sub_sclk_decon_int_vclk_p, MUX_SEL_DISP3, 12, 1),
+};
+
+static const struct samsung_div_clock disp_div_clks[] __initconst = {
+	DIV(CLK_DOUT_PCLK_DISP, "dout_pclk_disp", "usermux_aclk_disp_400",
+		DIV_DISP, 0, 2),
+	DIV(CLK_DOUT_SUB_SCLK_DECON_INT_ECLK,
+		"dout_sub_sclk_decon_int_eclk",
+		"mout_sub_sclk_decon_int_eclk", DIV_DISP, 20, 3),
+	DIV(CLK_DOUT_SUB_SCLK_DECON_INT_VCLK,
+		"dout_sub_sclk_decon_int_vclk",
+		"mout_sub_sclk_decon_int_vclk", DIV_DISP, 12, 3),
+};
+
+static const struct samsung_gate_clock disp_gate_clks[] __initconst = {
+	GATE(CLK_SCLK_DSD, "user_sclk_dsd", "usermux_sclk_dsd",
+		ENABLE_SCLK_DISP1, 16, 0, 0),
+	GATE(0, "aclk_lh_async_si_top_disp", "usermux_aclk_disp_400",
+		ENABLE_ACLK_DISP, 28, 0, 0),
+	GATE(CLK_ACLK_XIU_DISP_RW, "aclk_xiu_disp_rw", "aclk_lh_async_si_top_disp",
+		ENABLE_ACLK_DISP, 26, 0, 0),
+	GATE(CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8, "mipidphy0_bit",
+		"usermux_mipidphy0_bit", ENABLE_SCLK_DISP2, 8, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PHYCLK_MIPIDPHY0_RXCLKESC0, "mipidphy0_rx",
+		"usermux_mipidphy0_rx", ENABLE_SCLK_DISP2, 12, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_SCLK_RGB_VCLK_TO_DSIM0, "rgb_vclk0",
+		"sclk_rgb_vclk0", ENABLE_SCLK_DISP2, 28, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_DECON0, "aclk_decon0", "aclk_xiu_disp_ro",
+		ENABLE_ACLK_DISP, 31, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_disp_ro", "aclk_lh_async_si_r_top_disp",
+		ENABLE_ACLK_DISP, 27, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_lh_async_si_r_top_disp", "usermux_aclk_disp_400",
+		ENABLE_ACLK_DISP, 29, CLK_IGNORE_UNUSED, 0),
+
+	GATE(CLK_PCLK_DECON0, "pclk_decon0", "dout_pclk_disp",
+		ENABLE_PCLK_DISP, 31, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PCLK_DSIM0, "pclk_dsim0", "dout_pclk_disp",
+		ENABLE_PCLK_DISP, 29, CLK_IGNORE_UNUSED, 0),
+
+	GATE(CLK_ACLK_DISP_RO_SYSMMU, "aclk_smmu_disp_ro",
+		"usermux_aclk_disp_400", ENABLE_ACLK_DISP_RO_SMMU, 0,
+		0, 0),
+	GATE(CLK_ACLK_DISP_RW_SYSMMU, "aclk_smmu_disp_rw",
+		"usermux_aclk_disp_400", ENABLE_ACLK_DISP_RW_SMMU, 0,
+		0, 0),
+	GATE(CLK_PCLK_DISP_RO_SYSMMU, "pclk_smmu_disp_ro",
+		"dout_pclk_disp", ENABLE_PCLK_DISP_RO_SMMU, 0,
+		0, 0),
+	GATE(CLK_PCLK_DISP_RW_SYSMMU, "pclk_smmu_disp_rw",
+		"dout_pclk_disp", ENABLE_PCLK_DISP_RW_SMMU, 0,
+		0, 0),
+
+	GATE(CLK_SCLK_DECON0_ECLK, "decon0_eclk",
+		"dout_sub_sclk_decon_int_eclk", ENABLE_SCLK_DISP1, 28,
+		CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_SCLK_DECON0_VCLK, "decon0_vclk",
+		"dout_sub_sclk_decon_int_vclk", ENABLE_SCLK_DISP1, 8,
+		CLK_IGNORE_UNUSED, 0),
+};
+
+static const unsigned long disp_clk_regs[] __initconst = {
+	DISP_PLL_LOCK,
+	DISP_PLL_CON0,
+	MUX_SEL_DISP0,
+	MUX_SEL_DISP1,
+	MUX_SEL_DISP2,
+	MUX_SEL_DISP3,
+	DIV_DISP,
+	ENABLE_ACLK_DISP,
+	ENABLE_ACLK_DISP_RO_SMMU,
+	ENABLE_ACLK_DISP_RW_SMMU,
+	ENABLE_PCLK_DISP,
+	ENABLE_PCLK_DISP_RO_SMMU,
+	ENABLE_PCLK_DISP_RW_SMMU,
+	ENABLE_SCLK_DISP1,
+	ENABLE_SCLK_DISP2,
+};
+
+static const struct samsung_cmu_info disp_cmu_info __initconst = {
+	.fixed_clks = disp_fixed_clks,
+	.nr_fixed_clks = ARRAY_SIZE(disp_fixed_clks),
+	.pll_clks		= disp_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(disp_pll_clks),
+	.mux_clks		= disp_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(disp_mux_clks),
+	.div_clks		= disp_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(disp_div_clks),
+	.gate_clks		= disp_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(disp_gate_clks),
+	.nr_clk_ids		= DISP_NR_CLK,
+	.clk_regs		= disp_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(disp_clk_regs),
+};
+
+/* Official m86 DISP table requires signed 16-bit fractional K. */
+static const struct samsung_pll_rate_table m86_disp_pll_tbl[] __initconst = {
+	PLL_36XX_RATE(24 * MHZ, 266000000, 67, 3, 1, -32768),
+	PLL_36XX_RATE(24 * MHZ, 252000000, 42, 2, 1, 0),
+	PLL_36XX_RATE(24 * MHZ, 240000000, 20, 1, 1, 0),
+	PLL_36XX_RATE(24 * MHZ, 133000000, 67, 3, 2, -32768),
+	PLL_36XX_RATE(24 * MHZ, 126000000, 21, 1, 2, 0),
+	PLL_36XX_RATE(24 * MHZ, 96000000, 32, 1, 3, 0),
+	{},
+};
+static const struct samsung_pll_clock m86_disp_pll_clks[] __initconst = {
+	PLL(pll_1460x_signed, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
+		DISP_PLL_LOCK, DISP_PLL_CON0, m86_disp_pll_tbl),
+};
+static void __init m86_clk_disp_init(struct device_node *np)
+{
+	struct samsung_cmu_info cmu = disp_cmu_info;
+
+	cmu.pll_clks = m86_disp_pll_clks;
+	cmu.nr_pll_clks = ARRAY_SIZE(m86_disp_pll_clks);
+	samsung_cmu_register_one(np, &cmu);
+}
+CLK_OF_DECLARE(m86_clk_disp, "meizu,m86-clock-disp", m86_clk_disp_init);
+
+static void __init exynos7_clk_disp_init(struct device_node *np)
+{
+	samsung_cmu_register_one(np, &disp_cmu_info);
+}
+
+CLK_OF_DECLARE(exynos7_clk_disp, "samsung,exynos7-clock-disp",
+		exynos7_clk_disp_init);
+
+/* CMU_BUS0 (0x13400000): display longhop master clocks. */
+#define MUX_SEL_BUS0		0x0200
+#define ENABLE_ACLK_BUS0	0x0800
+PNAME(mout_aclk_bus0_532_user_p) = { "fin_pll", "top_aclk_bus0_532" };
+static const struct samsung_mux_clock bus0_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_ACLK_BUS0_532_USER, "usermux_aclk_bus0_532",
+		mout_aclk_bus0_532_user_p, MUX_SEL_BUS0, 0, 1),
+};
+static const struct samsung_gate_clock bus0_gate_clks[] __initconst = {
+	/*
+	 * Vendor CLK_GATE_ENABLE holds permanent prepare/enable references
+	 * for both NoC paths and their TOP parent. Keep the shared bus alive
+	 * when DECON drops its last longhop reference during runtime suspend.
+	 */
+	GATE(0, "aclk_noc_bus0_rt", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 0, CLK_IS_CRITICAL, 0),
+	GATE(0, "aclk_noc_bus0_nrt", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 7, CLK_IS_CRITICAL, 0),
+	GATE(CLK_ACLK_LH_DISP0, "aclk_lh_disp0", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 3, 0, 0),
+	GATE(CLK_ACLK_LH_DISP1, "aclk_lh_disp1", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 4, 0, 0),
+};
+static const unsigned long bus0_clk_regs[] __initconst = {
+	MUX_SEL_BUS0, ENABLE_ACLK_BUS0,
+};
+static const struct samsung_cmu_info bus0_cmu_info __initconst = {
+	.mux_clks = bus0_mux_clks,
+	.nr_mux_clks = ARRAY_SIZE(bus0_mux_clks),
+	.gate_clks = bus0_gate_clks,
+	.nr_gate_clks = ARRAY_SIZE(bus0_gate_clks),
+	.nr_clk_ids = BUS0_NR_CLK,
+	.clk_regs = bus0_clk_regs,
+	.nr_clk_regs = ARRAY_SIZE(bus0_clk_regs),
+};
+static void __init exynos7_clk_bus0_init(struct device_node *np)
+{
+	samsung_cmu_register_one(np, &bus0_cmu_info);
+}
+CLK_OF_DECLARE(exynos7_clk_bus0, "samsung,exynos7-clock-bus0",
+		exynos7_clk_bus0_init);

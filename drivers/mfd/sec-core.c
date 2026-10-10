@@ -184,13 +184,34 @@ static const struct regmap_config s2mps14_regmap_config = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+/* PRO5 vendor S2MPS15: B6CTRL3=0x57, OCP trim=0x59, workaround=0xc0.
+ * Only these additional read addresses are established. The last two are
+ * observation-only: this provider must never initialize the OCP workaround.
+ */
+static bool s2mps15_readable(struct device *dev, unsigned int reg)
+{
+	return reg <= S2MPS15_REG_LDODSCH4 || reg == 0x57 ||
+	       reg == 0x59 || reg == 0xc0;
+}
+
+static bool s2mps15_writeable(struct device *dev, unsigned int reg)
+{
+	return reg <= S2MPS15_REG_LDODSCH4;
+}
+
 static const struct regmap_config s2mps15_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 
-	.max_register = S2MPS15_REG_LDODSCH4,
+	.max_register = 0xc0,
+	.readable_reg = s2mps15_readable,
+	.writeable_reg = s2mps15_writeable,
 	.volatile_reg = s2mps11_volatile,
-	.cache_type = REGCACHE_FLAT,
+	/* In 6.6 a flat-cache hit precedes readable checks. NONE ensures the
+	 * sparse access whitelist rejects holes instead of returning cache zeros.
+	 * Other Samsung PMICs retain their existing cache policy.
+	 */
+	.cache_type = REGCACHE_NONE,
 };
 
 static const struct regmap_config s2mpu02_regmap_config = {
