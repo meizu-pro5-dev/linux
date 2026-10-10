@@ -953,3 +953,9 @@ config CHARGER_QCOM_SMB2
 	  in PMI8998 and related PMICs.
 
 endif # POWER_SUPPLY
+
+config M86_BQ27532
+	tristate "PRO 5 m86_bq27532 monitor"
+	depends on I2C && POWER_SUPPLY
+	help
+	  Board-specific read-only monitor for Meizu PRO 5 bring-up.

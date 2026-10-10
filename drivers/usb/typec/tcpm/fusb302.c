@@ -85,6 +85,7 @@ struct fusb302_chip {
 	struct gpio_desc *gpio_int_n;
 	int gpio_int_n_irq;
 	struct extcon_dev *extcon;
+	struct gpio_desc *gpio_pdon;
 
 	struct workqueue_struct *wq;
 	struct delayed_work bc_lvl_handler;
@@ -1698,6 +1699,15 @@ static int fusb302_probe(struct i2c_client *client)
 	chip->dev = &client->dev;
 	mutex_init(&chip->lock);
 
+	chip->gpio_pdon = devm_gpiod_get_optional(dev, "pd-on", GPIOD_OUT_HIGH);
+	if (IS_ERR(chip->gpio_pdon))
+		return dev_err_probe(dev, PTR_ERR(chip->gpio_pdon),
+				     "cannot get pd-on gpio\n");
+	if (chip->gpio_pdon) {
+		gpiod_set_value_cansleep(chip->gpio_pdon, 1);
+		usleep_range(10000, 15000);
+	}
+
 	/*
 	 * Devicetree platforms should get extcon via phandle (not yet
 	 * supported). On ACPI platforms, we get the name from a device prop.
@@ -1781,6 +1791,8 @@ static void fusb302_remove(struct i2c_client *client)
 	fwnode_handle_put(chip->tcpc_dev.fwnode);
 	destroy_workqueue(chip->wq);
 	fusb302_debugfs_exit(chip);
+	if (chip->gpio_pdon)
+		gpiod_set_value_cansleep(chip->gpio_pdon, 0);
 }
 
 static int fusb302_pm_suspend(struct device *dev)
