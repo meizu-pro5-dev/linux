@@ -89,3 +89,15 @@ endif
 
 # for cleaning
 subdir- += vdso vdso32
+
+obj-$(CONFIG_M86_BUILTIN_DTB) += m86-dtb.o
+$(obj)/m86-dtb.o: arch/arm64/boot/dts/exynos/exynos7420-m86.dtb
+
+obj-$(CONFIG_M86_SECLOG) += m86-seclog.o
+KASAN_SANITIZE_m86-seclog.o := n
+KCSAN_SANITIZE_m86-seclog.o := n
+KCOV_INSTRUMENT_m86-seclog.o := n
+CFLAGS_REMOVE_m86-seclog.o = $(CC_FLAGS_FTRACE) -fstack-protector -fstack-protector-strong
+
+
+obj-$(CONFIG_M86_BUILTIN_DTB) += m86-initrd.o

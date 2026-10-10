@@ -44,6 +44,10 @@ struct io_pgtable_ops *alloc_io_pgtable_ops(enum io_pgtable_fmt fmt,
 	if (fmt >= IO_PGTABLE_NUM_FMTS)
 		return NULL;
 
+	if ((cfg->quirks & IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE) &&
+	    fmt != ARM_MALI_LPAE)
+		return NULL;
+
 	fns = io_pgtable_init_table[fmt];
 	if (!fns)
 		return NULL;

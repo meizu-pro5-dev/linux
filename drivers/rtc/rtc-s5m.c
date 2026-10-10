@@ -7,6 +7,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/bcd.h>
@@ -17,6 +18,7 @@
 #include <linux/mfd/samsung/irq.h>
 #include <linux/mfd/samsung/rtc.h>
 #include <linux/mfd/samsung/s2mps14.h>
+#include <linux/mfd/samsung/s2mps15.h>
 
 /*
  * Maximum number of retries for checking changes in UDR field
@@ -131,6 +133,20 @@ static const struct s5m_rtc_reg_config s2mps14_rtc_regs = {
  * Register map for S2MPS15 - in comparison to S2MPS14 the WUDR and AUDR bits
  * are swapped.
  */
+/* S2MPS15 revision 0 uses the legacy WUDR/RUDR alarm update sequence. */
+static const struct s5m_rtc_reg_config s2mps15_rev0_rtc_regs = {
+	.regs_count = 7,
+	.time = S2MPS_RTC_SEC,
+	.ctrl = S2MPS_RTC_CTRL,
+	.alarm0 = S2MPS_ALARM0_SEC,
+	.alarm1 = S2MPS_ALARM1_SEC,
+	.udr_update = S2MPS_RTC_UDR_CON,
+	.autoclear_udr_mask = S2MPS_RTC_WUDR_MASK,
+	.read_time_udr_mask = S2MPS_RTC_RUDR_MASK,
+	.write_time_udr_mask = S2MPS_RTC_WUDR_MASK,
+	.write_alarm_udr_mask = S2MPS_RTC_WUDR_MASK | S2MPS_RTC_RUDR_MASK,
+};
+
 static const struct s5m_rtc_reg_config s2mps15_rtc_regs = {
 	.regs_count		= 7,
 	.time			= S2MPS_RTC_SEC,
@@ -138,7 +154,7 @@ static const struct s5m_rtc_reg_config s2mps15_rtc_regs = {
 	.alarm0			= S2MPS_ALARM0_SEC,
 	.alarm1			= S2MPS_ALARM1_SEC,
 	.udr_update		= S2MPS_RTC_UDR_CON,
-	.autoclear_udr_mask	= S2MPS_RTC_WUDR_MASK,
+	.autoclear_udr_mask	= S2MPS15_RTC_WUDR_MASK | S2MPS15_RTC_AUDR_MASK,
 	.read_time_udr_mask	= S2MPS_RTC_RUDR_MASK,
 	.write_time_udr_mask	= S2MPS15_RTC_WUDR_MASK,
 	.write_alarm_udr_mask	= S2MPS15_RTC_AUDR_MASK,
@@ -213,10 +229,23 @@ static int s5m8767_tm_to_data(struct rtc_time *tm, u8 *data)
  * Read RTC_UDR_CON register and wait till UDR field is cleared.
  * This indicates that time/alarm update ended.
  */
-static int s5m8767_wait_for_udr_update(struct s5m_rtc_info *info)
+static int s5m8767_wait_for_udr_update(struct s5m_rtc_info *info,
+				     unsigned int update_mask)
 {
 	int ret, retry = UDR_READ_RETRY_CNT;
 	unsigned int data;
+
+	if (info->device_type == S2MPS15X) {
+		unsigned int mask = update_mask & info->regs->autoclear_udr_mask;
+
+		/* Poll the operation actually issued, not the other update bit. */
+		ret = regmap_read_poll_timeout(info->regmap, info->regs->udr_update,
+					       data, !(data & mask), 1000, 10000);
+		if (ret)
+			dev_err(info->dev, "RTC update 0x%x did not complete: %d\n",
+				mask, ret);
+		return ret;
+	}
 
 	do {
 		ret = regmap_read(info->regmap, info->regs->udr_update, &data);
@@ -279,7 +308,7 @@ static int s5m8767_rtc_set_time_reg(struct s5m_rtc_info *info)
 		return ret;
 	}
 
-	ret = s5m8767_wait_for_udr_update(info);
+	ret = s5m8767_wait_for_udr_update(info, info->regs->write_time_udr_mask);
 
 	return ret;
 }
@@ -317,7 +346,7 @@ static int s5m8767_rtc_set_alarm_reg(struct s5m_rtc_info *info)
 		return ret;
 	}
 
-	ret = s5m8767_wait_for_udr_update(info);
+	ret = s5m8767_wait_for_udr_update(info, info->regs->write_alarm_udr_mask);
 
 	/* On S2MPS13 the AUDR is not auto-cleared */
 	if (info->device_type == S2MPS13X)
@@ -345,6 +374,9 @@ static int s5m_rtc_read_time(struct device *dev, struct rtc_time *tm)
 			return ret;
 		}
 	}
+	/* The fixed S2MPS15 vendor driver waits 1 ms after latching time. */
+	if (info->device_type == S2MPS15X)
+		usleep_range(1000, 1500);
 	ret = regmap_bulk_read(info->regmap, info->regs->time, data,
 			info->regs->regs_count);
 	if (ret < 0)
@@ -360,6 +392,14 @@ static int s5m_rtc_read_time(struct device *dev, struct rtc_time *tm)
 
 	default:
 		return -EINVAL;
+	}
+
+	if (info->device_type == S2MPS15X) {
+		unsigned int weekday = data[RTC_WEEKDAY] & 0x7f;
+
+		if (!weekday || (weekday & (weekday - 1)))
+			return -EINVAL;
+		tm->tm_wday = __ffs(weekday);
 	}
 
 	dev_dbg(dev, "%s: %ptR(%d)\n", __func__, tm, tm->tm_wday);
@@ -642,6 +682,7 @@ static int s5m_rtc_probe(struct platform_device *pdev)
 	struct s5m_rtc_info *info;
 	const struct regmap_config *regmap_cfg;
 	int ret, alarm_irq;
+	unsigned int pmic_id;
 
 	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -650,7 +691,16 @@ static int s5m_rtc_probe(struct platform_device *pdev)
 	switch (platform_get_device_id(pdev)->driver_data) {
 	case S2MPS15X:
 		regmap_cfg = &s2mps14_rtc_regmap_config;
-		info->regs = &s2mps15_rtc_regs;
+		/* Vendor revision is the low nibble of PMIC ID (regulator probe).
+		 * Read it here too: RTC-only must work without that driver.
+		 */
+		ret = regmap_read(s5m87xx->regmap_pmic, S2MPS15_REG_ID, &pmic_id);
+		if (ret)
+			return ret;
+		info->regs = (pmic_id & 0x0f) ? &s2mps15_rtc_regs :
+			&s2mps15_rev0_rtc_regs;
+		dev_info(&pdev->dev, "S2MPS15 ID 0x%02x, RTC revision %u\n",
+			 pmic_id, pmic_id & 0x0f);
 		alarm_irq = S2MPS14_IRQ_RTCA0;
 		break;
 	case S2MPS14X:
@@ -704,6 +754,18 @@ static int s5m_rtc_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, info);
+
+	if (info->device_type == S2MPS15X) {
+		unsigned int control;
+
+		ret = regmap_read(info->regmap, info->regs->ctrl, &control);
+		if (ret)
+			return ret;
+		dev_info(info->dev, "RTC original control=0x%02x\n", control);
+		if ((control & (BCD_EN_MASK | MODEL24_MASK)) != MODEL24_MASK)
+			return dev_err_probe(info->dev, -EINVAL,
+				"RTC requires explicit conversion from BCD/12-hour mode\n");
+	}
 
 	ret = s5m8767_rtc_init_reg(info);
 	if (ret)

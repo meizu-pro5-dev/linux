@@ -1236,6 +1236,14 @@ config TOUCHSCREEN_STMFTS
 	  To compile this driver as a module, choose M here: the
 	  module will be called stmfts.
 
+config TOUCHSCREEN_M86_FTS
+	tristate "Meizu PRO 5 ST FTS 3980 touchscreen"
+	depends on I2C && OF
+	help
+	  Support the legacy FTS protocol and existing firmware on Meizu PRO 5.
+	  Power supplies must remain enabled by the bootloader. No firmware flash
+	  or PMIC supply reconfiguration is performed. Module name: fts-m86.
+
 config TOUCHSCREEN_STMPE
 	tristate "STMicroelectronics STMPE touchscreens"
 	depends on MFD_STMPE

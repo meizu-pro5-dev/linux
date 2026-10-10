@@ -20,6 +20,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 
 typedef u32 sysmmu_iova_t;
@@ -234,6 +235,7 @@ struct exynos_iommu_owner {
 	struct list_head controllers;	/* list of sysmmu_drvdata.owner_node */
 	struct iommu_domain *domain;	/* domain this device is attached */
 	struct mutex rpm_lock;		/* for runtime pm of all sysmmus */
+	bool ready;			/* master uses IOVA-mapped buffers */
 };
 
 /*
@@ -481,10 +483,16 @@ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
 
 static void __sysmmu_enable_clocks(struct sysmmu_drvdata *data)
 {
+	pr_emerg("IOMMU: enable_clocks %s master=%s\n", dev_name(data->sysmmu),
+		 data->clk_master ? "yes" : "NULL");
 	BUG_ON(clk_prepare_enable(data->clk_master));
+	pr_emerg("IOMMU: enable_clocks %s clk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->clk));
+	pr_emerg("IOMMU: enable_clocks %s pclk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->pclk));
+	pr_emerg("IOMMU: enable_clocks %s aclk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->aclk));
+	pr_emerg("IOMMU: enable_clocks %s all on\n", dev_name(data->sysmmu));
 }
 
 static void __sysmmu_disable_clocks(struct sysmmu_drvdata *data)
@@ -584,8 +592,14 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
 		ret = report_iommu_fault(&data->domain->domain, data->master,
 					 fault.addr, fault.type);
 	}
+	/*
+	 * The vendor display driver installs a fault handler that dumps the
+	 * DECON state and keeps running.  Do not panic here: a transient
+	 * fault during the bootloader->DRM framebuffer handover should not
+	 * wedge the whole system.
+	 */
 	if (ret)
-		panic("Unrecoverable System MMU Fault!");
+		dev_err(data->sysmmu, "Unrecoverable System MMU Fault! (ignored)\n");
 
 out:
 	writel(1 << itype, SYSMMU_REG(data, int_clear));
@@ -645,6 +659,7 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 {
 	unsigned long flags;
 
+	pr_emerg("IOMMU: __sysmmu_enable %s enter\n", dev_name(data->sysmmu));
 	__sysmmu_enable_clocks(data);
 
 	spin_lock_irqsave(&data->lock, flags);
@@ -655,6 +670,13 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 	writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
 	data->active = true;
 	spin_unlock_irqrestore(&data->lock, flags);
+
+	pr_emerg("IOMMU: __sysmmu_enable %s wrote ctrl\n",
+		 dev_name(data->sysmmu));
+	pr_emerg("IOMMU: __sysmmu_enable %s ctrl=%#x status=%#x\n",
+		 dev_name(data->sysmmu),
+		 readl(data->sfrbase + REG_MMU_CTRL),
+		 readl(data->sfrbase + REG_MMU_STATUS));
 
 	/*
 	 * SYSMMU driver keeps master's clock enabled only for the short
@@ -771,7 +793,21 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	data->sysmmu = dev;
 	spin_lock_init(&data->lock);
 
-	__sysmmu_get_version(data);
+	/*
+	 * On Exynos7420 the SYSMMU sits on the live display path. Toggling its
+	 * aclk/pclk and reading REG_MMU_VERSION at probe time (very early boot,
+	 * before the display driver brings up the DISP clocks) stalls the DECON
+	 * AXI path and hangs the whole system. The hardware is always SysMMU
+	 * v6 here, so set it statically and defer any register access to the
+	 * first __sysmmu_enable() when the master has powered the block.
+	 */
+	if (IS_ENABLED(CONFIG_ARM64) &&
+	    of_device_is_compatible(dev->of_node, "samsung,exynos-sysmmu")) {
+		data->version = MAKE_MMU_VER(6, 0);
+		data->variant = &sysmmu_v5_variant;
+	} else {
+		__sysmmu_get_version(data);
+	}
 
 	ret = iommu_device_sysfs_add(&data->iommu, &pdev->dev, NULL,
 				     dev_name(data->sysmmu));
@@ -809,13 +845,20 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
+	pr_emerg("IOMMU: probe %s before iommu_device_register\n",
+		 dev_name(dev));
 	ret = iommu_device_register(&data->iommu, &exynos_iommu_ops, dev);
+	pr_emerg("IOMMU: probe %s iommu_device_register ret=%d\n",
+		 dev_name(dev), ret);
 	if (ret)
 		goto err_dma_set_mask;
 
 	return 0;
 
 err_dma_set_mask:
+	pm_runtime_disable(dev);
+	if (dma_dev == dev)
+		dma_dev = NULL;
 	iommu_device_sysfs_remove(&data->iommu);
 	return ret;
 }
@@ -829,7 +872,9 @@ static int __maybe_unused exynos_sysmmu_suspend(struct device *dev)
 		struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
 
 		mutex_lock(&owner->rpm_lock);
-		if (data->domain) {
+		pr_emerg("IOMMU: sysmmu_suspend %s domain=%d active=%d\n",
+			 dev_name(dev), !!data->domain, data->active);
+		if (data->domain && data->active) {
 			dev_dbg(data->sysmmu, "saving state\n");
 			__sysmmu_disable(data);
 		}
@@ -847,10 +892,22 @@ static int __maybe_unused exynos_sysmmu_resume(struct device *dev)
 		struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
 
 		mutex_lock(&owner->rpm_lock);
-		if (data->domain) {
+		pr_emerg("IOMMU: sysmmu_resume %s domain=%d active=%d ready=%d\n",
+			 dev_name(dev), !!data->domain, data->active,
+			 owner->ready);
+		/*
+		 * Do not touch the SYSMMU until the master has told us that it
+		 * is scanning an IOVA-mapped buffer.  Bringing the SYSMMU up
+		 * earlier makes DECON fault on the bootloader's physical
+		 * framebuffer (and, with the master clock wired up, momentarily
+		 * gates the master's clock), which wedges the interconnect.
+		 */
+		if (data->domain && owner->ready && !data->active) {
 			dev_dbg(data->sysmmu, "restoring state\n");
 			__sysmmu_enable(data);
 		}
+		pr_emerg("IOMMU: sysmmu_resume %s done active=%d\n",
+			 dev_name(dev), data->active);
 		mutex_unlock(&owner->rpm_lock);
 	}
 	return 0;
@@ -1046,10 +1103,19 @@ static int exynos_iommu_attach_device(struct iommu_domain *iommu_domain,
 	owner->domain = iommu_domain;
 	spin_unlock_irqrestore(&domain->lock, flags);
 
+	pr_emerg("IOMMU: attach master=%s\n", dev_name(dev));
+
 	list_for_each_entry(data, &owner->controllers, owner_node) {
+		pr_emerg("IOMMU: attach sysmmu=%s active=%d domain=%d\n",
+			 dev_name(data->sysmmu),
+			 pm_runtime_active(data->sysmmu),
+			 !!data->domain);
 		pm_runtime_get_noresume(data->sysmmu);
-		if (pm_runtime_active(data->sysmmu))
+		if (pm_runtime_active(data->sysmmu)) {
+			pr_emerg("IOMMU: attach enabling %s now\n",
+				 dev_name(data->sysmmu));
 			__sysmmu_enable(data);
+		}
 		pm_runtime_put(data->sysmmu);
 	}
 
@@ -1060,6 +1126,68 @@ static int exynos_iommu_attach_device(struct iommu_domain *iommu_domain,
 
 	return 0;
 }
+
+/*
+ * exynos_iommu_master_ready - let the IOMMU translate for the master
+ * @master: the master device (e.g. DECON) whose SYSMMUs should be enabled
+ *
+ * The master driver calls this once it is actually scanning a buffer that was
+ * mapped through this IOMMU domain.  Until then the SYSMMUs are left disabled,
+ * because enabling them while the hardware still scans a bootloader-provided
+ * physical framebuffer causes unrecoverable translation faults.
+ */
+void exynos_iommu_master_ready(struct device *master)
+{
+	struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
+	struct sysmmu_drvdata *data;
+
+	if (!owner)
+		return;
+
+	mutex_lock(&owner->rpm_lock);
+	if (!owner->ready) {
+		owner->ready = true;
+		list_for_each_entry(data, &owner->controllers, owner_node) {
+			if (data->domain && !data->active) {
+				pr_emerg("IOMMU: master_ready enabling %s\n",
+					 dev_name(data->sysmmu));
+				__sysmmu_enable(data);
+			}
+		}
+	}
+	mutex_unlock(&owner->rpm_lock);
+}
+EXPORT_SYMBOL_GPL(exynos_iommu_master_ready);
+
+/*
+ * exynos_iommu_map_identity - map a physical range one-to-one
+ * @master: master device whose IOMMU domain should be used
+ * @phys: physical address of the range
+ * @size: size of the range in bytes
+ *
+ * Used by the display driver to keep the bootloader's framebuffer readable
+ * after the SYSMMUs start translating.  Mirrors the vendor iovmm_map_oto().
+ */
+int exynos_iommu_map_identity(struct device *master, phys_addr_t phys,
+			      size_t size)
+{
+	struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
+	phys_addr_t start, end;
+	int ret;
+
+	if (!owner || !owner->domain)
+		return -ENODEV;
+
+	start = ALIGN_DOWN(phys, SZ_2M);
+	end = ALIGN(phys + size, SZ_2M);
+
+	ret = iommu_map(owner->domain, start, start, end - start,
+			IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+	pr_emerg("IOMMU: map_identity %s phys=%pa start=%pa size=%#zx ret=%d\n",
+		 dev_name(master), &phys, &start, (size_t)(end - start), ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(exynos_iommu_map_identity);
 
 static sysmmu_pte_t *alloc_lv2entry(struct exynos_iommu_domain *domain,
 		sysmmu_pte_t *sent, sysmmu_iova_t iova, short *pgcounter)
@@ -1398,6 +1526,9 @@ static struct iommu_device *exynos_iommu_probe_device(struct device *dev)
 		data->link = device_link_add(dev, data->sysmmu,
 					     DL_FLAG_STATELESS |
 					     DL_FLAG_PM_RUNTIME);
+		pr_emerg("IOMMU: probe_device %s link=%s to %s\n",
+			 dev_name(dev), data->link ? "ok" : "NULL",
+			 dev_name(data->sysmmu));
 	}
 
 	/* There is always at least one entry, see exynos_iommu_of_xlate() */
@@ -1445,8 +1576,10 @@ static int exynos_iommu_of_xlate(struct device *dev,
 	data = platform_get_drvdata(sysmmu);
 	if (!data) {
 		put_device(&sysmmu->dev);
-		return -ENODEV;
+		return -EPROBE_DEFER;
 	}
+	pr_emerg("IOMMU: of_xlate master=%s sysmmu=%s\n", dev_name(dev),
+		 dev_name(&sysmmu->dev));
 
 	if (!owner) {
 		owner = kzalloc(sizeof(*owner), GFP_KERNEL);
@@ -1471,6 +1604,7 @@ static int exynos_iommu_of_xlate(struct device *dev,
 }
 
 static const struct iommu_ops exynos_iommu_ops = {
+	.owner = THIS_MODULE,
 	.domain_alloc = exynos_iommu_domain_alloc,
 	.device_group = generic_device_group,
 #ifdef CONFIG_ARM
@@ -1515,7 +1649,9 @@ static int __init exynos_iommu_init(void)
 		goto err_zero_lv2;
 	}
 
+	pr_emerg("IOMMU: init enter\n");
 	ret = platform_driver_register(&exynos_sysmmu_driver);
+	pr_emerg("IOMMU: platform_driver_register ret=%d\n", ret);
 	if (ret) {
 		pr_err("%s: Failed to register driver\n", __func__);
 		goto err_reg_driver;
@@ -1528,4 +1664,16 @@ err_zero_lv2:
 	kmem_cache_destroy(lv2table_kmem_cache);
 	return ret;
 }
-core_initcall(exynos_iommu_init);
+
+static void __exit exynos_iommu_exit(void)
+{
+	platform_driver_unregister(&exynos_sysmmu_driver);
+	kmem_cache_free(lv2table_kmem_cache, zero_lv2_table);
+	kmem_cache_destroy(lv2table_kmem_cache);
+}
+
+module_init(exynos_iommu_init);
+module_exit(exynos_iommu_exit);
+
+MODULE_DESCRIPTION("Samsung Exynos IOMMU (System MMU) driver");
+MODULE_LICENSE("GPL v2");

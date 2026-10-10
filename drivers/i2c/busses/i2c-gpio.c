@@ -13,6 +13,9 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/mfd/syscon.h>
+#include <linux/of.h>
+#include <linux/regmap.h>
 #include <linux/platform_data/i2c-gpio.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -361,6 +364,63 @@ static struct gpio_desc *i2c_gpio_get_desc(struct device *dev,
 	return retdesc;
 }
 
+/* M86's firmware and GPIO adapter share the PMIC bus. */
+static int i2c_gpio_m86_apm_guard(struct device *dev)
+{
+	struct regmap *pmu;
+	unsigned int config[2], status[2], option;
+	int i, ret;
+
+	if (!of_device_is_compatible(dev->of_node, "meizu,m86-pmic-i2c"))
+		return 0;
+
+	/* Core selects default pinctrl before probe: DT must omit it. */
+	if (of_find_property(dev->of_node, "pinctrl-0", NULL))
+		return dev_err_probe(dev, -EINVAL, "APM guard requires no default pinctrl\n");
+	pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "meizu,pmu");
+	if (IS_ERR(pmu))
+		return dev_err_probe(dev, PTR_ERR(pmu), "APM PMU lookup failed\n");
+	ret = regmap_read(pmu, 0x2508, &option);
+	if (ret)
+		return dev_err_probe(dev, ret, "APM option read failed\n");
+	for (i = 0; i < 2; i++) {
+		ret = regmap_read(pmu, 0x2500, &config[i]);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM configuration read failed\n");
+		ret = regmap_read(pmu, 0x2504, &status[i]);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM status read failed\n");
+		if (!i)
+			usleep_range(1000, 2000);
+	}
+	dev_info(dev, "APM before: config=%#010x/%#010x status=%#010x/%#010x option=%#010x\n",
+		 config[0], config[1], status[0], status[1], option);
+	if ((status[0] | status[1]) & BIT(0))
+		return dev_err_probe(dev, -EBUSY, "APM running; refusing GPIO request\n");
+
+	/* Vendor power_down clears only CONFIG bit0. Never stop a running M3. */
+	if ((config[0] | config[1]) & BIT(0)) {
+		ret = regmap_update_bits(pmu, 0x2500, BIT(0), 0);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM reset hold failed\n");
+	}
+	for (i = 0; i < 2; i++) {
+		ret = regmap_read_poll_timeout(pmu, 0x2500, config[i],
+					       !(config[i] & BIT(0)), 100, 10000);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM configuration timeout\n");
+		ret = regmap_read_poll_timeout(pmu, 0x2504, status[i],
+					       !(status[i] & BIT(0)), 100, 10000);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM status timeout\n");
+		if (!i)
+			usleep_range(1000, 2000);
+	}
+	dev_info(dev, "APM after: config=%#010x/%#010x status=%#010x/%#010x; GPIO permitted\n",
+		 config[0], config[1], status[0], status[1]);
+	return 0;
+}
+
 static int i2c_gpio_probe(struct platform_device *pdev)
 {
 	struct i2c_gpio_private_data *priv;
@@ -371,6 +431,10 @@ static int i2c_gpio_probe(struct platform_device *pdev)
 	struct fwnode_handle *fwnode = dev_fwnode(dev);
 	enum gpiod_flags gflags;
 	int ret;
+
+	ret = i2c_gpio_m86_apm_guard(dev);
+	if (ret)
+		return ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)

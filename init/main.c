@@ -27,6 +27,7 @@
 #include <linux/init.h>
 #include <linux/initrd.h>
 #include <linux/memblock.h>
+#include <linux/m86-seclog.h>
 #include <linux/acpi.h>
 #include <linux/bootconfig.h>
 #include <linux/console.h>
@@ -891,6 +892,7 @@ void start_kernel(void)
 	pr_notice("%s", linux_banner);
 	early_security_init();
 	setup_arch(&command_line);
+	m86_seclog_mark("setup_arch EXIT");
 	setup_boot_config();
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
@@ -925,7 +927,9 @@ void start_kernel(void)
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
+	m86_seclog_mark("mm_core_init ENTER");
 	mm_core_init();
+	m86_seclog_mark("mm_core_init EXIT");
 	poking_init();
 	ftrace_init();
 
@@ -937,7 +941,9 @@ void start_kernel(void)
 	 * timer interrupt). Full topology setup happens at smp_init()
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
+	m86_seclog_mark("sched_init ENTER");
 	sched_init();
+	m86_seclog_mark("sched_init EXIT");
 
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
@@ -969,15 +975,20 @@ void start_kernel(void)
 	context_tracking_init();
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
+	m86_seclog_mark("init_IRQ ENTER");
 	init_IRQ();
+	m86_seclog_mark("init_IRQ EXIT");
 	tick_init();
 	rcu_init_nohz();
 	init_timers();
 	srcu_init();
 	hrtimers_init();
 	softirq_init();
+	m86_seclog_mark("timekeeping_init ENTER");
 	timekeeping_init();
+	m86_seclog_mark("time_init ENTER");
 	time_init();
+	m86_seclog_mark("time_init EXIT");
 
 	/* This must be after timekeeping is initialized */
 	random_init();
@@ -1065,6 +1076,7 @@ void start_kernel(void)
 	kcsan_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
+	m86_seclog_mark("arch_call_rest_init ENTER");
 	arch_call_rest_init();
 
 	/*
@@ -1342,6 +1354,7 @@ static int run_init_process(const char *init_filename)
 {
 	const char *const *p;
 
+	m86_seclog_mark("run_init_process ENTER");
 	argv_init[0] = init_filename;
 	pr_info("Run %s as init process\n", init_filename);
 	pr_debug("  with arguments:\n");
@@ -1534,17 +1547,23 @@ static noinline void __init kernel_init_freeable(void)
 	init_mm_internals();
 
 	rcu_init_tasks_generic();
+	m86_seclog_mark("do_pre_smp_initcalls ENTER");
 	do_pre_smp_initcalls();
+	m86_seclog_mark("do_pre_smp_initcalls EXIT");
 	lockup_detector_init();
 
+	m86_seclog_mark("smp_init ENTER");
 	smp_init();
 	sched_init_smp();
+	m86_seclog_mark("smp_init EXIT");
 
 	workqueue_init_topology();
 	padata_init();
 	page_alloc_init_late();
 
+	m86_seclog_mark("do_basic_setup ENTER");
 	do_basic_setup();
+	m86_seclog_mark("do_basic_setup EXIT");
 
 	kunit_run_all_tests();
 
