@@ -579,4 +579,11 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/pvpanic/Kconfig"
 source "drivers/misc/mchp_pci1xxxx/Kconfig"
+config M86_TSU6721
+	tristate "Meizu PRO 5 TSU6721 USB switch driver"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  Say Y here to enable TI TSU6721 MUIC USB routing for Meizu PRO 5.
+
 endmenu

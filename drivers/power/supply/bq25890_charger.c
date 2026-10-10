@@ -122,6 +122,15 @@ struct bq25890_device {
 	struct regmap *rmap;
 	struct regmap_field *rmap_fields[F_MAX_FIELDS];
 
+	/* PRO 5 OEM ordinary-5V parallel charging policy. */
+	bool m86, m86_secondary, m86_charge_enabled, otg_vbus_enabled, m86_temp_tripped;
+	int m86_input_limit, m86_charge_current, m86_source_type, m86_source_max, m86_source_voltage;
+	struct power_supply *m86_source_psy;
+	int m86_ico_stage, m86_budget;
+	unsigned long m86_ico_deadline;
+	struct gpio_desc *m86_ce;
+	struct power_supply *m86_battery;
+	struct delayed_work m86_work;
 	bool skip_reset;
 	bool read_back_init_data;
 	bool force_hiz;
@@ -691,6 +700,8 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 	int maxval, ret;
 	u8 lval;
 
+	if (bq->m86) return -EPERM;
+
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		maxval = bq25890_find_val(bq->init_data.ichg, TBL_ICHG);
@@ -717,6 +728,9 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 static int bq25890_power_supply_property_is_writeable(struct power_supply *psy,
 						      enum power_supply_property psp)
 {
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+
+	if (bq->m86) return 0;
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
@@ -747,6 +761,11 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 	union power_supply_propval val;
 	int input_current_limit, ret;
 
+	if (bq->m86) {
+		if (!bq->m86_secondary)
+			mod_delayed_work(system_power_efficient_wq, &bq->m86_work, 0);
+		return;
+	}
 	if (bq->chip_version != BQ25892)
 		return;
 
@@ -870,6 +889,285 @@ static irqreturn_t bq25890_irq_handler_thread(int irq, void *private)
 	return ret;
 }
 
+/* PRO 5 ordinary-5V policy ported from meizuosc/m576 ubuntu 5a0c442:
+ * bq2589x_init_device, adjust_temp, adjust_ico, plug_{in,out}_event and
+ * battery_temp_poll. Use native regmap/ADC/PSY, one input budget for both
+ * chargers, bounded ICO and checked telemetry. No PE, OTG or chip reset.
+ */
+static int bq25890_m86_limits(struct bq25890_device *bq)
+{
+	const struct { enum bq25890_fields field; u8 value; } settings[] = {
+		{ F_OTG_CFG, 0 }, { F_WD, 0 }, { F_ICO_EN, 0 },
+		{ F_HVDCP_EN, 0 }, { F_MAXC_EN, 0 }, { F_AUTO_DPDM_EN, 0 },
+		{ F_FORCE_DPM, 0 }, { F_PUMPX_EN, 0 }, { F_EN_ILIM, 0 },
+		{ F_FORCE_VINDPM, 1 }, { F_VINDPM, 18 }, /* OEM 4.4 V */
+		{ F_IINLIM, 8 }, { F_EN_HIZ, bq->m86_secondary },
+	};
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(settings); i++) {
+		ret = bq25890_field_write(bq, settings[i].field, settings[i].value);
+		if (ret) return ret;
+	}
+	return 0;
+}
+
+static int bq25890_set_otg_cfg(struct bq25890_device *bq, u8 val);
+static int bq25890_m86_charge_current(const char *cell, int temp, int voltage)
+{
+	/* Native 64-mA DAC rounds down the OEM per-channel values. Unknown
+	 * cell uses the intersection of both tables, never assumes ATL. */
+	if (temp < 100) return 450000;
+	if (!strcmp(cell, "Sony")) return temp < 150 ? 1500000 : 2250000;
+	if (!strcmp(cell, "ATL"))
+		return temp < 250 && voltage > 4200000 ? 750000 : 2250000;
+	if (temp < 250 && voltage > 4200000) return 750000;
+	return temp < 150 ? 1500000 : 2250000;
+}
+
+static int bq25890_m86_apply(struct bq25890_device *bq, bool enable,
+			   int input, int charge, bool terminate)
+{
+	int ret;
+
+	/* CE is independent of silicon HiZ/CHG_CFG, including failed writes. */
+	if (!enable) gpiod_set_value_cansleep(bq->m86_ce, 0);
+	ret = bq25890_field_write(bq, F_IINLIM,
+				bq25890_find_idx(max(input, 100000), TBL_IINLIM));
+	if (!ret) ret = bq25890_field_write(bq, F_EN_HIZ, bq->m86_secondary && !enable);
+	if (!ret) ret = bq25890_field_write(bq, F_ICHG,
+				bq25890_find_idx(charge, TBL_ICHG));
+	if (!ret) ret = bq25890_field_write(bq, F_ITERM, terminate ? 1 : 0);
+	if (!ret) ret = bq25890_field_write(bq, F_TERM_EN, terminate);
+	if (!ret) ret = bq25890_field_write(bq, F_CHG_CFG, enable);
+	if (!ret) ret = bq25890_field_write(bq, F_CONV_RATE, enable);
+	if (ret) {
+		enable = false;
+		bq25890_field_write(bq, F_CHG_CFG, 0);
+	}
+	gpiod_set_value_cansleep(bq->m86_ce, enable);
+	bq->force_hiz = bq->m86_secondary && !enable;
+	if (enable != bq->m86_charge_enabled || input != bq->m86_input_limit ||
+	    charge != bq->m86_charge_current) {
+		dev_info(bq->dev, "m86 OEM charge=%d input=%duA ichg=%duA secondary=%d\n",
+			 enable, input, charge, bq->m86_secondary);
+		bq->m86_charge_enabled = enable;
+		bq->m86_input_limit = input;
+		bq->m86_charge_current = charge;
+		power_supply_changed(bq->charger);
+	}
+	__bq25890_handle_irq(bq);
+	return ret;
+}
+
+static void bq25890_m86_poll(struct work_struct *work)
+{
+	struct bq25890_device *bq = container_of(to_delayed_work(work),
+					struct bq25890_device, m86_work);
+	struct bq25890_device *aux = power_supply_get_drvdata(bq->secondary_chrg);
+	union power_supply_propval temp, present, online, voltage, capacity, type, maximum, cell, pd_volt;
+	bool enable = false, terminate = false, is_pd = false;
+	int ret, vbus, optimized, idpm, budget = 500000, charge = 450000, aux_input = 0;
+
+	mutex_lock(&bq->lock);
+	mutex_lock(&aux->lock);
+	if (bq->otg_vbus_enabled) {
+		if (bq25890_field_read(bq, F_OTG_CFG) <= 0)
+			bq25890_set_otg_cfg(bq, 1);
+		goto out;
+	}
+	/* All decisions use valid current measurements, not fallback 30 C or
+	 * uninitialized voltage from the old driver. Fail closed on errors. */
+	ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_TEMP, &temp);
+	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_PRESENT, &present);
+	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_VOLTAGE_NOW, &voltage);
+	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_CAPACITY, &capacity);
+	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_MANUFACTURER, &cell);
+	if (!bq->m86_source_psy) {
+		struct power_supply *psy = power_supply_get_by_phandle(bq->dev->of_node, "meizu,usb-source");
+		if (IS_ERR_OR_NULL(psy))
+			goto out;
+		bq->m86_source_psy = psy;
+	}
+	ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_ONLINE, &online);
+	if (!ret) ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_USB_TYPE, &type);
+	if (!ret) ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_CURRENT_MAX, &maximum);
+	pd_volt.intval = 5000000;
+	if (!ret) {
+		if (power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &pd_volt))
+			pd_volt.intval = 5000000;
+	}
+	is_pd = (type.intval == POWER_SUPPLY_USB_TYPE_PD ||
+		 type.intval == POWER_SUPPLY_USB_TYPE_PD_PPS ||
+		 pd_volt.intval >= 8000000);
+	if (bq->m86_temp_tripped) {
+		if (temp.intval <= 420)
+			bq->m86_temp_tripped = false;
+	} else if (temp.intval > 450) {
+		bq->m86_temp_tripped = true;
+	}
+	if (!ret) {
+		enable = present.intval && online.intval && temp.intval >= 0 && !bq->m86_temp_tripped &&
+			 voltage.intval >= 2500000 && voltage.intval <= 4500000 &&
+			 capacity.intval < 100 && !terminate;
+		charge = bq25890_m86_charge_current(cell.strval, temp.intval, voltage.intval);
+		if (temp.intval >= 420)
+			charge = min(charge, 1000000);
+		terminate = capacity.intval == 100;
+	}
+	if (!enable) {
+		bq->m86_ico_stage = 0;
+		bq->m86_source_type = -1;
+		bq->m86_source_max = 0;
+		bq->m86_budget = 500000;
+		bq25890_field_write(bq, F_ICO_EN, 0);
+		goto apply;
+	}
+	if (type.intval != bq->m86_source_type || maximum.intval != bq->m86_source_max ||
+	    pd_volt.intval != bq->m86_source_voltage) {
+		bq->m86_ico_stage = 0;
+		bq->m86_source_type = type.intval;
+		bq->m86_source_max = maximum.intval;
+		bq->m86_source_voltage = pd_volt.intval;
+		bq->m86_budget = 500000;
+		bq25890_field_write(bq, F_ICO_EN, 0);
+		goto apply; /* One continuous-ADC interval before a new ICO. */
+	}
+	if (is_pd) {
+		/*
+		 * OEM Flyme 3.10 bq2589x_dual:
+		 * VINDPM is fixed at 4400mV (idx=18) in bq2589x_init_device across
+		 * all 5V/9V/12V modes to prevent false throttling under cable load.
+		 */
+		bq25890_field_write(bq, F_FORCE_VINDPM, 1);
+		bq25890_field_write(bq, F_VINDPM, 18);
+		bq25890_field_write(aux, F_FORCE_VINDPM, 1);
+		bq25890_field_write(aux, F_VINDPM, 18);
+
+		budget = clamp(maximum.intval, 500000, 3250000);
+		bq->m86_budget = budget;
+		bq->m86_ico_stage = 2;
+
+		if (pd_volt.intval >= 8000000 && budget >= 1000000 &&
+		    capacity.intval < 95 && temp.intval <= 420) {
+			/*
+			 * Parallel dual charging:
+			 * In OEM 3.10, both Main and Aux run up to 2.0A input limit.
+			 * Split budget evenly between Main and Aux so Main has headroom
+			 * to power VSYS while both chips deliver 2.25A+2.25A into battery.
+			 */
+			aux_input = min(budget / 2, 1500000);
+		}
+	} else
+	if (maximum.intval > 500000) {
+		/* Supplier CURRENT_MAX is the detection ceiling, not an assertion
+		 * that an Apple/nonstandard adapter can deliver that current. ICO
+		 * measures the usable budget; aux is isolated throughout probing. */
+		vbus = bq25890_field_read(bq, F_VBUSV);
+		if (vbus < 0) { enable = false; goto cancel; }
+		if (vbus > 29) {
+			bq->m86_ico_stage = 2;
+			bq->m86_budget = 500000;
+			bq25890_field_write(bq, F_ICO_EN, 0);
+			goto apply;
+		}
+		if (bq->m86_ico_stage == 0 && vbus >= 19 && vbus <= 29) {
+			ret = bq25890_m86_apply(aux, false, 100000, charge, terminate);
+			if (!ret) ret = bq25890_m86_apply(bq, true, min(maximum.intval, 2000000), charge, terminate);
+			if (!ret) ret = bq25890_field_write(bq, F_ICO_EN, 1);
+			if (!ret) ret = bq25890_field_write(bq, F_FORCE_ICO, 1);
+			if (ret) { enable = false; goto cancel; }
+			bq->m86_ico_stage = 1;
+			bq->m86_ico_deadline = jiffies + 5 * HZ;
+			dev_info(bq->dev, "m86 OEM ICO start ceiling=%duA\n", min(maximum.intval, 2000000));
+			goto out;
+		}
+		if (bq->m86_ico_stage == 1) {
+			optimized = bq25890_field_read(bq, F_ICO_OPTIMIZED);
+			if (optimized < 0) { enable = false; goto cancel; }
+			if (optimized) {
+				idpm = bq25890_field_read(bq, F_IDPM_LIM);
+				if (idpm < 0) { enable = false; goto cancel; }
+				idpm = bq25890_find_val(idpm, TBL_IINLIM);
+				budget = clamp(idpm - 120000, 500000, min(maximum.intval, 2000000));
+				if (idpm > 1800000) budget = min(budget, 1700000);
+				bq->m86_budget = budget / 50000 * 50000;
+				bq->m86_ico_stage = 2;
+				dev_info(bq->dev, "m86 OEM ICO measured=%duA shared_budget=%duA\n", idpm, bq->m86_budget);
+			} else if (time_after_eq(jiffies, bq->m86_ico_deadline) || vbus < 19 || vbus > 29) {
+				bq->m86_ico_stage = 2;
+				bq->m86_budget = 500000;
+				dev_warn(bq->dev, "m86 OEM ICO incomplete/voltage invalid; 500mA fallback\n");
+			} else {
+				if (bq25890_m86_apply(bq, true, min(maximum.intval, 2000000), charge, terminate)) {
+					enable = false;
+					goto cancel;
+				}
+				goto out;
+			}
+			ret = bq25890_field_write(bq, F_ICO_EN, 0);
+			if (ret) { enable = false; goto cancel; }
+		}
+		budget = bq->m86_budget;
+		/* Retain silicon 4.4V DPM and reduce the shared setting if a
+		 * previously measured supply droops; reprobe on a new attachment. */
+		if (bq->m86_ico_stage == 2 && vbus < 19 && budget > 500000)
+			budget = bq->m86_budget = max(500000, budget - 100000);
+		/* Prefer 1A on main for SYS. Share surplus only after ICO; near
+		 * full use main alone so parallel taper cannot mask termination. */
+		if (bq->m86_ico_stage == 2 && budget >= 1200000 &&
+		    capacity.intval < 95 && voltage.intval < 4300000)
+			aux_input = budget - 1000000;
+	}
+apply:
+	/* Quiesce aux before changing main; never exceed the measured total. */
+	if (!enable || !aux_input || aux_input != aux->m86_input_limit)
+		if (bq25890_m86_apply(aux, false, aux_input ?: 100000, charge, terminate)) enable = false;
+	if (bq25890_m86_apply(bq, enable, budget - aux_input, charge, terminate)) enable = false;
+	if (!enable)
+		bq25890_m86_apply(aux, false, 100000, charge, terminate);
+	else if (aux_input && bq25890_m86_apply(aux, true, aux_input, charge, terminate)) {
+		bq25890_m86_apply(aux, false, 100000, charge, terminate);
+		bq25890_m86_apply(bq, false, 500000, charge, terminate);
+	}
+	goto out;
+cancel:
+	bq->m86_ico_stage = 0;
+	bq->m86_source_type = -1;
+	bq->m86_source_voltage = 0;
+	bq25890_field_write(bq, F_ICO_EN, 0);
+	bq25890_field_write(bq, F_FORCE_VINDPM, 1);
+	bq25890_field_write(bq, F_VINDPM, 18);
+	bq25890_field_write(aux, F_FORCE_VINDPM, 1);
+	bq25890_field_write(aux, F_VINDPM, 18);
+	goto apply;
+out:
+	mutex_unlock(&aux->lock);
+	mutex_unlock(&bq->lock);
+	queue_delayed_work(system_power_efficient_wq, &bq->m86_work, HZ);
+}
+
+static void bq25890_m86_stop(void *data)
+{
+	struct bq25890_device *bq = data;
+	struct bq25890_device *aux;
+
+	cancel_delayed_work_sync(&bq->m86_work);
+	gpiod_set_value_cansleep(bq->m86_ce, 0);
+	if (!bq->m86_secondary && bq->m86_source_psy) {
+		power_supply_put(bq->m86_source_psy);
+		bq->m86_source_psy = NULL;
+	}
+	bq25890_field_write(bq, F_CHG_CFG, 0);
+	bq25890_field_write(bq, F_ICO_EN, 0);
+	if (!bq->m86_secondary && bq->secondary_chrg) {
+		aux = power_supply_get_drvdata(bq->secondary_chrg);
+		gpiod_set_value_cansleep(aux->m86_ce, 0);
+		bq25890_field_write(aux, F_CHG_CFG, 0);
+		bq25890_field_write(aux, F_EN_HIZ, 1);
+	}
+}
+
 static int bq25890_chip_reset(struct bq25890_device *bq)
 {
 	int ret;
@@ -951,7 +1249,7 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 		 * takes care of initalizition F_CHG_CFG is set to 0 before
 		 * handing control over to the OS.
 		 */
-		ret = bq25890_field_write(bq, F_CHG_CFG, 1);
+		ret = bq25890_field_write(bq, F_CHG_CFG, !bq->m86);
 		if (ret < 0) {
 			dev_dbg(bq->dev, "Enabling charging failed %d\n", ret);
 			return ret;
@@ -970,6 +1268,10 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 	if (ret)
 		return ret;
 
+	if (bq->m86) {
+		ret = bq25890_m86_limits(bq);
+		if (ret) return ret;
+	}
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0) {
 		dev_dbg(bq->dev, "Get state failed %d\n", ret);
@@ -1034,8 +1336,17 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->desc = bq25890_power_supply_desc;
 	bq->desc.name = bq->name;
 
+	if (bq->m86) psy_cfg.of_node = bq->dev->of_node;
+	if (bq->m86) {
+		static char *battery[] = { "m86-bq27532" };
+		strscpy(bq->name, bq->m86_secondary ? "m86-charger-aux" :
+			"m86-charger-main", sizeof(bq->name));
+		psy_cfg.supplied_to = battery;
+		psy_cfg.num_supplicants = bq->m86_secondary ? 0 : 1;
+	} else {
 	psy_cfg.supplied_to = bq25890_charger_supplied_to;
 	psy_cfg.num_supplicants = ARRAY_SIZE(bq25890_charger_supplied_to);
+	}
 
 	bq->charger = devm_power_supply_register(bq->dev, &bq->desc, &psy_cfg);
 
@@ -1156,6 +1467,8 @@ static int bq25890_vbus_enable(struct regulator_dev *rdev)
 		.intval = 0,
 	};
 
+	bq->otg_vbus_enabled = true;
+
 	/*
 	 * When enabling 5V boost / Vbus output, we need to put the secondary
 	 * charger in Hi-Z mode to avoid it trying to charge the secondary
@@ -1175,6 +1488,7 @@ static int bq25890_vbus_disable(struct regulator_dev *rdev)
 	};
 	int ret;
 
+	bq->otg_vbus_enabled = false;
 	ret = bq25890_set_otg_cfg(bq, 0);
 	if (ret)
 		return ret;
@@ -1189,7 +1503,7 @@ static int bq25890_vbus_is_enabled(struct regulator_dev *rdev)
 {
 	struct bq25890_device *bq = rdev_get_drvdata(rdev);
 
-	return bq25890_field_read(bq, F_OTG_CFG);
+	return bq->otg_vbus_enabled || (bq25890_field_read(bq, F_OTG_CFG) > 0);
 }
 
 static int bq25890_vbus_get_voltage(struct regulator_dev *rdev)
@@ -1452,6 +1766,7 @@ static int bq25890_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct bq25890_device *bq;
 	int ret;
+	struct regmap_config config = bq25890_regmap_config;
 
 	bq = devm_kzalloc(dev, sizeof(*bq), GFP_KERNEL);
 	if (!bq)
@@ -1463,8 +1778,23 @@ static int bq25890_probe(struct i2c_client *client)
 
 	mutex_init(&bq->lock);
 	INIT_DELAYED_WORK(&bq->pump_express_work, bq25890_pump_express_work);
+	INIT_DELAYED_WORK(&bq->m86_work, bq25890_m86_poll);
+	bq->m86 = of_device_is_compatible(dev->of_node, "meizu,m86-bq25892");
+	bq->m86_secondary = device_property_read_bool(dev, "meizu,secondary-charger");
+	bq->force_hiz = bq->m86_secondary;
+	if (bq->m86) {
+		if (!of_machine_is_compatible("meizu,m86")) return -ENODEV;
+		bq->m86_ce = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
+		if (IS_ERR(bq->m86_ce)) return PTR_ERR(bq->m86_ce);
+		if (!bq->m86_secondary) {
+			bq->m86_battery = devm_power_supply_get_by_phandle(dev, "meizu,battery");
+			if (IS_ERR(bq->m86_battery)) return PTR_ERR(bq->m86_battery);
+			if (!bq->m86_battery) return -EPROBE_DEFER;
+		}
+	}
 
-	bq->rmap = devm_regmap_init_i2c(client, &bq25890_regmap_config);
+	if (bq->m86) config.cache_type = REGCACHE_NONE;
+	bq->rmap = devm_regmap_init_i2c(client, &config);
 	if (IS_ERR(bq->rmap))
 		return dev_err_probe(dev, PTR_ERR(bq->rmap),
 				     "failed to allocate register map\n");
@@ -1486,6 +1816,19 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "reading device properties\n");
 
+	if (bq->m86) {
+		if (bq->chip_version != BQ25892 || bq->init_data.ichg > 35 ||
+		    bq->init_data.vreg > 32 || bq->pump_express_vbus_max ||
+		    bq->read_back_init_data || !bq->skip_reset)
+			return -EINVAL;
+		if (!bq->m86_secondary) {
+			struct bq25890_device *aux;
+			if (!bq->secondary_chrg) return -EINVAL;
+			aux = power_supply_get_drvdata(bq->secondary_chrg);
+			if (!aux || !aux->m86 || !aux->m86_secondary) return -EINVAL;
+			if (!device_link_add(dev, aux->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) return -ENOMEM;
+		}
+	}
 	ret = bq25890_hw_init(bq);
 	if (ret < 0) {
 		dev_err(dev, "Cannot initialize the chip: %d\n", ret);
@@ -1501,7 +1844,7 @@ static int bq25890_probe(struct i2c_client *client)
 	}
 
 	/* OTG reporting */
-	bq->usb_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
+	if (!bq->m86) bq->usb_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
 
 	/*
 	 * This must be before bq25890_power_supply_init(), so that it runs
@@ -1511,7 +1854,7 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
-	ret = bq25890_register_regulator(bq);
+	ret = (bq->m86 && bq->m86_secondary) ? 0 : bq25890_register_regulator(bq);
 	if (ret)
 		return ret;
 
@@ -1526,6 +1869,14 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
+	if (bq->m86) {
+		ret = devm_add_action_or_reset(dev, bq25890_m86_stop, bq);
+		if (ret) return ret;
+		if (!bq->m86_secondary)
+			queue_delayed_work(system_power_efficient_wq, &bq->m86_work, 0);
+		dev_info(dev, "m86 BQ25892 %s: OEM 5V ICO/temperature policy VREG=4352mV; no reset\n",
+			 bq->m86_secondary ? "secondary coordinated" : "primary");
+	}
 	if (!IS_ERR_OR_NULL(bq->usb_phy)) {
 		INIT_WORK(&bq->usb_work, bq25890_usb_work);
 		bq->usb_nb.notifier_call = bq25890_usb_notifier;
@@ -1538,6 +1889,8 @@ static int bq25890_probe(struct i2c_client *client)
 static void bq25890_remove(struct i2c_client *client)
 {
 	struct bq25890_device *bq = i2c_get_clientdata(client);
+
+	if (bq->m86) bq25890_m86_stop(bq);
 
 	if (!IS_ERR_OR_NULL(bq->usb_phy)) {
 		usb_unregister_notifier(bq->usb_phy, &bq->usb_nb);
@@ -1553,6 +1906,8 @@ static void bq25890_remove(struct i2c_client *client)
 static void bq25890_shutdown(struct i2c_client *client)
 {
 	struct bq25890_device *bq = i2c_get_clientdata(client);
+
+	if (bq->m86) { bq25890_m86_stop(bq); return; }
 
 	/*
 	 * TODO this if + return should probably be removed, but that would
