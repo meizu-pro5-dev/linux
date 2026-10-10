@@ -36,7 +36,7 @@
 
 #define MIN_FB_WIDTH_FOR_16WORD_BURST 128
 
-#define WINDOWS_NR	2
+#define WINDOWS_NR	5
 
 struct decon_context {
 	struct device			*dev;
@@ -80,6 +80,9 @@ static const uint32_t decon_formats[] = {
 
 static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
 	DRM_PLANE_TYPE_PRIMARY,
+	DRM_PLANE_TYPE_OVERLAY,
+	DRM_PLANE_TYPE_OVERLAY,
+	DRM_PLANE_TYPE_OVERLAY,
 	DRM_PLANE_TYPE_CURSOR,
 };
 
