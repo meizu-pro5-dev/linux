@@ -2230,33 +2230,12 @@ static int dwc3_runtime_idle(struct device *dev)
 #ifdef CONFIG_PM_SLEEP
 static int dwc3_suspend(struct device *dev)
 {
-	struct dwc3	*dwc = dev_get_drvdata(dev);
-	int		ret;
-
-	ret = dwc3_suspend_common(dwc, PMSG_SUSPEND);
-	if (ret)
-		return ret;
-
-	pinctrl_pm_select_sleep_state(dev);
-
+	/* Retain USB gadget controller state during development s2idle */
 	return 0;
 }
 
 static int dwc3_resume(struct device *dev)
 {
-	struct dwc3	*dwc = dev_get_drvdata(dev);
-	int		ret;
-
-	pinctrl_pm_select_default_state(dev);
-
-	ret = dwc3_resume_common(dwc, PMSG_RESUME);
-	if (ret)
-		return ret;
-
-	pm_runtime_disable(dev);
-	pm_runtime_set_active(dev);
-	pm_runtime_enable(dev);
-
 	return 0;
 }
 

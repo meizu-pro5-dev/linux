@@ -2661,10 +2661,9 @@ cleanup:
 
 
 static const struct dev_pm_ops brcmf_pciedrvr_pm = {
-	.suspend = brcmf_pcie_pm_enter_D3,
-	.resume = brcmf_pcie_pm_leave_D3,
-	.freeze = brcmf_pcie_pm_enter_D3,
-	.restore = brcmf_pcie_pm_leave_D3,
+	/* On Exynos 7420, PCIe root complex does not support dynamic D3 link re-training;
+	 * keep PCIe link in stable L0 to prevent AXI bus hang during s2idle.
+	 */
 };
 
 

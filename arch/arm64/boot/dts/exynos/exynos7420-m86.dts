@@ -261,6 +261,7 @@
 			linux,code = <KEY_POWER>;
 			gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
+			wakeup-source;
 		};
 		volume-down {
 			label = "Volume down";
@@ -279,6 +280,7 @@
 			linux,code = <KEY_LEFTMETA>;
 			gpios = <&gpa3 2 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
+			wakeup-source;
 		};
 	};
 };
