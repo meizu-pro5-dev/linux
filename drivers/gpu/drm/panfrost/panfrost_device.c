@@ -3,6 +3,12 @@
 /* Copyright 2019 Linaro, Ltd, Rob Herring <robh@kernel.org> */
 
 #include <linux/clk.h>
+#include <linux/export.h>
+#include <linux/mfd/syscon.h>
+#include <linux/m86-panfrost-domain.h>
+#include <linux/of.h>
+#include <linux/regmap.h>
+#include <linux/m86-gpu-dvfs.h>
 #include <linux/reset.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
@@ -17,6 +23,7 @@
 #include "panfrost_job.h"
 #include "panfrost_mmu.h"
 #include "panfrost_perfcnt.h"
+#include "panfrost_regs.h"
 
 static int panfrost_reset_init(struct panfrost_device *pfdev)
 {
@@ -401,10 +408,96 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
 	panfrost_job_enable_interrupts(pfdev);
 }
 
+/* Caller is the serialized genpd power-off boundary, after consumer suspend.
+ * A device reference alone does not pin pfdev: platform glue must exclude
+ * driver unbind/fini and concurrent resume/reset for this entire call.
+ * No device_lock or PM get here: either can deadlock removal/runtime PM.
+ */
+int m86_panfrost_domain_idle(struct device *dev)
+{
+ static const u32 registers[] = {
+  SHADER_READY_LO, SHADER_READY_HI, TILER_READY_LO, TILER_READY_HI,
+  L2_READY_LO, L2_READY_HI,
+  SHADER_PWRTRANS_LO, SHADER_PWRTRANS_HI, TILER_PWRTRANS_LO, TILER_PWRTRANS_HI,
+  L2_PWRTRANS_LO, L2_PWRTRANS_HI,
+ };
+ struct panfrost_device *pfdev;
+ struct regmap *pmu;
+ unsigned long flags;
+ unsigned int cfg, status;
+ enum rpm_status rpm;
+ unsigned int i;
+ int ret;
+
+ if (!dev || !of_machine_is_compatible("meizu,m86"))
+  return -ENODEV;
+ if (!dev->driver)
+  return -EBUSY;
+ if (strcmp(dev->driver->name, "panfrost"))
+  return -ENODEV;
+ pfdev = dev_get_drvdata(dev);
+ if (!pfdev || pfdev->dev != dev || !pfdev->iomem || !pfdev->ddev ||
+     !pfdev->js || !pfdev->reset.wq || !pm_runtime_enabled(dev))
+  return -EBUSY;
+ spin_lock_irqsave(&dev->power.lock, flags);
+ rpm = dev->power.runtime_status;
+ spin_unlock_irqrestore(&dev->power.lock, flags);
+ /* genpd_runtime_suspend powers off before PM core changes SUSPENDING to
+  * SUSPENDED. Both states require the completed component suspend bits. */
+ if (rpm != RPM_SUSPENDED && rpm != RPM_SUSPENDING)
+  return -EBUSY;
+ if (!test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended) ||
+     !test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended) ||
+     !test_bit(PANFROST_COMP_BIT_GPU, pfdev->is_suspended) ||
+     atomic_read(&pfdev->reset.pending) || !panfrost_job_is_idle(pfdev))
+  return -EBUSY;
+ /* Provider must already prove F/F and retain CMU/bridge clocks. Repeat
+  * PMU proof here before any consumer MMIO; PMU is outside G3D. */
+ pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7-pmu");
+ if (IS_ERR(pmu))
+  return PTR_ERR(pmu);
+ ret = regmap_read(pmu, 0x4100, &cfg);
+ if (ret)
+  return ret;
+ ret = regmap_read(pmu, 0x4104, &status);
+ if (ret)
+  return ret;
+ if ((cfg & 15) != 15 || (status & 15) != 15)
+  return -EHOSTDOWN;
+ for (i = 0; i < ARRAY_SIZE(registers); i++)
+  if (readl(pfdev->iomem + registers[i]))
+   return -EBUSY;
+ /* Recheck software and domain state; this is an observation, not an
+  * exclusion primitive for callers outside the documented PM boundary. */
+ if (!test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended) ||
+     !test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended) ||
+     !test_bit(PANFROST_COMP_BIT_GPU, pfdev->is_suspended) ||
+     atomic_read(&pfdev->reset.pending) || !panfrost_job_is_idle(pfdev))
+  return -EBUSY;
+ ret = regmap_read(pmu, 0x4100, &cfg);
+ if (ret)
+  return ret;
+ ret = regmap_read(pmu, 0x4104, &status);
+ if (ret)
+  return ret;
+ return (cfg & 15) == 15 && (status & 15) == 15 ? 0 : -EHOSTDOWN;
+}
+EXPORT_SYMBOL_GPL(m86_panfrost_domain_idle);
+
 static int panfrost_device_resume(struct device *dev)
 {
 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
 
+	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
+#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
+		int ret = m86_gpu_resume_validate(dev);
+
+		if (ret)
+			return ret;
+#else
+		return -EOPNOTSUPP;
+#endif
+	}
 	panfrost_device_reset(pfdev);
 	panfrost_devfreq_resume(pfdev);
 
@@ -419,6 +512,9 @@ static int panfrost_device_suspend(struct device *dev)
 		return -EBUSY;
 
 	panfrost_devfreq_suspend(pfdev);
+	panfrost_job_suspend_irq(pfdev);
+	panfrost_mmu_suspend_irq(pfdev);
+	panfrost_gpu_suspend_irq(pfdev);
 	panfrost_gpu_power_off(pfdev);
 
 	return 0;

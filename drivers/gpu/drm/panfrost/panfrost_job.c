@@ -184,7 +184,7 @@ panfrost_enqueue_job(struct panfrost_device *pfdev, int slot,
 	return 1;
 }
 
-static void panfrost_job_hw_submit(struct panfrost_job *job, int js)
+static int panfrost_job_hw_submit(struct panfrost_job *job, int js)
 {
 	struct panfrost_device *pfdev = job->pfdev;
 	unsigned int subslot;
@@ -192,17 +192,18 @@ static void panfrost_job_hw_submit(struct panfrost_job *job, int js)
 	u64 jc_head = job->jc;
 	int ret;
 
-	panfrost_devfreq_record_busy(&pfdev->pfdevfreq);
-
 	ret = pm_runtime_get_sync(pfdev->dev);
 	if (ret < 0)
-		return;
+		goto err_hwsubmit;
 
 	if (WARN_ON(job_read(pfdev, JS_COMMAND_NEXT(js)))) {
-		return;
+		ret = -EINVAL;
+		goto err_hwsubmit;
 	}
 
 	cfg = panfrost_mmu_as_get(pfdev, job->mmu);
+
+	panfrost_devfreq_record_busy(&pfdev->pfdevfreq);
 
 	job_write(pfdev, JS_HEAD_NEXT_LO(js), lower_32_bits(jc_head));
 	job_write(pfdev, JS_HEAD_NEXT_HI(js), upper_32_bits(jc_head));
@@ -239,6 +240,12 @@ static void panfrost_job_hw_submit(struct panfrost_job *job, int js)
 			job, js, subslot, jc_head, cfg & 0xf);
 	}
 	spin_unlock(&pfdev->js->job_lock);
+
+	return 0;
+
+err_hwsubmit:
+	pm_runtime_put_autosuspend(pfdev->dev);
+	return ret;
 }
 
 static int panfrost_acquire_object_fences(struct drm_gem_object **bos,
@@ -360,6 +367,10 @@ static struct dma_fence *panfrost_job_run(struct drm_sched_job *sched_job)
 	struct panfrost_device *pfdev = job->pfdev;
 	int slot = panfrost_job_get_slot(job);
 	struct dma_fence *fence = NULL;
+	int ret;
+
+	if (atomic_read(&pfdev->reset.pm_failed))
+		return ERR_PTR(-EHOSTDOWN);
 
 	if (unlikely(job->base.s_fence->finished.error))
 		return NULL;
@@ -378,9 +389,21 @@ static struct dma_fence *panfrost_job_run(struct drm_sched_job *sched_job)
 		dma_fence_put(job->done_fence);
 	job->done_fence = dma_fence_get(fence);
 
-	panfrost_job_hw_submit(job, slot);
+	ret = panfrost_job_hw_submit(job, slot);
+	if (ret) {
+		dma_fence_put(fence);
+		return ERR_PTR(ret);
+	}
 
 	return fence;
+}
+
+void panfrost_job_suspend_irq(struct panfrost_device *pfdev)
+{
+	set_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended);
+
+	job_write(pfdev, JOB_INT_MASK, 0);
+	synchronize_irq(pfdev->js->irq);
 }
 
 void panfrost_job_enable_interrupts(struct panfrost_device *pfdev)
@@ -388,12 +411,59 @@ void panfrost_job_enable_interrupts(struct panfrost_device *pfdev)
 	int j;
 	u32 irq_mask = 0;
 
+	clear_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended);
+
 	for (j = 0; j < NUM_JOB_SLOTS; j++) {
 		irq_mask |= MK_JS_MASK(j);
 	}
 
 	job_write(pfdev, JOB_INT_CLEAR, irq_mask);
 	job_write(pfdev, JOB_INT_MASK, irq_mask);
+}
+
+/* Only inspect metadata held alive by this job's mapping references and
+ * gpu_usecount. No BO mapping, buffer reads or additional IRQ-context locks.
+ */
+static void panfrost_job_log_fault_context(struct panfrost_device *pfdev,
+                                         struct panfrost_job *job,
+                                         unsigned int js)
+{
+	u64 head = job_read(pfdev, JS_HEAD_LO(js)) |
+		   ((u64)job_read(pfdev, JS_HEAD_HI(js)) << 32);
+	u64 tail = job_read(pfdev, JS_TAIL_LO(js)) |
+		   ((u64)job_read(pfdev, JS_TAIL_HI(js)) << 32);
+	unsigned int i;
+
+	dev_err(pfdev->dev,
+		"fault context: js=%u tgid=%d comm=%*pE original_jc=0x%016llx jc=0x%016llx head=0x%016llx tail=0x%016llx fence=%llu:%llu mmu=%p as=%u req=0x%x bos=%u\n",
+		js, job->submitter_tgid,
+		(int)strnlen(job->submitter_comm, TASK_COMM_LEN),
+		job->submitter_comm, job->original_jc, job->jc, head, tail,
+		job->done_fence->context, job->done_fence->seqno, job->mmu,
+		job_read(pfdev, JS_CONFIG(js)) & 0xf,
+		job->requirements, job->bo_count);
+
+	for (i = 0; job->mappings && i < job->bo_count && i < 32; i++) {
+		struct panfrost_gem_mapping *mapping = job->mappings[i];
+		struct panfrost_gem_object *bo;
+		u64 start, size;
+		bool original_match, head_match;
+
+		if (!mapping)
+			continue;
+
+		start = mapping->mmnode.start << PAGE_SHIFT;
+		size = mapping->mmnode.size << PAGE_SHIFT;
+		original_match = job->original_jc >= start &&
+				 job->original_jc - start < size;
+		head_match = head >= start && head - start < size;
+		bo = mapping->obj;
+		dev_err(pfdev->dev,
+			"fault mapping: fence=%llu:%llu index=%u va=0x%016llx size=0x%llx original=%u head=%u heap=%u imported=%u noexec=%u\n",
+			job->done_fence->context, job->done_fence->seqno,
+			i, start, size, original_match, head_match,
+			bo->is_heap, !!bo->base.base.import_attach, bo->noexec);
+	}
 }
 
 static void panfrost_job_handle_err(struct panfrost_device *pfdev,
@@ -410,6 +480,7 @@ static void panfrost_job_handle_err(struct panfrost_device *pfdev,
 			job_read(pfdev, JS_HEAD_LO(js)),
 			job_read(pfdev, JS_TAIL_LO(js)));
 	} else {
+		panfrost_job_log_fault_context(pfdev, job, js);
 		dev_err(pfdev->dev, "js fault, js=%d, status=%s, head=0x%x, tail=0x%x",
 			js, exception_name,
 			job_read(pfdev, JS_HEAD_LO(js)),
@@ -600,7 +671,27 @@ static u32 panfrost_active_slots(struct panfrost_device *pfdev,
 	return js_state & *js_state_mask;
 }
 
-static void
+/* No MMIO is safe after a failed active-device pin. Keep hardware jobs and
+ * their fences/resources alive: without a powered GPU we cannot prove they
+ * stopped. This is a fail-stop condition, not a recoverable reset attempt.
+ */
+static int panfrost_reset_pm_failed(struct panfrost_device *pfdev,
+				  struct drm_sched_job *bad, int ret)
+{
+	unsigned int i;
+
+	if (atomic_xchg(&pfdev->reset.pm_failed, 1))
+		return -EHOSTDOWN;
+	atomic_set(&pfdev->reset.pending, 1);
+	for (i = 0; i < NUM_JOB_SLOTS; i++)
+		drm_sched_stop(&pfdev->js->queue[i].sched, bad);
+	dev_err(pfdev->dev,
+		"reset cannot resume GPU (%d); schedulers stopped, jobs retained\n",
+		ret);
+	return ret < 0 ? ret : -EHOSTDOWN;
+}
+
+static int
 panfrost_reset(struct panfrost_device *pfdev,
 	       struct drm_sched_job *bad)
 {
@@ -609,8 +700,23 @@ panfrost_reset(struct panfrost_device *pfdev,
 	bool cookie;
 	int ret;
 
+	if (atomic_read(&pfdev->reset.pm_failed))
+		return -EHOSTDOWN;
 	if (!atomic_read(&pfdev->reset.pending))
-		return;
+		return 0;
+
+	/* Both reset work and all scheduler timeouts execute on reset.wq,
+	 * an ordered queue. No caller holds the runtime-PM/genpd locks.
+	 * Runtime resume invokes panfrost_device_reset(), not this scheduler
+	 * reset, so it does not recurse. Hold our own reference across dropping
+	 * hardware-job refs, clearing pending and the final interrupt write.
+	 */
+	ret = pm_runtime_resume_and_get(pfdev->dev);
+	if (ret < 0) {
+		if (!atomic_read(&pfdev->reset.pending))
+			return 0;
+		return panfrost_reset_pm_failed(pfdev, bad, ret);
+	}
 
 	/* Stop the schedulers.
 	 *
@@ -704,6 +810,9 @@ panfrost_reset(struct panfrost_device *pfdev,
 		  GENMASK(NUM_JOB_SLOTS - 1, 0));
 
 	dma_fence_end_signalling(cookie);
+	pm_runtime_mark_last_busy(pfdev->dev);
+	pm_runtime_put_autosuspend(pfdev->dev);
+	return 0;
 }
 
 static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
@@ -712,6 +821,10 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 	struct panfrost_job *job = to_panfrost_job(sched_job);
 	struct panfrost_device *pfdev = job->pfdev;
 	int js = panfrost_job_get_slot(job);
+	int ret;
+
+	if (atomic_read(&pfdev->reset.pm_failed))
+		return DRM_GPU_SCHED_STAT_ENODEV;
 
 	/*
 	 * If the GPU managed to complete this jobs fence, the timeout is
@@ -736,6 +849,16 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 		return DRM_GPU_SCHED_STAT_NOMINAL;
 	}
 
+	/* Timeout diagnostics also access registers, before panfrost_reset(). */
+	ret = pm_runtime_resume_and_get(pfdev->dev);
+	if (ret < 0) {
+		/* Completion can drop the last job PM ref after our fence check. */
+		if (dma_fence_is_signaled(job->done_fence))
+			return DRM_GPU_SCHED_STAT_NOMINAL;
+		panfrost_reset_pm_failed(pfdev, sched_job, ret);
+		return DRM_GPU_SCHED_STAT_ENODEV;
+	}
+
 	dev_err(pfdev->dev, "gpu sched timeout, js=%d, config=0x%x, status=0x%x, head=0x%x, tail=0x%x, sched_job=%p",
 		js,
 		job_read(pfdev, JS_CONFIG(js)),
@@ -744,12 +867,17 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 		job_read(pfdev, JS_TAIL_LO(js)),
 		sched_job);
 
+	/* The timeout callback retains the job until reset/cleanup completes. */
+	panfrost_job_log_fault_context(pfdev, job, js);
+
 	panfrost_core_dump(job);
 
 	atomic_set(&pfdev->reset.pending, 1);
-	panfrost_reset(pfdev, sched_job);
+	ret = panfrost_reset(pfdev, sched_job);
+	pm_runtime_mark_last_busy(pfdev->dev);
+	pm_runtime_put_autosuspend(pfdev->dev);
 
-	return DRM_GPU_SCHED_STAT_NOMINAL;
+	return ret ? DRM_GPU_SCHED_STAT_ENODEV : DRM_GPU_SCHED_STAT_NOMINAL;
 }
 
 static void panfrost_reset_work(struct work_struct *work)
@@ -771,17 +899,25 @@ static irqreturn_t panfrost_job_irq_handler_thread(int irq, void *data)
 	struct panfrost_device *pfdev = data;
 
 	panfrost_job_handle_irqs(pfdev);
-	job_write(pfdev, JOB_INT_MASK,
-		  GENMASK(16 + NUM_JOB_SLOTS - 1, 16) |
-		  GENMASK(NUM_JOB_SLOTS - 1, 0));
+
+	/* Enable interrupts only if we're not about to get suspended */
+	if (!test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended))
+		job_write(pfdev, JOB_INT_MASK,
+			  GENMASK(16 + NUM_JOB_SLOTS - 1, 16) |
+			  GENMASK(NUM_JOB_SLOTS - 1, 0));
+
 	return IRQ_HANDLED;
 }
 
 static irqreturn_t panfrost_job_irq_handler(int irq, void *data)
 {
 	struct panfrost_device *pfdev = data;
-	u32 status = job_read(pfdev, JOB_INT_STAT);
+	u32 status;
 
+	if (test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended))
+		return IRQ_NONE;
+
+	status = job_read(pfdev, JOB_INT_STAT);
 	if (!status)
 		return IRQ_NONE;
 
@@ -806,6 +942,7 @@ int panfrost_job_init(struct panfrost_device *pfdev)
 	if (!js)
 		return -ENOMEM;
 
+	atomic_set(&pfdev->reset.pm_failed, 0);
 	INIT_WORK(&pfdev->reset.work, panfrost_reset_work);
 	spin_lock_init(&js->job_lock);
 

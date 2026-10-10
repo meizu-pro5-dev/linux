@@ -4,6 +4,7 @@
 #ifndef __PANFROST_JOB_H__
 #define __PANFROST_JOB_H__
 
+#include <linux/sched.h>
 #include <uapi/drm/panfrost_drm.h>
 #include <drm/gpu_scheduler.h>
 
@@ -21,6 +22,11 @@ struct panfrost_job {
 
 	/* Fence to be signaled by IRQ handler when the job is complete. */
 	struct dma_fence *done_fence;
+
+	/* Immutable ioctl submitter metadata, retained across stops/resubmits. */
+	u64 original_jc;
+	pid_t submitter_tgid;
+	char submitter_comm[TASK_COMM_LEN];
 
 	__u64 jc;
 	__u32 requirements;
@@ -42,6 +48,7 @@ int panfrost_job_get_slot(struct panfrost_job *job);
 int panfrost_job_push(struct panfrost_job *job);
 void panfrost_job_put(struct panfrost_job *job);
 void panfrost_job_enable_interrupts(struct panfrost_device *pfdev);
+void panfrost_job_suspend_irq(struct panfrost_device *pfdev);
 int panfrost_job_is_idle(struct panfrost_device *pfdev);
 
 #endif
