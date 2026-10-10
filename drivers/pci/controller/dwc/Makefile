@@ -47,3 +47,4 @@ obj-$(CONFIG_ARM64) += pcie-hisi.o
 obj-$(CONFIG_ARM64) += pcie-tegra194-acpi.o
 endif
 endif
+obj-$(CONFIG_PCI_EXYNOS7420_PRO5_ENUM) += pci-exynos7420-pro5.o
