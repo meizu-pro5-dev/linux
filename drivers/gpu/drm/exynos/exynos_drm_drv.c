@@ -15,6 +15,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_aperture.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
@@ -240,6 +241,16 @@ static int exynos_drm_bind(struct device *dev)
 	struct drm_device *drm;
 	unsigned int clone_mask;
 	int ret;
+
+	/*
+	 * Remove the bootloader's simple-framebuffer (simpledrm) before taking
+	 * over.  Otherwise userspace ends up with two DRM devices/connectors
+	 * (simpledrm + exynos) driving the same panel, which confuses touch
+	 * input mapping and per-monitor scaling.
+	 */
+	ret = drm_aperture_remove_framebuffers(&exynos_drm_driver);
+	if (ret)
+		return ret;
 
 	drm = drm_dev_alloc(&exynos_drm_driver, dev);
 	if (IS_ERR(drm))

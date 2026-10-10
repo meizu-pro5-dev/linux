@@ -9,6 +9,7 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -51,6 +52,7 @@ struct decon_context {
 	void __iomem			*regs;
 	unsigned long			irq_flags;
 	bool				i80_if;
+	bool				i80_handoff_processed;
 	bool				suspended;
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
@@ -81,10 +83,8 @@ static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
 	DRM_PLANE_TYPE_CURSOR,
 };
 
-static void decon_wait_for_vblank(struct exynos_drm_crtc *crtc)
+static void decon_wait_for_vblank(struct decon_context *ctx)
 {
-	struct decon_context *ctx = crtc->ctx;
-
 	if (ctx->suspended)
 		return;
 
@@ -100,9 +100,8 @@ static void decon_wait_for_vblank(struct exynos_drm_crtc *crtc)
 		DRM_DEV_DEBUG_KMS(ctx->dev, "vblank wait timed out.\n");
 }
 
-static void decon_clear_channels(struct exynos_drm_crtc *crtc)
+static void decon_clear_channels(struct decon_context *ctx)
 {
-	struct decon_context *ctx = crtc->ctx;
 	unsigned int win, ch_enabled = 0;
 
 	/* Check if any channel is enabled. */
@@ -118,7 +117,7 @@ static void decon_clear_channels(struct exynos_drm_crtc *crtc)
 
 	/* Wait for vsync, as disable channel takes effect at next vsync */
 	if (ch_enabled)
-		decon_wait_for_vblank(ctx->crtc);
+		decon_wait_for_vblank(ctx);
 }
 
 static int decon_ctx_initialize(struct decon_context *ctx,
@@ -126,7 +125,7 @@ static int decon_ctx_initialize(struct decon_context *ctx,
 {
 	ctx->drm_dev = drm_dev;
 
-	decon_clear_channels(ctx->crtc);
+	decon_clear_channels(ctx);
 
 	return exynos_drm_register_dma(drm_dev, ctx->dev, &ctx->dma_priv);
 }
@@ -199,7 +198,8 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 	 * fields of register with prefix '_F' would be updated
 	 * at vsync(same as dma start)
 	 */
-	val = VIDCON0_ENVID | VIDCON0_ENVID_F;
+	val = readl(ctx->regs + VIDCON0);
+	val |= VIDCON0_ENVID | VIDCON0_ENVID_F;
 	writel(val, ctx->regs + VIDCON0);
 
 	clkdiv = decon_calc_clkdiv(ctx, mode);
@@ -227,7 +227,9 @@ static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
 
 		val |= VIDINTCON0_INT_ENABLE;
 
-		if (!ctx->i80_if) {
+		if (ctx->i80_if) {
+			val |= VIDINTCON0_INT_I80_EN;
+		} else {
 			val |= VIDINTCON0_INT_FRAME;
 			val &= ~VIDINTCON0_FRAMESEL0_MASK;
 			val |= VIDINTCON0_FRAMESEL0_VSYNC;
@@ -251,7 +253,9 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 		val = readl(ctx->regs + VIDINTCON0);
 
 		val &= ~VIDINTCON0_INT_ENABLE;
-		if (!ctx->i80_if)
+		if (ctx->i80_if)
+			val &= ~VIDINTCON0_INT_I80_EN;
+		else
 			val &= ~VIDINTCON0_INT_FRAME;
 
 		writel(val, ctx->regs + VIDINTCON0);
@@ -408,6 +412,14 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	/* buffer start address */
 	val = (unsigned long)exynos_drm_fb_dma_addr(fb, 0);
 	writel(val, ctx->regs + VIDW_BUF_START(win));
+	/*
+	 * The window runs in triple buffer mode; program all three buffer
+	 * start registers with the same address.  Only writing ADD0 made the
+	 * hardware rotate through stale ADD1/ADD2 addresses, which showed up
+	 * as flickering content on every repaint.
+	 */
+	writel(val, ctx->regs + VIDW_BUF_START1(win));
+	writel(val, ctx->regs + VIDW_BUF_START2(win));
 
 	padding = (pitch / cpp) - fb->width;
 
@@ -508,6 +520,29 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_shadow_protect_win(ctx, i, false);
+
+	/*
+	 * Command mode has no vsync: kick off one frame transmission now.
+	 * The trigger sequence mirrors what the bootloader/simpledrm uses to
+	 * push a frame to the command-mode panel.  The resulting frame-done
+	 * interrupt feeds vblank and completes the pending atomic commit.
+	 */
+	if (ctx->i80_if) {
+		u32 val = readl(ctx->regs + TRIGCON);
+
+		val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
+			 TRIGCON_HWTRIGMASK_DISPIF0 |
+			 TRIGCON_HWTRIGMASK_DISPIF1);
+		val |= TRIGCON_SWTRIGEN_I80_RGB | TRIGCON_SWTRIGCMD_I80_RGB |
+		       TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
+		       TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_HWTRIG_AUTO_MASK;
+		writel(val, ctx->regs + TRIGCON);
+		writel(readl(ctx->regs + DECON_UPDATE) |
+		       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
+		writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
+		       ctx->regs + TRIGCON);
+	}
+
 	exynos_crtc_handle_event(crtc);
 }
 
@@ -515,17 +550,24 @@ static void decon_init(struct decon_context *ctx)
 {
 	u32 val;
 
+	/*
+	 * In command (i80) mode the bootloader already brought up the whole
+	 * display path (DSI, panel, DECON trigger).  Resetting DECON here drops
+	 * state we cannot restore yet, after which no frame is ever transmitted.
+	 * Keep the existing configuration and just update the frame buffer.
+	 */
+	if (ctx->i80_if)
+		return;
+
 	writel(VIDCON0_SWRESET, ctx->regs + VIDCON0);
 
 	val = VIDOUTCON0_DISP_IF_0_ON;
-	if (!ctx->i80_if)
-		val |= VIDOUTCON0_RGBIF;
+	val |= VIDOUTCON0_RGBIF;
 	writel(val, ctx->regs + VIDOUTCON0);
 
 	writel(VCLKCON0_CLKVALUP | VCLKCON0_VCLKFREE, ctx->regs + VCLKCON0);
 
-	if (!ctx->i80_if)
-		writel(VIDCON1_VCLK_HOLD, ctx->regs + VIDCON1(0));
+	writel(VIDCON1_VCLK_HOLD, ctx->regs + VIDCON1(0));
 }
 
 static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
@@ -542,6 +584,29 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 		return;
 	}
 
+	if (ctx->i80_if && !ctx->i80_handoff_processed) {
+		phys_addr_t fb = 0;
+		int i;
+
+		/*
+		 * The bootloader's framebuffer is still being scanned by DECON
+		 * and is not mapped in the IOMMU domain.  Map it one-to-one
+		 * (same idea as the vendor's iovmm_map_oto()) so the SYSMMU can
+		 * be brought up without DECON faulting on it.  The first commit
+		 * then switches the window to the IOVA-mapped framebuffer.
+		 */
+		for (i = 0; i < WINDOWS_NR; i++) {
+			phys_addr_t addr = readl(ctx->regs + VIDW_BUF_START(i));
+
+			if (addr && (!fb || addr < fb))
+				fb = addr;
+		}
+		if (fb)
+			exynos_iommu_map_identity(ctx->dev, fb, SZ_64M);
+	}
+
+	exynos_iommu_master_ready(ctx->dev);
+
 	decon_init(ctx);
 
 	/* if vblank was enabled status, enable it again. */
@@ -551,6 +616,9 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	decon_commit(ctx->crtc);
 
 	ctx->suspended = false;
+	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
+	if (ctx->i80_if)
+		ctx->i80_handoff_processed = true;
 }
 
 static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
@@ -601,14 +669,17 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	if (!ctx->drm_dev)
 		goto out;
 
-	if (!ctx->i80_if) {
-		drm_crtc_handle_vblank(&ctx->crtc->base);
+	/*
+	 * In command (i80) mode the frame-done interrupt plays the role of
+	 * the vsync interrupt, so it must feed vblank as well, otherwise the
+	 * DRM atomic commit never completes.
+	 */
+	drm_crtc_handle_vblank(&ctx->crtc->base);
 
-		/* set wait vsync event to zero and wake up queue. */
-		if (atomic_read(&ctx->wait_vsync_event)) {
-			atomic_set(&ctx->wait_vsync_event, 0);
-			wake_up(&ctx->wait_vsync_queue);
-		}
+	/* set wait vsync event to zero and wake up queue. */
+	if (atomic_read(&ctx->wait_vsync_event)) {
+		atomic_set(&ctx->wait_vsync_event, 0);
+		wake_up(&ctx->wait_vsync_queue);
 	}
 out:
 	return IRQ_HANDLED;

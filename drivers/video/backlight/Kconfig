@@ -472,6 +472,13 @@ config BACKLIGHT_LED
 	  If you have a LCD backlight adjustable by LED class driver, say Y
 	  to enable this driver.
 
+config BACKLIGHT_M86_HANDOFF
+	bool "Meizu PRO5 bootloader DSIM handoff backlight"
+	depends on OF && COMMON_CLK && ARCH_EXYNOS
+	help
+	  Command-only backlight for the bootloader-initialized PRO5 panel.
+	  Requires the DISP domain to stay powered; no system suspend.
+
 endif # BACKLIGHT_CLASS_DEVICE
 
 endmenu
