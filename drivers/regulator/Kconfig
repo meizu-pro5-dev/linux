@@ -1663,4 +1663,11 @@ config REGULATOR_QCOM_LABIBB
 	  boost regulator and IBB can be used as a negative boost regulator
 	  for LCD display panel.
 
+config REGULATOR_M86_GPU_READONLY
+	tristate "PRO5 inherited BUCK6 read-only regulator"
+	depends on ARCH_EXYNOS && OF && I2C && MFD_SEC_CORE
+	help
+	  Observe the inherited BUCK6 raw selector through the existing MFD regmap.
+	  No voltage, GPIO, DVS, enable or disable write callbacks exist.
+
 endif

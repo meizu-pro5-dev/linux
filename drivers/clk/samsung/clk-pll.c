@@ -755,16 +755,26 @@ static unsigned long samsung_pll46xx_recalc_rate(struct clk_hw *hw,
 
 	pll_con0 = readl_relaxed(pll->con_reg);
 	pll_con1 = readl_relaxed(pll->con_reg + 4);
-	mdiv = (pll_con0 >> PLL46XX_MDIV_SHIFT) & ((pll->type == pll_1460x) ?
+	mdiv = (pll_con0 >> PLL46XX_MDIV_SHIFT) & ((pll->type == pll_1460x ||
+				  pll->type == pll_1460x_signed) ?
 				PLL1460X_MDIV_MASK : PLL46XX_MDIV_MASK);
 	pdiv = (pll_con0 >> PLL46XX_PDIV_SHIFT) & PLL46XX_PDIV_MASK;
 	sdiv = (pll_con0 >> PLL46XX_SDIV_SHIFT) & PLL46XX_SDIV_MASK;
 	kdiv = pll->type == pll_4650c ? pll_con1 & PLL4650C_KDIV_MASK :
 					pll_con1 & PLL46XX_KDIV_MASK;
 
-	shift = ((pll->type == pll_4600) || (pll->type == pll_1460x)) ? 16 : 10;
+	shift = ((pll->type == pll_4600) || (pll->type == pll_1460x) ||
+		 (pll->type == pll_1460x_signed)) ? 16 : 10;
 
-	fvco *= (mdiv << shift) + kdiv;
+	if (pll->type == pll_1460x_signed) {
+		s64 numerator = ((s64)mdiv << 16) + (s16)kdiv;
+
+		if (numerator <= 0)
+			return 0;
+		fvco *= (u64)numerator;
+	} else {
+		fvco *= (mdiv << shift) + kdiv;
+	}
 	do_div(fvco, (pdiv << sdiv));
 	fvco >>= shift;
 
@@ -789,6 +799,7 @@ static int samsung_pll46xx_set_rate(struct clk_hw *hw, unsigned long drate,
 {
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
 	const struct samsung_pll_rate_table *rate;
+	struct samsung_pll_rate_table signed_rate;
 	u32 con0, con1, lock;
 
 	/* Get required rate settings from table */
@@ -797,6 +808,13 @@ static int samsung_pll46xx_set_rate(struct clk_hw *hw, unsigned long drate,
 		pr_err("%s: Invalid rate : %lu for pll clk %s\n", __func__,
 			drate, clk_hw_get_name(hw));
 		return -EINVAL;
+	}
+
+	/* Normalize signed K to its field encoding before compare/write. */
+	if (pll->type == pll_1460x_signed) {
+		signed_rate = *rate;
+		signed_rate.kdiv &= PLL46XX_KDIV_MASK;
+		rate = &signed_rate;
 	}
 
 	con0 = readl_relaxed(pll->con_reg);
@@ -818,7 +836,7 @@ static int samsung_pll46xx_set_rate(struct clk_hw *hw, unsigned long drate,
 		lock = 0xffff;
 
 	/* Set PLL PMS and VSEL values. */
-	if (pll->type == pll_1460x) {
+	if (pll->type == pll_1460x || pll->type == pll_1460x_signed) {
 		con0 &= ~((PLL1460X_MDIV_MASK << PLL46XX_MDIV_SHIFT) |
 			(PLL46XX_PDIV_MASK << PLL46XX_PDIV_SHIFT) |
 			(PLL46XX_SDIV_MASK << PLL46XX_SDIV_SHIFT));
@@ -1362,6 +1380,7 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 	case pll_4650:
 	case pll_4650c:
 	case pll_1460x:
+	case pll_1460x_signed:
 		if (!pll->rate_table)
 			init.ops = &samsung_pll46xx_clk_min_ops;
 		else
