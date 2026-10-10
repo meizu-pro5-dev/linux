@@ -7,6 +7,7 @@
 #include <linux/nvmem-consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
+#include <linux/m86-gpu-dvfs.h>
 
 #include "panfrost_device.h"
 #include "panfrost_devfreq.h"
@@ -36,7 +37,14 @@ static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
 		return PTR_ERR(opp);
 	dev_pm_opp_put(opp);
 
-	return dev_pm_opp_set_rate(dev, *freq);
+	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
+#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
+  return m86_gpu_devfreq_target(dev, freq);
+#else
+  return -EOPNOTSUPP;
+#endif
+ }
+ return dev_pm_opp_set_rate(dev, *freq);
 }
 
 static void panfrost_devfreq_reset(struct panfrost_devfreq *pfdevfreq)
@@ -131,7 +139,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	if (ret)
 		return ret;
 
-	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
+	/* Retained PRO5 coordination owns the complete transaction. Generic OPP
+  * regulator setters would bypass calibrated MCS and sticky-error rules. */
+ if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
+  ret = 0;
+ else
+  ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
 	if (ret) {
 		/* Continue if the optional regulator is missing */
 		if (ret != -ENODEV) {
@@ -166,9 +179,13 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	 * Set the recommend OPP this will enable and configure the regulator
 	 * if any and will avoid a switch off by regulator_late_cleanup()
 	 */
-	ret = dev_pm_opp_set_opp(dev, opp);
+	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
+  ret = cur_freq == clk_get_rate(pfdev->clock) ? 0 : -EOPNOTSUPP;
+ else
+  ret = dev_pm_opp_set_opp(dev, opp);
 	if (ret) {
 		DRM_DEV_ERROR(dev, "Couldn't set recommended OPP\n");
+		dev_pm_opp_put(opp);
 		return ret;
 	}
 
@@ -190,7 +207,10 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	}
 	pfdevfreq->devfreq = devfreq;
 
-	cooling = devfreq_cooling_em_register(devfreq, NULL);
+	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
+  cooling = devfreq_cooling_register(devfreq);
+ else
+  cooling = devfreq_cooling_em_register(devfreq, NULL);
 	if (IS_ERR(cooling))
 		DRM_DEV_INFO(dev, "Failed to register cooling device\n");
 	else

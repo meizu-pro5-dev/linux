@@ -8,6 +8,7 @@
 #include <linux/pagemap.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sched.h>
 #include <drm/panfrost_drm.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_ioctl.h>
@@ -264,6 +265,9 @@ static int panfrost_ioctl_submit(struct drm_device *dev, void *data,
 
 	job->pfdev = pfdev;
 	job->jc = args->jc;
+	job->original_jc = args->jc;
+	job->submitter_tgid = task_tgid_nr(current);
+	get_task_comm(job->submitter_comm, current);
 	job->requirements = args->requirements;
 	job->flush_id = panfrost_gpu_get_latest_flush_id(pfdev);
 	job->mmu = file_priv->mmu;
@@ -589,9 +593,19 @@ static int panfrost_probe(struct platform_device *pdev)
 
 	pm_runtime_set_active(pfdev->dev);
 	pm_runtime_mark_last_busy(pfdev->dev);
+	/* Establish the manual hold while runtime PM is still disabled.
+	 * set_autosuspend_delay calls synchronous rpm_idle even before
+	 * use_autosuspend; a hold installed later cannot protect probe. */
+	if (IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT) &&
+	    of_property_read_bool(pdev->dev.of_node,
+				  "meizu,external-domain-manual-start")) {
+		pm_runtime_forbid(pfdev->dev);
+		dev_info(pfdev->dev, "external-domain manual hold established before runtime PM enable\n");
+	}
 	pm_runtime_enable(pfdev->dev);
 	pm_runtime_set_autosuspend_delay(pfdev->dev, 50); /* ~3 frames */
 	pm_runtime_use_autosuspend(pfdev->dev);
+
 
 	/*
 	 * Register the DRM device with the core and the connectors with
@@ -607,6 +621,10 @@ static int panfrost_probe(struct platform_device *pdev)
 
 err_out1:
 	pm_runtime_disable(pfdev->dev);
+	if (IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT) &&
+	    of_property_read_bool(pdev->dev.of_node,
+				  "meizu,external-domain-manual-start"))
+		pm_runtime_allow(pfdev->dev);
 	panfrost_device_fini(pfdev);
 	pm_runtime_set_suspended(pfdev->dev);
 err_out0:
@@ -624,6 +642,10 @@ static void panfrost_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(pfdev->dev);
 	pm_runtime_disable(pfdev->dev);
+	if (IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT) &&
+	    of_property_read_bool(pdev->dev.of_node,
+				  "meizu,external-domain-manual-start"))
+		pm_runtime_allow(pfdev->dev);
 	panfrost_device_fini(pfdev);
 	pm_runtime_set_suspended(pfdev->dev);
 
@@ -722,6 +744,8 @@ static struct platform_driver panfrost_driver = {
 	.remove_new	= panfrost_remove,
 	.driver		= {
 		.name	= "panfrost",
+		/* Built-in experimental board provider pins the consumer object. */
+		.suppress_bind_attrs = IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT),
 		.pm	= pm_ptr(&panfrost_pm_ops),
 		.of_match_table = dt_match,
 	},

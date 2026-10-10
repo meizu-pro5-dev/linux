@@ -13,6 +13,7 @@
 #include <linux/io-pgtable.h>
 #include <linux/iommu.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/shmem_fs.h>
 #include <linux/sizes.h>
@@ -230,6 +231,8 @@ void panfrost_mmu_as_put(struct panfrost_device *pfdev, struct panfrost_mmu *mmu
 void panfrost_mmu_reset(struct panfrost_device *pfdev)
 {
 	struct panfrost_mmu *mmu, *mmu_tmp;
+
+	clear_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended);
 
 	spin_lock(&pfdev->as_lock);
 
@@ -632,12 +635,19 @@ struct panfrost_mmu *panfrost_mmu_ctx_create(struct panfrost_device *pfdev)
 		.iommu_dev	= pfdev->dev,
 	};
 
+	if (of_machine_is_compatible("meizu,m86") &&
+	    pfdev->features.id == 0x750 && !pfdev->coherent)
+		mmu->pgtbl_cfg.quirks |= IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE;
+
 	mmu->pgtbl_ops = alloc_io_pgtable_ops(ARM_MALI_LPAE, &mmu->pgtbl_cfg,
 					      mmu);
 	if (!mmu->pgtbl_ops) {
 		kfree(mmu);
 		return ERR_PTR(-EINVAL);
 	}
+
+	if (mmu->pgtbl_cfg.quirks & IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE)
+		dev_info_once(pfdev->dev, "m86 inner-shareable workaround enabled\n");
 
 	kref_init(&mmu->refcount);
 
@@ -668,6 +678,9 @@ static const char *access_type_name(struct panfrost_device *pfdev,
 static irqreturn_t panfrost_mmu_irq_handler(int irq, void *data)
 {
 	struct panfrost_device *pfdev = data;
+
+	if (test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended))
+		return IRQ_NONE;
 
 	if (!mmu_read(pfdev, MMU_INT_STAT))
 		return IRQ_NONE;
@@ -743,22 +756,25 @@ static irqreturn_t panfrost_mmu_irq_handler_thread(int irq, void *data)
 			status = mmu_read(pfdev, MMU_INT_RAWSTAT) & ~pfdev->as_faulty_mask;
 	}
 
-	spin_lock(&pfdev->as_lock);
-	mmu_write(pfdev, MMU_INT_MASK, ~pfdev->as_faulty_mask);
-	spin_unlock(&pfdev->as_lock);
+	/* Enable interrupts only if we're not about to get suspended */
+	if (!test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended)) {
+		spin_lock(&pfdev->as_lock);
+		mmu_write(pfdev, MMU_INT_MASK, ~pfdev->as_faulty_mask);
+		spin_unlock(&pfdev->as_lock);
+	}
 
 	return IRQ_HANDLED;
 };
 
 int panfrost_mmu_init(struct panfrost_device *pfdev)
 {
-	int err, irq;
+	int err;
 
-	irq = platform_get_irq_byname(to_platform_device(pfdev->dev), "mmu");
-	if (irq <= 0)
+	pfdev->mmu_irq = platform_get_irq_byname(to_platform_device(pfdev->dev), "mmu");
+	if (pfdev->mmu_irq <= 0)
 		return -ENODEV;
 
-	err = devm_request_threaded_irq(pfdev->dev, irq,
+	err = devm_request_threaded_irq(pfdev->dev, pfdev->mmu_irq,
 					panfrost_mmu_irq_handler,
 					panfrost_mmu_irq_handler_thread,
 					IRQF_SHARED, KBUILD_MODNAME "-mmu",
@@ -769,10 +785,21 @@ int panfrost_mmu_init(struct panfrost_device *pfdev)
 		return err;
 	}
 
+	/* Initialize AS state and fault interrupts before any job is exposed. */
+	panfrost_mmu_reset(pfdev);
+
 	return 0;
 }
 
 void panfrost_mmu_fini(struct panfrost_device *pfdev)
 {
 	mmu_write(pfdev, MMU_INT_MASK, 0);
+}
+
+void panfrost_mmu_suspend_irq(struct panfrost_device *pfdev)
+{
+	set_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended);
+
+	mmu_write(pfdev, MMU_INT_MASK, 0);
+	synchronize_irq(pfdev->mmu_irq);
 }

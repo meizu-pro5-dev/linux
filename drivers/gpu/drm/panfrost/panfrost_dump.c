@@ -25,12 +25,15 @@ struct panfrost_dump_iterator {
 };
 
 static const unsigned short panfrost_dump_registers[] = {
+	GPU_INT_RAWSTAT,
+	GPU_INT_MASK,
 	SHADER_READY_LO,
 	SHADER_READY_HI,
 	TILER_READY_LO,
 	TILER_READY_HI,
 	L2_READY_LO,
 	L2_READY_HI,
+	JOB_INT_RAWSTAT,
 	JOB_INT_MASK,
 	JOB_INT_STAT,
 	JS_HEAD_LO(0),
@@ -46,6 +49,7 @@ static const unsigned short panfrost_dump_registers[] = {
 	JS_AFFINITY_NEXT_LO(0),
 	JS_AFFINITY_NEXT_HI(0),
 	JS_CONFIG_NEXT(0),
+	MMU_INT_RAWSTAT,
 	MMU_INT_MASK,
 	MMU_INT_STAT,
 	AS_TRANSTAB_LO(0),
