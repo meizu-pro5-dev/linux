@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Command-only access to an already running Exynos7420 DSIM0.
- * Register/packet provenance: m576-ubuntu decon/{regs-dsim.h,
- * dsim_reg_7420.c,dsim_drv.c,panels/s6e3fa3_mipi_lcd.c}.
- * This is not a DSIM host and cannot restore a lost bootloader handoff.
+/* Samsung S6E3FA3 FHD AMOLED panel and DSIM backlight driver.
+ * Supports Meizu PRO 5 (m86 / Exynos 7420) command-mode display.
+ * DCS sequence provenance: vendor s6e3fa3_mipi_lcd.c and regs-dsim.h.
  */
 #include <linux/backlight.h>
 #include <linux/clk.h>
@@ -34,50 +33,100 @@ struct m86_handoff {
 	struct clk_bulk_data *clocks;
 	int num_clocks;
 	struct mutex lock;
+	struct backlight_device *bl;
 	bool ready;
 	bool blanked;
+	bool suspended;
 	bool faulted;
 };
 
-/* Caller holds lock. A timeout may have left a queued command: do not retry. */
-static int m86_send(struct m86_handoff *ctx, u8 cmd, u8 value, u8 type)
+struct s6e3fa3_cmd {
+	u8 type;
+	u8 len;
+	u8 data[3];
+	u16 delay_ms;
+};
+
+/* S6E3FA3 Sleep sequence (DISP_OFF -> SLEEP_IN) */
+static const struct s6e3fa3_cmd s6e3fa3_sleep_seq[] = {
+	{ 0x05, 1, { 0x28 }, 10 },   /* DISP_OFF, 10ms delay */
+	{ 0x05, 1, { 0x10 }, 150 },  /* SLEEP_IN, 150ms delay */
+};
+
+/* S6E3FA3 Wake & initialization sequence (vendor s6e3fa3_mipi_lcd.c) */
+static const struct s6e3fa3_cmd s6e3fa3_wake_seq[] = {
+	{ 0x29, 3, { 0xF0, 0x5A, 0x5A }, 0 },    /* S_PASSWD_KEY_EN_0 */
+	{ 0x05, 1, { 0x11 }, 120 },              /* SLEEP_OUT, 120ms */
+	{ 0x15, 2, { 0xF9, 0x12 }, 0 },          /* J_MIC */
+	{ 0x29, 3, { 0xF0, 0xA5, 0xA5 }, 0 },    /* S_PASSWD_KEY_EN_1 */
+	{ 0x15, 2, { 0x35, 0x00 }, 20 },         /* TEON (mode 0: V-blank), 20ms */
+	{ 0x29, 3, { 0xFC, 0x5A, 0x5A }, 0 },    /* LEVEL3_UNLOCK */
+	{ 0x15, 2, { 0xB0, 0x1E }, 0 },          /* GLOBAL_PARA */
+	{ 0x15, 2, { 0xFD, 0x94 }, 0 },          /* AVC_SETTING */
+	{ 0x29, 3, { 0xFC, 0xA5, 0xA5 }, 0 },    /* LEVEL3_LOCK */
+	{ 0x15, 2, { 0x53, 0x20 }, 0 },          /* DIMMING_SPEED */
+	{ 0x15, 2, { 0x55, 0x00 }, 10 },         /* ACL_MODE, 10ms */
+	{ 0x05, 1, { 0x29 }, 0 },                /* DISP_ON */
+};
+
+/*
+ * Send DCS or Generic packet through DSIM command FIFO.
+ * Caller holds ctx->lock.
+ */
+static int m86_send_packet(struct m86_handoff *ctx, u8 type, const u8 *payload, size_t len)
 {
-	bool long_write = type == 0x39;
+	bool long_write = (type == 0x39 || type == 0x29 || len > 2);
 	u32 status, empty = long_write ? PL_EMPTY : PH_EMPTY;
-	u32 clear = long_write ? PH_EMPTY | PL_EMPTY : PH_EMPTY;
+	u32 clear = long_write ? (PH_EMPTY | PL_EMPTY) : PH_EMPTY;
 	int ret;
 
 	if (ctx->faulted)
 		return -EIO;
 	if (!ctx->ready)
 		return -EBUSY;
-	/* Mask bit=1 disables IRQ (vendor dsim_reg_set_int()).
-	 * The backlight may become visible before probe finishes masking;
-	 * refuse such a racing update rather than enqueue an unmasked packet.
-	 */
+
 	if ((readl(ctx->regs + DSIM_INTMSK) & empty) != empty)
 		return -EBUSY;
+
 	ret = readl_poll_timeout(ctx->regs + DSIM_FIFOCTRL, status,
-				!(status & (PH_FULL | PL_FULL)), 100,
-				FIFO_TIMEOUT_US);
+				 !(status & (PH_FULL | PL_FULL)), 100,
+				 FIFO_TIMEOUT_US);
 	if (ret)
 		goto fault;
-	/* INTSRC is W1C; clear only completion bits belonging to this packet. */
+
 	writel(clear, ctx->regs + DSIM_INTSRC);
+
 	if (long_write) {
-		writel(cmd | ((u32)value << 8), ctx->regs + DSIM_PAYLOAD);
-		writel(0x39 | (2 << 8), ctx->regs + DSIM_PKTHDR);
-	} else {
-		/* PRO5 DISP_ON/OFF vendor INIT_CMD(..., 0x05, ...). */
-		writel(type | ((u32)cmd << 8) | ((u32)value << 16),
+		size_t i;
+
+		for (i = 0; i < len; i += 4) {
+			u32 word = 0;
+			size_t j;
+
+			for (j = 0; j < 4 && (i + j) < len; j++)
+				word |= ((u32)payload[i + j]) << (j * 8);
+			writel(word, ctx->regs + DSIM_PAYLOAD);
+		}
+		writel(type | (((u32)(len & 0xff)) << 8) | (((u32)((len >> 8) & 0xff)) << 16),
 		       ctx->regs + DSIM_PKTHDR);
+	} else {
+		u32 hdr = type;
+
+		if (len > 0)
+			hdr |= ((u32)payload[0]) << 8;
+		if (len > 1)
+			hdr |= ((u32)payload[1]) << 16;
+		writel(hdr, ctx->regs + DSIM_PKTHDR);
 	}
+
 	ret = readl_poll_timeout(ctx->regs + DSIM_INTSRC, status,
-				(status & empty) == empty, 100, FIFO_TIMEOUT_US);
+				 (status & empty) == empty, 100, FIFO_TIMEOUT_US);
 	if (ret)
 		goto fault;
+
 	writel(clear, ctx->regs + DSIM_INTSRC);
 	return 0;
+
 fault:
 	ctx->faulted = true;
 	return ret;
@@ -90,27 +139,38 @@ static int m86_update_status(struct backlight_device *bl)
 	int ret = 0;
 
 	mutex_lock(&ctx->lock);
+	if (ctx->suspended) {
+		mutex_unlock(&ctx->lock);
+		return 0;
+	}
+
 	if (blank) {
 		if (!ctx->blanked) {
-			ret = m86_send(ctx, 0x28, 0, 0x05);
+			u8 disp_off = 0x28;
+
+			ret = m86_send_packet(ctx, 0x05, &disp_off, 1);
 			if (!ret) {
 				ctx->blanked = true;
-				msleep(10); /* PRO5 DISP_OFF delay. */
+				msleep(10); /* PRO5 DISP_OFF delay */
 			}
 		}
 		goto out;
 	}
-	/* PRO5 DIMMING_SPEED/HBM_SWITCH={0x53,0x20}; LUMINANCE={0x51,v}.
-	 * 0x53 uses vendor INIT_CMD short-with-param; 0x51 uses the long
-	 * packet in vendor update_brightness(). No gamma/private-register writes.
-	 */
-	ret = m86_send(ctx, 0x53, 0x20, 0x15);
-	if (!ret)
-		ret = m86_send(ctx, 0x51, backlight_get_brightness(bl), 0x39);
-	if (!ret && ctx->blanked) {
-		ret = m86_send(ctx, 0x29, 0, 0x05);
+
+	/* PRO5 DIMMING_SPEED={0x53,0x20}; LUMINANCE={0x51,v} */
+	{
+		u8 dim[2] = { 0x53, 0x20 };
+		u8 lum[2] = { 0x51, (u8)backlight_get_brightness(bl) };
+		u8 disp_on = 0x29;
+
+		ret = m86_send_packet(ctx, 0x15, dim, 2);
 		if (!ret)
-			ctx->blanked = false;
+			ret = m86_send_packet(ctx, 0x39, lum, 2);
+		if (!ret && ctx->blanked) {
+			ret = m86_send_packet(ctx, 0x05, &disp_on, 1);
+			if (!ret)
+				ctx->blanked = false;
+		}
 	}
 out:
 	mutex_unlock(&ctx->lock);
@@ -164,10 +224,12 @@ static int m86_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	platform_set_drvdata(pdev, ctx);
-	bl = devm_backlight_device_register(dev, "m86-handoff", dev, ctx,
+	bl = devm_backlight_device_register(dev, "m86-panel", dev, ctx,
 					  &m86_ops, &props);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
+	ctx->bl = bl;
+
 	/* Publication can race update_status; serialize mask setup with writes. */
 	mutex_lock(&ctx->lock);
 	/* Exclusively reserve DSIM above, then switch only FIFO completion
@@ -186,26 +248,93 @@ static int m86_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int m86_suspend(struct device *dev)
+static int s6e3fa3_suspend(struct device *dev)
 {
-	/* No legal reinitialization sequence exists in this handoff-only driver. */
-	return -EBUSY;
+	struct m86_handoff *ctx = dev_get_drvdata(dev);
+	int i, ret = 0;
+
+	mutex_lock(&ctx->lock);
+	if (!ctx->blanked) {
+		for (i = 0; i < ARRAY_SIZE(s6e3fa3_sleep_seq); i++) {
+			const struct s6e3fa3_cmd *cmd = &s6e3fa3_sleep_seq[i];
+
+			ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
+			if (ret) {
+				dev_err(dev, "failed to send sleep cmd 0x%02x: %d\n",
+					cmd->data[0], ret);
+				break;
+			}
+			if (cmd->delay_ms)
+				msleep(cmd->delay_ms);
+		}
+		ctx->blanked = true;
+	}
+	ctx->suspended = true;
+	mutex_unlock(&ctx->lock);
+
+	return 0;
 }
-static DEFINE_SIMPLE_DEV_PM_OPS(m86_pm_ops, m86_suspend, NULL);
+
+static int s6e3fa3_resume(struct device *dev)
+{
+	struct m86_handoff *ctx = dev_get_drvdata(dev);
+	u32 mask;
+	int i, ret = 0;
+
+	mutex_lock(&ctx->lock);
+	/* Re-establish FIFO interrupt masks */
+	mask = readl(ctx->regs + DSIM_INTMSK);
+	writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
+	readl(ctx->regs + DSIM_INTMSK);
+	ctx->ready = true;
+	ctx->faulted = false;
+
+	/* Send full S6E3FA3 wake-up and initialization sequence */
+	for (i = 0; i < ARRAY_SIZE(s6e3fa3_wake_seq); i++) {
+		const struct s6e3fa3_cmd *cmd = &s6e3fa3_wake_seq[i];
+
+		ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
+		if (ret) {
+			dev_err(dev, "failed to send wake cmd 0x%02x: %d\n",
+				cmd->data[0], ret);
+			break;
+		}
+		if (cmd->delay_ms)
+			msleep(cmd->delay_ms);
+	}
+
+	/* Restore programmed backlight luminance */
+	if (!ret && ctx->bl) {
+		u8 lum[2] = { 0x51, (u8)backlight_get_brightness(ctx->bl) };
+
+		m86_send_packet(ctx, 0x39, lum, 2);
+	}
+
+	ctx->blanked = false;
+	ctx->suspended = false;
+	mutex_unlock(&ctx->lock);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(m86_pm_ops, s6e3fa3_suspend, s6e3fa3_resume);
 
 static const struct of_device_id m86_match[] = {
-	{ .compatible = "meizu,m86-dsim-handoff-backlight" }, { }
+	{ .compatible = "meizu,m86-s6e3fa3-panel" },
+	{ .compatible = "meizu,m86-dsim-handoff-backlight" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, m86_match);
+
 static struct platform_driver m86_driver = {
 	.probe = m86_probe,
 	.driver = {
-		.name = "m86-handoff-backlight",
+		.name = "m86-s6e3fa3-panel",
 		.of_match_table = m86_match,
 		.pm = pm_sleep_ptr(&m86_pm_ops),
 		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(m86_driver);
-MODULE_DESCRIPTION("Meizu PRO5 bootloader DSIM handoff backlight");
+MODULE_DESCRIPTION("Meizu PRO5 S6E3FA3 AMOLED panel and DSIM backlight controller");
 MODULE_LICENSE("GPL");
