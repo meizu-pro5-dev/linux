@@ -391,32 +391,15 @@ static int __exit exynos_pcie_remove(struct platform_device *pdev)
 
 static int exynos_pcie_suspend_noirq(struct device *dev)
 {
-	struct exynos_pcie *ep = dev_get_drvdata(dev);
-
-	exynos_pcie_assert_core_reset(ep);
-	phy_power_off(ep->phy);
-	phy_exit(ep->phy);
-	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
-
+	/* Retain PCIe root complex and L0 link state during s2idle to
+	 * prevent AXI bus hang or lost link on BCM4356 endpoint.
+	 */
 	return 0;
 }
 
 static int exynos_pcie_resume_noirq(struct device *dev)
 {
-	struct exynos_pcie *ep = dev_get_drvdata(dev);
-	struct dw_pcie *pci = &ep->pci;
-	struct dw_pcie_rp *pp = &pci->pp;
-	int ret;
-
-	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
-	if (ret)
-		return ret;
-
-	/* exynos_pcie_host_init controls ep->phy */
-	exynos_pcie_host_init(pp);
-	dw_pcie_setup_rc(pp);
-	exynos_pcie_start_link(pci);
-	return dw_pcie_wait_for_link(pci);
+	return 0;
 }
 
 static const struct dev_pm_ops exynos_pcie_pm_ops = {

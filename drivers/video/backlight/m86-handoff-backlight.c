@@ -132,6 +132,67 @@ fault:
 	return ret;
 }
 
+static int s6e3fa3_enter_sleep(struct m86_handoff *ctx)
+{
+	int i, ret = 0;
+
+	if (ctx->blanked)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(s6e3fa3_sleep_seq); i++) {
+		const struct s6e3fa3_cmd *cmd = &s6e3fa3_sleep_seq[i];
+
+		ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
+		if (ret) {
+			if (ctx->bl)
+				dev_err(&ctx->bl->dev,
+					"failed to send sleep cmd 0x%02x: %d\n",
+					cmd->data[0], ret);
+			return ret;
+		}
+		if (cmd->delay_ms)
+			msleep(cmd->delay_ms);
+	}
+
+	ctx->blanked = true;
+	return 0;
+}
+
+static int s6e3fa3_exit_sleep(struct m86_handoff *ctx)
+{
+	u32 mask;
+	int i, ret = 0;
+
+	if (!ctx->blanked)
+		return 0;
+
+	/* Re-establish FIFO interrupt masks */
+	mask = readl(ctx->regs + DSIM_INTMSK);
+	writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
+	readl(ctx->regs + DSIM_INTMSK);
+	ctx->ready = true;
+	ctx->faulted = false;
+
+	/* Send full S6E3FA3 wake-up and initialization sequence */
+	for (i = 0; i < ARRAY_SIZE(s6e3fa3_wake_seq); i++) {
+		const struct s6e3fa3_cmd *cmd = &s6e3fa3_wake_seq[i];
+
+		ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
+		if (ret) {
+			if (ctx->bl)
+				dev_err(&ctx->bl->dev,
+					"failed to send wake cmd 0x%02x: %d\n",
+					cmd->data[0], ret);
+			return ret;
+		}
+		if (cmd->delay_ms)
+			msleep(cmd->delay_ms);
+	}
+
+	ctx->blanked = false;
+	return 0;
+}
+
 static int m86_update_status(struct backlight_device *bl)
 {
 	struct m86_handoff *ctx = bl_get_data(bl);
@@ -145,32 +206,24 @@ static int m86_update_status(struct backlight_device *bl)
 	}
 
 	if (blank) {
-		if (!ctx->blanked) {
-			u8 disp_off = 0x28;
-
-			ret = m86_send_packet(ctx, 0x05, &disp_off, 1);
-			if (!ret) {
-				ctx->blanked = true;
-				msleep(10); /* PRO5 DISP_OFF delay */
-			}
-		}
+		ret = s6e3fa3_enter_sleep(ctx);
 		goto out;
+	}
+
+	if (ctx->blanked) {
+		ret = s6e3fa3_exit_sleep(ctx);
+		if (ret)
+			goto out;
 	}
 
 	/* PRO5 DIMMING_SPEED={0x53,0x20}; LUMINANCE={0x51,v} */
 	{
 		u8 dim[2] = { 0x53, 0x20 };
 		u8 lum[2] = { 0x51, (u8)backlight_get_brightness(bl) };
-		u8 disp_on = 0x29;
 
 		ret = m86_send_packet(ctx, 0x15, dim, 2);
 		if (!ret)
 			ret = m86_send_packet(ctx, 0x39, lum, 2);
-		if (!ret && ctx->blanked) {
-			ret = m86_send_packet(ctx, 0x05, &disp_on, 1);
-			if (!ret)
-				ctx->blanked = false;
-		}
 	}
 out:
 	mutex_unlock(&ctx->lock);
@@ -248,77 +301,6 @@ static int m86_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int s6e3fa3_suspend(struct device *dev)
-{
-	struct m86_handoff *ctx = dev_get_drvdata(dev);
-	int i, ret = 0;
-
-	mutex_lock(&ctx->lock);
-	if (!ctx->blanked) {
-		for (i = 0; i < ARRAY_SIZE(s6e3fa3_sleep_seq); i++) {
-			const struct s6e3fa3_cmd *cmd = &s6e3fa3_sleep_seq[i];
-
-			ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
-			if (ret) {
-				dev_err(dev, "failed to send sleep cmd 0x%02x: %d\n",
-					cmd->data[0], ret);
-				break;
-			}
-			if (cmd->delay_ms)
-				msleep(cmd->delay_ms);
-		}
-		ctx->blanked = true;
-	}
-	ctx->suspended = true;
-	mutex_unlock(&ctx->lock);
-
-	return 0;
-}
-
-static int s6e3fa3_resume(struct device *dev)
-{
-	struct m86_handoff *ctx = dev_get_drvdata(dev);
-	u32 mask;
-	int i, ret = 0;
-
-	mutex_lock(&ctx->lock);
-	/* Re-establish FIFO interrupt masks */
-	mask = readl(ctx->regs + DSIM_INTMSK);
-	writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
-	readl(ctx->regs + DSIM_INTMSK);
-	ctx->ready = true;
-	ctx->faulted = false;
-
-	/* Send full S6E3FA3 wake-up and initialization sequence */
-	for (i = 0; i < ARRAY_SIZE(s6e3fa3_wake_seq); i++) {
-		const struct s6e3fa3_cmd *cmd = &s6e3fa3_wake_seq[i];
-
-		ret = m86_send_packet(ctx, cmd->type, cmd->data, cmd->len);
-		if (ret) {
-			dev_err(dev, "failed to send wake cmd 0x%02x: %d\n",
-				cmd->data[0], ret);
-			break;
-		}
-		if (cmd->delay_ms)
-			msleep(cmd->delay_ms);
-	}
-
-	/* Restore programmed backlight luminance */
-	if (!ret && ctx->bl) {
-		u8 lum[2] = { 0x51, (u8)backlight_get_brightness(ctx->bl) };
-
-		m86_send_packet(ctx, 0x39, lum, 2);
-	}
-
-	ctx->blanked = false;
-	ctx->suspended = false;
-	mutex_unlock(&ctx->lock);
-
-	return 0;
-}
-
-static DEFINE_SIMPLE_DEV_PM_OPS(m86_pm_ops, s6e3fa3_suspend, s6e3fa3_resume);
-
 static const struct of_device_id m86_match[] = {
 	{ .compatible = "meizu,m86-s6e3fa3-panel" },
 	{ .compatible = "meizu,m86-dsim-handoff-backlight" },
@@ -331,7 +313,7 @@ static struct platform_driver m86_driver = {
 	.driver = {
 		.name = "m86-s6e3fa3-panel",
 		.of_match_table = m86_match,
-		.pm = pm_sleep_ptr(&m86_pm_ops),
+		.pm = NULL,
 		.suppress_bind_attrs = true,
 	},
 };

@@ -190,43 +190,14 @@ MODULE_DEVICE_TABLE(of, exynos_dwc3_match);
 #ifdef CONFIG_PM_SLEEP
 static int dwc3_exynos_suspend(struct device *dev)
 {
-	struct dwc3_exynos *exynos = dev_get_drvdata(dev);
-	int i;
-
-	for (i = exynos->num_clks - 1; i >= 0; i--)
-		clk_disable_unprepare(exynos->clks[i]);
-
-	regulator_disable(exynos->vdd33);
-	regulator_disable(exynos->vdd10);
-
+	/* Retain USB controller power during development s2idle to preserve
+	 * USB gadget / RNDIS debugging link.
+	 */
 	return 0;
 }
 
 static int dwc3_exynos_resume(struct device *dev)
 {
-	struct dwc3_exynos *exynos = dev_get_drvdata(dev);
-	int i, ret;
-
-	ret = regulator_enable(exynos->vdd33);
-	if (ret) {
-		dev_err(dev, "Failed to enable VDD33 supply\n");
-		return ret;
-	}
-	ret = regulator_enable(exynos->vdd10);
-	if (ret) {
-		dev_err(dev, "Failed to enable VDD10 supply\n");
-		return ret;
-	}
-
-	for (i = 0; i < exynos->num_clks; i++) {
-		ret = clk_prepare_enable(exynos->clks[i]);
-		if (ret) {
-			while (i-- > 0)
-				clk_disable_unprepare(exynos->clks[i]);
-			return ret;
-		}
-	}
-
 	return 0;
 }
 
