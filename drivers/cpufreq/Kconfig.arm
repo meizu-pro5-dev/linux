@@ -285,3 +285,13 @@ config ARM_PXA2xx_CPUFREQ
 	  This add the CPUFreq driver support for Intel PXA2xx SOCs.
 
 	  If in doubt, say N.
+
+config M86_CPU_COORDINATOR
+	tristate "Measured-bin Meizu PRO 5 CPU DVFS coordinator"
+	depends on ARM64 && ARCH_EXYNOS && CPU_FREQ && REGULATOR && COMMON_CLK
+	depends on THERMAL && CPU_FREQ_THERMAL && MFD_SYSCON
+	help
+	  Candidate driver for explicitly opted-in m86 CPU rails and clocks.
+	  Requires reviewed CPU clock providers, active PMIC rail handshake,
+	  measured ASV/EMA calibration and fixed MIF floor. Default governor
+	  should be userspace during initial controlled transition validation.

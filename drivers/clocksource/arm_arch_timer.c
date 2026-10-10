@@ -1099,6 +1099,9 @@ struct arch_timer_kvm_info *arch_timer_get_kvm_info(void)
 
 static void __init arch_counter_register(unsigned type)
 {
+	/* Exynos7420 firmware leaves per-CPU CNTVOFF values inconsistent. */
+	bool m86_phys_counter = of_machine_is_compatible("meizu,m86") &&
+		arch_timer_uses_ppi == ARCH_TIMER_PHYS_NONSECURE_PPI;
 	u64 (*scr)(void);
 	u64 start_count;
 	int width;
@@ -1107,7 +1110,8 @@ static void __init arch_counter_register(unsigned type)
 	if (type & ARCH_TIMER_TYPE_CP15) {
 		u64 (*rd)(void);
 
-		if ((IS_ENABLED(CONFIG_ARM64) && !is_hyp_mode_available()) ||
+		if ((!m86_phys_counter && IS_ENABLED(CONFIG_ARM64) &&
+		     !is_hyp_mode_available()) ||
 		    arch_timer_uses_ppi == ARCH_TIMER_VIRT_PPI) {
 			if (arch_timer_counter_has_wa()) {
 				rd = arch_counter_get_cntvct_stable;
@@ -1127,7 +1131,12 @@ static void __init arch_counter_register(unsigned type)
 		}
 
 		arch_timer_read_counter = rd;
+		/* EL0 vDSO reads CNTVCT, so it cannot serve the physical clock. */
+		if (m86_phys_counter)
+			vdso_default = VDSO_CLOCKMODE_NONE;
 		clocksource_counter.vdso_clock_mode = vdso_default;
+		if (m86_phys_counter)
+			pr_info("m86: physical counter for clocksource and sched_clock; vDSO disabled\n");
 	} else {
 		arch_timer_read_counter = arch_counter_get_cntvct_mem;
 		scr = arch_counter_get_cntvct_mem;
