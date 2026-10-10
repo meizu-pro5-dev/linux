@@ -16,6 +16,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/of_platform.h>
 #include <linux/regmap.h>
 
 #include <ufs/ufshcd.h>
@@ -1189,9 +1190,43 @@ static int exynos_ufs_init(struct ufs_hba *hba)
 		goto out;
 	exynos_ufs_specify_phy_time_attr(ufs);
 	exynos_ufs_config_smu(ufs);
+
+	{
+		struct device_node *bnode = of_parse_phandle(dev->of_node, "samsung,bus", 0);
+		if (bnode) {
+			struct platform_device *bsup = of_find_device_by_node(bnode);
+			of_node_put(bnode);
+			if (!bsup) {
+				ret = -EPROBE_DEFER;
+				goto out;
+			}
+			if (device_link_add(dev, &bsup->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+				ufs->bus_dev = &bsup->dev;
+			put_device(&bsup->dev);
+		}
+		if (!ufs->bus_dev)
+			ufs->bus_dev = exynos_bus_get_dev("bus-mif");
+		if (!ufs->bus_dev)
+			ufs->bus_dev = exynos_bus_get_dev(NULL);
+		if (ufs->bus_dev) {
+			ufs->bus_qos_khz = 416000;
+			ret = dev_pm_qos_add_request(ufs->bus_dev, &ufs->bus_qos_req,
+						     DEV_PM_QOS_MIN_FREQUENCY, ufs->bus_qos_khz);
+			if (ret >= 0) {
+				ufs->bus_qos_active = true;
+				dev_info(dev, "registered UFS PM QoS request on %s: %u kHz\n",
+					 dev_name(ufs->bus_dev), ufs->bus_qos_khz);
+			}
+		}
+	}
+
 	return 0;
 
 out:
+	if (ufs->bus_qos_active) {
+		dev_pm_qos_remove_request(&ufs->bus_qos_req);
+		ufs->bus_qos_active = false;
+	}
 	hba->priv = NULL;
 	return ret;
 }
@@ -1396,12 +1431,18 @@ static int exynos_ufs_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op,
 	if (!ufshcd_is_link_active(hba))
 		phy_power_off(ufs->phy);
 
+	if (ufs->bus_qos_active)
+		dev_pm_qos_update_request(&ufs->bus_qos_req, 0);
+
 	return 0;
 }
 
 static int exynos_ufs_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 {
 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+
+	if (ufs->bus_qos_active)
+		dev_pm_qos_update_request(&ufs->bus_qos_req, ufs->bus_qos_khz);
 
 	if (!ufshcd_is_link_active(hba))
 		phy_power_on(ufs->phy);
@@ -1613,6 +1654,11 @@ static int exynos_ufs_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(&(pdev)->dev);
 	ufshcd_remove(hba);
+
+	if (ufs && ufs->bus_qos_active) {
+		dev_pm_qos_remove_request(&ufs->bus_qos_req);
+		ufs->bus_qos_active = false;
+	}
 
 	phy_power_off(ufs->phy);
 	phy_exit(ufs->phy);

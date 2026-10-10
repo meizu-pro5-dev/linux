@@ -197,6 +197,7 @@
 };
 
 &ufs {
+	samsung,bus = <&bus_mif>;
 	status = "okay";
 };
 
@@ -421,6 +422,7 @@
 	         <&cmu_disp CLK_SCLK_DECON0_ECLK>, <&cmu_disp CLK_SCLK_DECON0_VCLK>;
 	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
 	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
+	samsung,bus = <&bus_mif>;
 	status = "okay";
  display-timings {
   native-mode = <&m86_handoff_timing>;
