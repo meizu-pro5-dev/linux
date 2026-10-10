@@ -94,6 +94,15 @@ config ARM_AT91_CPUIDLE
 	help
 	  Select this to enable cpuidle for AT91 processors.
 
+config ARM_EXYNOS7420_CPUIDLE
+	bool "CPU Idle Driver for Samsung Exynos 7420 (m86)"
+	depends on ARCH_EXYNOS && ARM64
+	default y
+	help
+	  Select this to enable cpuidle on Samsung Exynos 7420 SoCs,
+	  providing C-state management (WFI) for Cortex-A57/A53 clusters
+	  on platforms with legacy PSCI 0.1 firmware.
+
 config ARM_EXYNOS_CPUIDLE
 	bool "Cpu Idle Driver for the Exynos processors"
 	depends on (ARCH_EXYNOS || COMPILE_TEST) && !ARM64
