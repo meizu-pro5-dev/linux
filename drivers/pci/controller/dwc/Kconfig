@@ -415,4 +415,15 @@ config PCIE_VISCONTI_HOST
 	  Say Y here if you want PCIe controller support on Toshiba Visconti SoC.
 	  This driver supports TMPV7708 SoC.
 
+config PCI_EXYNOS7420_PRO5_ENUM
+	tristate "PRO5 Exynos7420 PCIe channel 1 enumeration candidate"
+	depends on ARCH_EXYNOS && ARM64 && PCI && OF && GPIOLIB && COMMON_CLK
+	select PCIE_DW_HOST
+	select MFD_SYSCON
+	select REGMAP_MMIO
+	help
+	  Experimental host and integrated PHY initialization. This requires
+	  reviewed channel 1 clock and register resources and provides no
+	  endpoint interrupt support. Intended solely for PCI enumeration.
+
 endmenu

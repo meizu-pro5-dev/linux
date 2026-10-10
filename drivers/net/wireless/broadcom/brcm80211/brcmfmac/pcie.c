@@ -50,6 +50,7 @@ enum brcmf_pcie_state {
 };
 
 BRCMF_FW_DEF(43602, "brcmfmac43602-pcie");
+BRCMF_FW_DEF(43455, "brcmfmac43455-pcie");
 BRCMF_FW_DEF(4350, "brcmfmac4350-pcie");
 BRCMF_FW_DEF(4350C, "brcmfmac4350c2-pcie");
 BRCMF_FW_CLM_DEF(4355, "brcmfmac4355-pcie");
@@ -81,6 +82,8 @@ MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.clm_blob");
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txcap_blob");
 
 static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
+	/* PRO5 measured ChipCommon0x4345 rev6; vendor43455c0 PCIe FW. */
+	BRCMF_FW_ENTRY(BRCM_CC_4345_CHIP_ID, 0x00000040, 43455),
 	BRCMF_FW_ENTRY(BRCM_CC_43602_CHIP_ID, 0xFFFFFFFF, 43602),
 	BRCMF_FW_ENTRY(BRCM_CC_43465_CHIP_ID, 0xFFFFFFF0, 4366C),
 	BRCMF_FW_ENTRY(BRCM_CC_4350_CHIP_ID, 0x000000FF, 4350C),
@@ -1872,6 +1875,11 @@ static int brcmf_pcie_buscore_reset(void *ctx, struct brcmf_chip *chip)
 	struct brcmf_core *core;
 	u32 val, reg;
 
+	core = brcmf_chip_get_core(chip, BCMA_CORE_PCIE2);
+	if (!core) {
+		pci_err(devinfo->pdev, "PCIe2 core absent; refuse PCIe reset\n");
+		return -ENODEV;
+	}
 	devinfo->ci = chip;
 	brcmf_pcie_reset_device(devinfo);
 
@@ -2433,6 +2441,14 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	core = brcmf_chip_get_core(devinfo->ci, BCMA_CORE_PCIE2);
+	if (!core) {
+		pci_err(pdev, "PCIe2 core absent after chip attach\n");
+		ret = -ENODEV;
+		goto fail;
+	}
+	pci_info(pdev, "PRO5 attach chip=0x%x rev=%u PCIe2-rev=%u RAM base=0x%x size=0x%x\n",
+		 devinfo->ci->chip, devinfo->ci->chiprev, core->rev,
+		 devinfo->ci->rambase, devinfo->ci->ramsize);
 	if (core->rev >= 64)
 		devinfo->reginfo = &brcmf_reginfo_64;
 	else
@@ -2671,6 +2687,7 @@ static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 	}
 
 static const struct pci_device_id brcmf_pcie_devid_table[] = {
+	BRCMF_PCIE_DEVICE(0x43ab, WCC), /* PRO5 measured BCM43455C0 */
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4350_DEVICE_ID, WCC),
 	BRCMF_PCIE_DEVICE_SUB(0x4355, BRCM_PCIE_VENDOR_ID_BROADCOM, 0x4355, WCC),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4354_RAW_DEVICE_ID, WCC),
