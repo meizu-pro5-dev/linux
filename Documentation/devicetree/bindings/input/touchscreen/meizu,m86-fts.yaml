@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/meizu,m86-fts.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Meizu PRO 5 ST FTS 3980 touchscreen
+
+maintainers:
+  - Meizu PRO 5 developers <meizu-pro5-dev@users.noreply.github.com>
+
+description: |
+  Legacy ST FTS 3980 protocol with existing controller firmware. This initial
+  board port retains bootloader-enabled power rails. It does not reconfigure
+  PMIC supplies or flash controller firmware, and does not implement wakeup.
+
+allOf:
+  - $ref: touchscreen.yaml#
+
+properties:
+  compatible:
+    const: meizu,m86-fts
+  reg:
+    maxItems: 1
+  interrupts:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - touchscreen-size-x
+  - touchscreen-size-y
+
+unevaluatedProperties: false
