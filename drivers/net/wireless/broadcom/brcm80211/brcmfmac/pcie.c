@@ -2588,7 +2588,7 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 #ifdef CONFIG_PM
 
 
-static int brcmf_pcie_pm_enter_D3(struct device *dev)
+static int __maybe_unused brcmf_pcie_pm_enter_D3(struct device *dev)
 {
 	struct brcmf_pciedev_info *devinfo;
 	struct brcmf_bus *bus;
@@ -2618,7 +2618,7 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 }
 
 
-static int brcmf_pcie_pm_leave_D3(struct device *dev)
+static int __maybe_unused brcmf_pcie_pm_leave_D3(struct device *dev)
 {
 	struct brcmf_pciedev_info *devinfo;
 	struct brcmf_bus *bus;
@@ -2660,11 +2660,50 @@ cleanup:
 }
 
 
+static int brcmf_pcie_pm_suspend(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	pdev->skip_bus_pm = true;
+	return 0;
+}
+
+static int brcmf_pcie_pm_suspend_noirq(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	pdev->skip_bus_pm = true;
+	return 0;
+}
+
+static int brcmf_pcie_pm_resume(struct device *dev)
+{
+	return 0;
+}
+
+static int brcmf_pcie_pm_resume_noirq(struct device *dev)
+{
+	return 0;
+}
+
 static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 	/* On Exynos 7420, PCIe root complex does not support dynamic D3 link re-training;
 	 * keep PCIe link in stable L0 to prevent AXI bus hang during s2idle.
 	 */
+	.suspend = brcmf_pcie_pm_suspend,
+	.resume = brcmf_pcie_pm_resume,
+	.freeze = brcmf_pcie_pm_suspend,
+	.restore = brcmf_pcie_pm_resume,
+	.suspend_noirq = brcmf_pcie_pm_suspend_noirq,
+	.resume_noirq = brcmf_pcie_pm_resume_noirq,
 };
+
+static void quirk_brcmfmac_bcm4356_skip_bus_pm(struct pci_dev *pdev)
+{
+	pdev->skip_bus_pm = true;
+}
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, 0x43ab, quirk_brcmfmac_bcm4356_skip_bus_pm);
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, BRCM_PCIE_4356_DEVICE_ID, quirk_brcmfmac_bcm4356_skip_bus_pm);
 
 
 #endif /* CONFIG_PM */

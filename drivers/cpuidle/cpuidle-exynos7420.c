@@ -125,7 +125,7 @@ static struct cpuidle_driver exynos7420_idle_driver = {
 			.exit_latency		= 100,
 			.target_residency	= 1000,
 			.power_usage		= UINT_MAX,
-			.flags			= CPUIDLE_FLAG_TIMER_STOP,
+			.flags			= CPUIDLE_FLAG_TIMER_STOP | CPUIDLE_FLAG_RCU_IDLE,
 			.name			= "C2",
 			.desc			= "Exynos 7420 Core Power Gating",
 		},
