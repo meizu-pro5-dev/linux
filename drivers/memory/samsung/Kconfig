@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 config SAMSUNG_MC
 	bool "Samsung Exynos Memory Controller support" if COMPILE_TEST
+	default y if ARCH_EXYNOS
 	help
 	  Support for the Memory Controller (MC) devices found on
 	  Samsung Exynos SoCs.
@@ -31,5 +32,14 @@ config EXYNOS_SROM
 	  is provided, the driver enables support for external memory
 	  or external devices.
 	  If unsure, say Y on devices with Samsung Exynos SoCs.
+
+config EXYNOS7420_DMC
+	bool "Exynos7420 LPDDR4 Dynamic Memory Controller power management"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	default y
+	help
+	  Enables Dynamic Self-Refresh (DSREF) and Dynamic Power-Down (DPWRDN)
+	  for the 4-channel LPDDR4 DREX memory controllers on Samsung Exynos 7420.
+	  If unsure, say Y on devices with Samsung Exynos 7420 SoC.
 
 endif
