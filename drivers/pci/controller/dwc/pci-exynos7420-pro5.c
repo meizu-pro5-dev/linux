@@ -500,5 +500,12 @@ static struct platform_driver pro5_driver = {
 		.pm = &pro5_pcie_pm_ops,
 	},
 };
+static void quirk_pro5_bcm4356_skip_bus_pm(struct pci_dev *pdev)
+{
+	pdev->skip_bus_pm = true;
+}
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, 0x43ab, quirk_pro5_bcm4356_skip_bus_pm);
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, 0x4356, quirk_pro5_bcm4356_skip_bus_pm);
+
 module_platform_driver(pro5_driver);
 MODULE_LICENSE("GPL");
