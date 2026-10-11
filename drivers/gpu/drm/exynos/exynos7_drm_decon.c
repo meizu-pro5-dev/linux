@@ -154,8 +154,11 @@ static void decon_ctx_remove(struct decon_context *ctx)
 static u32 decon_calc_clkdiv(struct decon_context *ctx,
 		const struct drm_display_mode *mode)
 {
-	unsigned long ideal_clk = mode->clock;
+	unsigned long ideal_clk = (unsigned long)mode->clock * 1000;
 	u32 clkdiv;
+
+	if (!ideal_clk)
+		return 1;
 
 	/* Find the clock divider value that gets us closest to ideal_clk */
 	clkdiv = DIV_ROUND_UP(clk_get_rate(ctx->vclk), ideal_clk);
@@ -217,11 +220,17 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 	val |= VIDCON0_ENVID | VIDCON0_ENVID_F;
 	writel(val, ctx->regs + VIDCON0);
 
-	clkdiv = decon_calc_clkdiv(ctx, mode);
-	if (clkdiv > 1) {
-		val = VCLKCON1_CLKVAL_NUM_VCLK(clkdiv - 1);
-		writel(val, ctx->regs + VCLKCON1);
-		writel(val, ctx->regs + VCLKCON2);
+	/*
+	 * In command (i80) mode, pixel data is pushed to DSIM FIFO using high-speed
+	 * burst clock without VCLK division. Only divide VCLK for RGB video mode.
+	 */
+	if (!ctx->i80_if) {
+		clkdiv = decon_calc_clkdiv(ctx, mode);
+		if (clkdiv > 1) {
+			val = VCLKCON1_CLKVAL_NUM_VCLK(clkdiv - 1);
+			writel(val, ctx->regs + VCLKCON1);
+			writel(val, ctx->regs + VCLKCON2);
+		}
 	}
 
 	val = readl(ctx->regs + DECON_UPDATE);
@@ -677,16 +686,21 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 
 	decon_init(ctx);
 
+	/* Must clear suspended before re-enabling vblank and committing hardware state */
+	ctx->suspended = false;
+
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
 		decon_enable_vblank(ctx->crtc);
 
 	decon_commit(ctx->crtc);
 
-	ctx->suspended = false;
 	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
-	if (ctx->i80_if)
+	if (ctx->i80_if) {
 		ctx->i80_handoff_processed = true;
+		/* Trigger a fresh frame transmission on the next TE edge upon resume */
+		atomic_set(&ctx->frame_pending, 1);
+	}
 }
 
 static void decon_atomic_disable(struct exynos_drm_crtc *crtc)

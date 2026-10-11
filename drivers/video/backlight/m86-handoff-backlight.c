@@ -59,7 +59,6 @@ static const struct s6e3fa3_cmd s6e3fa3_wake_seq[] = {
 	{ 0x05, 1, { 0x11 }, 120 },              /* SLEEP_OUT, 120ms */
 	{ 0x15, 2, { 0xF9, 0x12 }, 0 },          /* J_MIC */
 	{ 0x29, 3, { 0xF0, 0xA5, 0xA5 }, 0 },    /* S_PASSWD_KEY_EN_1 */
-	{ 0x15, 2, { 0x35, 0x00 }, 20 },         /* TEON (mode 0: V-blank), 20ms */
 	{ 0x29, 3, { 0xFC, 0x5A, 0x5A }, 0 },    /* LEVEL3_UNLOCK */
 	{ 0x15, 2, { 0xB0, 0x1E }, 0 },          /* GLOBAL_PARA */
 	{ 0x15, 2, { 0xFD, 0x94 }, 0 },          /* AVC_SETTING */
@@ -67,6 +66,7 @@ static const struct s6e3fa3_cmd s6e3fa3_wake_seq[] = {
 	{ 0x15, 2, { 0x53, 0x20 }, 0 },          /* DIMMING_SPEED */
 	{ 0x15, 2, { 0x55, 0x00 }, 10 },         /* ACL_MODE, 10ms */
 	{ 0x05, 1, { 0x29 }, 0 },                /* DISP_ON */
+	{ 0x15, 2, { 0x35, 0x00 }, 20 },         /* TEON (mode 0: V-blank), 20ms */
 };
 
 /*
@@ -132,7 +132,7 @@ fault:
 	return ret;
 }
 
-static int s6e3fa3_enter_sleep(struct m86_handoff *ctx)
+static int __maybe_unused s6e3fa3_enter_sleep(struct m86_handoff *ctx)
 {
 	int i, ret = 0;
 
@@ -158,7 +158,7 @@ static int s6e3fa3_enter_sleep(struct m86_handoff *ctx)
 	return 0;
 }
 
-static int s6e3fa3_exit_sleep(struct m86_handoff *ctx)
+static int __maybe_unused s6e3fa3_exit_sleep(struct m86_handoff *ctx)
 {
 	u32 mask;
 	int i, ret = 0;
@@ -206,24 +206,32 @@ static int m86_update_status(struct backlight_device *bl)
 	}
 
 	if (blank) {
-		ret = s6e3fa3_enter_sleep(ctx);
-		goto out;
-	}
+		if (!ctx->blanked) {
+			u8 disp_off = 0x28;
 
-	if (ctx->blanked) {
-		ret = s6e3fa3_exit_sleep(ctx);
-		if (ret)
-			goto out;
+			ret = m86_send_packet(ctx, 0x05, &disp_off, 1);
+			if (!ret) {
+				ctx->blanked = true;
+				msleep(10); /* PRO5 DISP_OFF delay */
+			}
+		}
+		goto out;
 	}
 
 	/* PRO5 DIMMING_SPEED={0x53,0x20}; LUMINANCE={0x51,v} */
 	{
 		u8 dim[2] = { 0x53, 0x20 };
 		u8 lum[2] = { 0x51, (u8)backlight_get_brightness(bl) };
+		u8 disp_on = 0x29;
 
 		ret = m86_send_packet(ctx, 0x15, dim, 2);
 		if (!ret)
 			ret = m86_send_packet(ctx, 0x39, lum, 2);
+		if (!ret && ctx->blanked) {
+			ret = m86_send_packet(ctx, 0x05, &disp_on, 1);
+			if (!ret)
+				ctx->blanked = false;
+		}
 	}
 out:
 	mutex_unlock(&ctx->lock);
