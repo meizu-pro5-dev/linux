@@ -245,7 +245,7 @@ static int check_rail(struct gpu_dvfs *d,u32 *selector,u32 *ramp)
  ret=pmic_read(d,0x52,&sync);if(ret)return ret;
  ret=pmic_read(d,0x33,&dvs4);if(ret)return ret;
  /* r39 true-read normal path: no workaround and no selector compensation. */
- if(trim!=0x78 || c0!=0 || (ldo&0xc0) || !(sync&0x40) || dvs4!=0x84)
+ if((trim!=0x78 && trim!=0x38) || c0!=0 || (ldo&0xc0) || !(sync&0x40) || dvs4!=0x84)
   return -EOPNOTSUPP;
  return 0;
 }
@@ -308,7 +308,7 @@ static int takeover_normal_on(struct gpu_dvfs *d)
   goto fail;
  }
  if(s.id!=0x12 || s.ctrl!=0x38 || s.selector!=0x39 || s.ldo!=0x14 ||
-    s.sync!=0x4f || s.dvs4!=0x84 || s.trim!=0x78 || s.c0 || s.ctrl3!=0x20 ||
+    s.sync!=0x4f || s.dvs4!=0x84 || (s.trim!=0x78 && s.trim!=0x38) || s.c0 || s.ctrl3!=0x20 ||
     (s.cfg&15)!=15 || (s.status&15)!=15 || ((s.gpio>>16)&15)!=2 ||
     s.dvs_ctrl || s.dvs_status!=1 || s.mcs!=0x31 || s.rate!=266000000) {
   ret=-EOPNOTSUPP;goto fail;
