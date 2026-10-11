@@ -17,6 +17,7 @@
 #include <linux/regmap.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include "pcie-designware.h"
 
 struct pro5_pcie {
@@ -467,6 +468,24 @@ static int pro5_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static int pro5_pcie_suspend_noirq(struct device *dev)
+{
+	/* Retain PCIe root complex, clocks, and L0 link state during s2idle to
+	 * prevent AXI bus hang or lost link on BCM4356 endpoint.
+	 */
+	return 0;
+}
+
+static int pro5_pcie_resume_noirq(struct device *dev)
+{
+	return 0;
+}
+
+static const struct dev_pm_ops pro5_pcie_pm_ops = {
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pro5_pcie_suspend_noirq,
+				  pro5_pcie_resume_noirq)
+};
+
 static const struct of_device_id pro5_match[] = {
 	{ .compatible = "samsung,exynos7420-pro5-pcie-enumeration" },
 	{ }
@@ -478,6 +497,7 @@ static struct platform_driver pro5_driver = {
 	.driver = {
 		.name = "exynos7420-pro5-pcie-enumeration",
 		.of_match_table = pro5_match,
+		.pm = &pro5_pcie_pm_ops,
 	},
 };
 module_platform_driver(pro5_driver);
