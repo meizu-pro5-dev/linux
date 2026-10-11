@@ -301,6 +301,7 @@ static void arizona_disable_reset(struct arizona *arizona)
 		switch (arizona->type) {
 		case WM5110:
 		case WM8280:
+		case WM8998:
 			/* Meet requirements for minimum reset duration */
 			usleep_range(5000, 10000);
 			break;
@@ -309,7 +310,7 @@ static void arizona_disable_reset(struct arizona *arizona)
 		}
 
 		gpiod_set_raw_value_cansleep(arizona->pdata.reset, 1);
-		usleep_range(1000, 5000);
+		usleep_range(5000, 10000);
 	}
 }
 

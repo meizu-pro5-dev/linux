@@ -219,8 +219,8 @@
 };
 
 /* Avoid unneeded first-boot accesses and the S6 display/audio sequences. */
-&pdma0 { status = "disabled"; };
-&pdma1 { status = "disabled"; };
+&pdma0 { status = "okay"; };
+&pdma1 { status = "okay"; };
 &adma { status = "disabled"; };
 &pwm { status = "disabled"; };
 &tmuctrl_0 { status = "disabled"; };
@@ -373,6 +373,13 @@
 &i2c_pmic {
   pmic@66 {
 	regulators {
+		m86_wm8998_1v8: LDO16 {
+			regulator-name = "vdd18_audio";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-boot-on;
+			regulator-always-on;
+		};
 		m86_lcd_1v8: LDO18 {
 			regulator-name = "vdd18_lcd";
 			regulator-min-microvolt = <1800000>;
@@ -976,4 +983,79 @@
 		};
 	};
 };
+
+&hsi2c_1 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	audio_codec_wm8998: audio-codec-wm8998@1a {
+		compatible = "wlf,wm8998";
+		reg = <0x1a>;
+		interrupt-parent = <&gpa3>;
+		interrupts = <6 IRQ_TYPE_LEVEL_HIGH>;
+
+		wlf,reset = <&gpd0 1 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpd0 1 GPIO_ACTIVE_HIGH>;
+		wlf,ldoena = <&gpj0 2 GPIO_ACTIVE_HIGH>;
+
+		wlf,micd-ranges = <
+			105 226 /* KEY_MEDIA */
+			270 115 /* KEY_VOLUMEUP */
+			752 114 /* KEY_VOLUMEDOWN */ >;
+		wlf,micd-configs = <0 1 0>;
+		wlf,micbias1 = <2600 0 1 0 0>;
+		wlf,micbias2 = <1800 0 1 0 0>;
+		wlf,micbias3 = <1800 0 1 0 0>;
+		wlf,clk32k-src = <2>; /* MCLK2 */
+		wlf,micd-detect-debounce = <500>;
+		wlf,micd-bias-start-time = <9>;
+		wlf,micd-rate = <5>;
+		wlf,micd-dbtime = <1>;
+		wlf,micd-force-micbias = <1>;
+		wlf,micd-open-circuit-declare = <1>;
+
+		#sound-dai-cells = <1>;
+
+		AVDD-supply = <&m86_wm8998_1v8>;
+		LDOVDD-supply = <&m86_wm8998_1v8>;
+		DBVDD-supply = <&m86_wm8998_1v8>;
+		DBVDD1-supply = <&m86_wm8998_1v8>;
+		DBVDD2-supply = <&m86_wm8998_1v8>;
+		DBVDD3-supply = <&m86_wm8998_1v8>;
+		CPVDD-supply = <&m86_wm8998_1v8>;
+		SPKVDD-supply = <&m86_wm8998_1v8>;
+		SPKVDDL-supply = <&m86_wm8998_1v8>;
+		SPKVDDR-supply = <&m86_wm8998_1v8>;
+	};
+};
+
+&i2s1 {
+	status = "okay";
+};
+
+/ {
+	sound {
+		compatible = "samsung,meizu-m86-audio";
+		model = "Meizu-PRO5";
+		samsung,pmu = <&pmu_system_controller>;
+		amp-reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
+		dsp-reset-gpios = <&gpf5 5 GPIO_ACTIVE_HIGH>;
+		samsung,audio-routing =
+			"Headphone", "HPOUTL",
+			"Headphone", "HPOUTR",
+			"Earpiece", "EPOUT",
+			"Speaker", "SPKOUTLN",
+			"Speaker", "SPKOUTLP",
+			"Speaker", "SPKOUTRN",
+			"Speaker", "SPKOUTRP",
+			"Headset Mic", "MICBIAS1",
+			"IN2B", "Headset Mic",
+			"Main Mic", "MICBIAS2",
+			"IN1AL", "Main Mic";
+		audio-codec = <&audio_codec_wm8998 1>;
+		i2s-controller = <&i2s1 0>;
+		status = "okay";
+	};
+};
+
 
