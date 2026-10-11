@@ -239,6 +239,7 @@ out:
 }
 
 static const struct backlight_ops m86_ops = {
+	.options = BL_CORE_SUSPENDRESUME,
 	.update_status = m86_update_status,
 };
 
@@ -248,6 +249,44 @@ static void m86_clocks_off(void *data)
 
 	clk_bulk_disable_unprepare(ctx->num_clocks, ctx->clocks);
 }
+
+static int s6e3fa3_pm_suspend(struct device *dev)
+{
+	struct m86_handoff *ctx = dev_get_drvdata(dev);
+	u8 disp_off = 0x28;
+	int ret = 0;
+
+	mutex_lock(&ctx->lock);
+	if (!ctx->blanked) {
+		ret = m86_send_packet(ctx, 0x05, &disp_off, 1);
+		if (!ret) {
+			ctx->blanked = true;
+			msleep(10);
+		}
+	}
+	ctx->suspended = true;
+	mutex_unlock(&ctx->lock);
+	return ret;
+}
+
+static int s6e3fa3_pm_resume(struct device *dev)
+{
+	struct m86_handoff *ctx = dev_get_drvdata(dev);
+	u32 mask;
+
+	mutex_lock(&ctx->lock);
+	mask = readl(ctx->regs + DSIM_INTMSK);
+	writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
+	readl(ctx->regs + DSIM_INTMSK);
+	mask = readl(ctx->regs + DSIM_INTMSK);
+	ctx->ready = (mask & (PH_EMPTY | PL_EMPTY)) == (PH_EMPTY | PL_EMPTY);
+	ctx->faulted = false;
+	ctx->suspended = false;
+	mutex_unlock(&ctx->lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(m86_pm_ops, s6e3fa3_pm_suspend, s6e3fa3_pm_resume);
 
 static int m86_probe(struct platform_device *pdev)
 {
@@ -321,7 +360,7 @@ static struct platform_driver m86_driver = {
 	.driver = {
 		.name = "m86-s6e3fa3-panel",
 		.of_match_table = m86_match,
-		.pm = NULL,
+		.pm = pm_sleep_ptr(&m86_pm_ops),
 		.suppress_bind_attrs = true,
 	},
 };
