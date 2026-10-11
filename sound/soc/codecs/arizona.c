@@ -1892,6 +1892,17 @@ restore_aif:
 				   base + ARIZONA_AIF_RX_ENABLES,
 				   0xff, aif_rx_state);
 	}
+
+	val = snd_soc_component_read(component, base + ARIZONA_AIF_BCLK_CTRL);
+	if (val & ARIZONA_AIF1_BCLK_MSTR) {
+		regmap_update_bits(arizona->regmap, base + ARIZONA_AIF_BCLK_CTRL,
+				   ARIZONA_AIF1_BCLK_FRC, ARIZONA_AIF1_BCLK_FRC);
+		regmap_update_bits(arizona->regmap, base + ARIZONA_AIF_TX_PIN_CTRL,
+				   ARIZONA_AIF1TX_LRCLK_FRC, ARIZONA_AIF1TX_LRCLK_FRC);
+		regmap_update_bits(arizona->regmap, base + ARIZONA_AIF_RX_PIN_CTRL,
+				   ARIZONA_AIF1RX_LRCLK_FRC, ARIZONA_AIF1RX_LRCLK_FRC);
+	}
+
 	return ret;
 }
 

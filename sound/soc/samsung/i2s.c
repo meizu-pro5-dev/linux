@@ -619,6 +619,7 @@ static int i2s_set_sysclk(struct snd_soc_dai *dai, int clk_id, unsigned int rfs,
 	mod = (mod & ~mask) | val;
 	writel(mod, priv->addr + I2SMOD);
 	spin_unlock_irqrestore(&priv->lock, flags);
+	pr_info("m86-i2s: set_sysclk id=%d rfs=%u dir=%d mod=0x%08x\n", clk_id, rfs, dir, mod);
 done:
 	pm_runtime_put(dai->dev);
 
@@ -719,6 +720,8 @@ static int i2s_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	writel(mod, priv->addr + I2SMOD);
 	priv->slave_mode = (mod & mod_slave);
 	spin_unlock_irqrestore(&priv->lock, flags);
+	pr_info("m86-i2s: set_fmt fmt=0x%08x tmp=0x%08x mod=0x%08x slave=%d (mss_off=%d)\n",
+		fmt, tmp, mod, priv->slave_mode, priv->variant_regs->mss_off);
 	pm_runtime_put(dai->dev);
 
 	return 0;
@@ -968,10 +971,17 @@ static int i2s_trigger(struct snd_pcm_substream *substream,
 			i2s_txctrl(i2s, 1);
 
 		spin_unlock_irqrestore(&priv->lock, flags);
+		pr_info("m86-i2s: trigger START I2SCON=0x%08x I2SMOD=0x%08x I2SFIC=0x%08x I2SPSR=0x%08x slave=%d\n",
+			readl(priv->addr + I2SCON), readl(priv->addr + I2SMOD),
+			readl(priv->addr + I2SFIC), readl(priv->addr + I2SPSR),
+			priv->slave_mode);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		pr_info("m86-i2s: trigger STOP I2SCON=0x%08x I2SMOD=0x%08x I2SFIC=0x%08x\n",
+			readl(priv->addr + I2SCON), readl(priv->addr + I2SMOD),
+			readl(priv->addr + I2SFIC));
 		spin_lock_irqsave(&priv->lock, flags);
 
 		if (capture) {
@@ -1143,11 +1153,25 @@ static const struct snd_soc_dapm_widget samsung_i2s_widgets[] = {
 
 static const struct snd_soc_dapm_route samsung_i2s_dapm_routes[] = {
 	{ "Playback Mixer", NULL, "Primary Playback" },
-	{ "Playback Mixer", NULL, "Secondary Playback" },
-
 	{ "Mixer DAI TX", NULL, "Playback Mixer" },
 	{ "Primary Capture", NULL, "Mixer DAI RX" },
 };
+
+static const struct snd_soc_dapm_route samsung_i2s_sec_dapm_routes[] = {
+	{ "Playback Mixer", NULL, "Secondary Playback" },
+};
+
+static int samsung_i2s_component_probe(struct snd_soc_component *component)
+{
+	struct samsung_i2s_priv *priv = snd_soc_component_get_drvdata(component);
+
+	if (priv->quirks & QUIRK_SEC_DAI)
+		return snd_soc_dapm_add_routes(&component->dapm,
+						samsung_i2s_sec_dapm_routes,
+						ARRAY_SIZE(samsung_i2s_sec_dapm_routes));
+
+	return 0;
+}
 
 static const struct snd_soc_component_driver samsung_i2s_component = {
 	.name = "samsung-i2s",
@@ -1158,6 +1182,7 @@ static const struct snd_soc_component_driver samsung_i2s_component = {
 	.dapm_routes = samsung_i2s_dapm_routes,
 	.num_dapm_routes = ARRAY_SIZE(samsung_i2s_dapm_routes),
 
+	.probe = samsung_i2s_component_probe,
 	.suspend = i2s_suspend,
 	.resume = i2s_resume,
 
@@ -1630,20 +1655,6 @@ static const struct samsung_i2s_variant_regs i2sv6_regs = {
 	.ftx0cnt_off = 8,
 };
 
-static const struct samsung_i2s_variant_regs i2sv7_regs = {
-	.bfs_off = 0,
-	.rfs_off = 4,
-	.sdf_off = 7,
-	.txr_off = 9,
-	.rclksrc_off = 11,
-	.mss_off = 12,
-	.cdclkcon_off = 22,
-	.lrp_off = 15,
-	.bfs_mask = 0xf,
-	.rfs_mask = 0x7,
-	.ftx0cnt_off = 0,
-};
-
 static const struct samsung_i2s_variant_regs i2sv5_i2s1_regs = {
 	.bfs_off = 0,
 	.rfs_off = 3,
@@ -1656,6 +1667,20 @@ static const struct samsung_i2s_variant_regs i2sv5_i2s1_regs = {
 	.bfs_mask = 0x7,
 	.rfs_mask = 0x7,
 	.ftx0cnt_off = 8,
+};
+
+static const struct samsung_i2s_variant_regs i2sv7_regs = {
+	.bfs_off = 0,
+	.rfs_off = 4,
+	.sdf_off = 7,
+	.txr_off = 9,
+	.rclksrc_off = 11,
+	.mss_off = 12,
+	.cdclkcon_off = 22,
+	.lrp_off = 15,
+	.bfs_mask = 0xf,
+	.rfs_mask = 0x7,
+	.ftx0cnt_off = 0,
 };
 
 static const struct samsung_i2s_dai_data i2sv3_dai_type = {
@@ -1687,7 +1712,7 @@ static const struct samsung_i2s_dai_data i2sv7_dai_type __maybe_unused = {
 
 static const struct samsung_i2s_dai_data i2sv5_dai_type_i2s1 __maybe_unused = {
 	.quirks = QUIRK_PRI_6CHAN | QUIRK_NEED_RSTCLR,
-	.pcm_rates = SNDRV_PCM_RATE_8000_96000,
+	.pcm_rates = SNDRV_PCM_RATE_8000_192000,
 	.i2s_variant_regs = &i2sv5_i2s1_regs,
 };
 

@@ -146,4 +146,12 @@ config SND_SOC_SAMSUNG_MIDAS_WM1811
 	help
 	  Say Y if you want to add support for SoC audio on the Midas boards.
 
+config SND_SOC_SAMSUNG_M86_WM8998
+	tristate "SoC I2S Audio support for WM8998 on Meizu PRO 5"
+	depends on SND_SOC_SAMSUNG && MFD_ARIZONA && MFD_WM8998 && I2C
+	select SND_SOC_WM8998
+	select SND_SAMSUNG_I2S
+	help
+	  Say Y if you want to add support for SoC audio on the Meizu PRO 5 (m86) board.
+
 endif #SND_SOC_SAMSUNG

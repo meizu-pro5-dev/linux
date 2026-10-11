@@ -667,6 +667,25 @@
 			status = "disabled";
 		};
 
+		i2s1: i2s@14d60000 {
+			compatible = "samsung,exynos7-i2s1";
+			reg = <0x14d60000 0x100>;
+			dmas = <&pdma0 31>, <&pdma0 30>;
+			dma-names = "tx", "rx";
+			interrupts = <GIC_SPI 435 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_peric1 PCLK_I2S1>,
+				 <&clock_peric1 PCLK_I2S1>,
+				 <&clock_peric1 SCLK_I2S1>;
+			clock-names = "iis", "i2s_opclk0", "i2s_opclk1";
+			samsung,supports-6ch;
+			samsung,supports-rstclr;
+			#clock-cells = <1>;
+			#sound-dai-cells = <1>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2s1_bus>;
+			status = "disabled";
+		};
+
 		cmu_disp: clock-controller@13ad0000 {
 			compatible = "samsung,exynos7-clock-disp";
 			reg = <0x13ad0000 0x1000>;
