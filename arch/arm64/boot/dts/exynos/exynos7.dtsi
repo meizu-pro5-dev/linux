@@ -27,6 +27,7 @@
 		pinctrl8 = &pinctrl_bus1;
 		pinctrl9 = &pinctrl_aud;
 		spi0 = &spi_0;
+		spi3 = &spi_3;
 		tmuctrl0 = &tmuctrl_0;
 	};
 
@@ -176,6 +177,8 @@
 			clocks = <&clock_fsys0 ACLK_PDMA0>;
 			clock-names = "apb_pclk";
 			#dma-cells = <1>;
+			arm,pl330-broken-no-flushp;
+			arm,pl330-periph-burst;
 		};
 
 		pdma1: dma-controller@10eb0000 {
@@ -185,6 +188,8 @@
 			clocks = <&clock_fsys0 ACLK_PDMA1>;
 			clock-names = "apb_pclk";
 			#dma-cells = <1>;
+			arm,pl330-broken-no-flushp;
+			arm,pl330-periph-burst;
 		};
 
 		clock_topc: clock-controller@10570000 {
@@ -482,6 +487,22 @@
 			pinctrl-0 = <&spi0_bus>;
 			clocks = <&clock_peric1 PCLK_SPI0>,
 				 <&clock_peric1 SCLK_SPI0>;
+			clock-names = "spi", "spi_busclk0";
+			num-cs = <1>;
+			status = "disabled";
+		};
+
+		spi_3: spi@14d50000 {
+			compatible = "samsung,exynos7-spi";
+			reg = <0x14d50000 0x100>;
+			interrupts = <GIC_SPI 467 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			samsung,spi-src-clk = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi3_bus>;
+			clocks = <&clock_peric1 PCLK_SPI3>,
+				 <&clock_peric1 SCLK_SPI3>;
 			clock-names = "spi", "spi_busclk0";
 			num-cs = <1>;
 			status = "disabled";

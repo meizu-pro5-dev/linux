@@ -416,7 +416,7 @@ static void i2s_txctrl(struct i2s_dai *i2s, int on)
 			con &= ~CON_TXDMA_PAUSE;
 		}
 
-		if (any_rx_active(i2s))
+		if ((priv->quirks & QUIRK_FORCE_TXRX) || any_rx_active(i2s))
 			mod |= 2 << txr_off;
 		else
 			mod |= 0 << txr_off;
@@ -436,9 +436,12 @@ static void i2s_txctrl(struct i2s_dai *i2s, int on)
 
 		con |=  CON_TXCH_PAUSE;
 
-		if (any_rx_active(i2s))
+		if (priv->quirks & QUIRK_FORCE_TXRX)
+			mod |= 2 << txr_off;
+		else if (any_rx_active(i2s))
 			mod |= 1 << txr_off;
-		else
+
+		if (!any_rx_active(i2s))
 			con &= ~CON_ACTIVE;
 	}
 
@@ -459,7 +462,7 @@ static void i2s_rxctrl(struct i2s_dai *i2s, int on)
 		con |= CON_RXDMA_ACTIVE | CON_ACTIVE;
 		con &= ~(CON_RXDMA_PAUSE | CON_RXCH_PAUSE);
 
-		if (any_tx_active(i2s))
+		if ((priv->quirks & QUIRK_FORCE_TXRX) || any_tx_active(i2s))
 			mod |= 2 << txr_off;
 		else
 			mod |= 1 << txr_off;
@@ -467,9 +470,12 @@ static void i2s_rxctrl(struct i2s_dai *i2s, int on)
 		con |=  CON_RXDMA_PAUSE | CON_RXCH_PAUSE;
 		con &= ~CON_RXDMA_ACTIVE;
 
-		if (any_tx_active(i2s))
+		if (priv->quirks & QUIRK_FORCE_TXRX)
+			mod |= 2 << txr_off;
+		else if (any_tx_active(i2s))
 			mod |= 0 << txr_off;
-		else
+
+		if (!any_tx_active(i2s))
 			con &= ~CON_ACTIVE;
 	}
 
@@ -747,19 +753,34 @@ static int i2s_hw_params(struct snd_pcm_substream *substream,
 		fallthrough;
 	case 4:
 		val |= MOD_DC1_EN;
-		break;
+		fallthrough;
 	case 2:
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 			i2s->dma_playback.addr_width = 4;
-		else
+			i2s->dma_playback.maxburst = 4;
+		} else {
 			i2s->dma_capture.addr_width = 4;
+			i2s->dma_capture.maxburst = 4;
+		}
 		break;
 	case 1:
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-			i2s->dma_playback.addr_width = 2;
-		else
-			i2s->dma_capture.addr_width = 2;
-
+		if (priv->quirks & QUIRK_FORCE_TXRX) {
+			if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+				i2s->dma_playback.addr_width = 4;
+				i2s->dma_playback.maxburst = 4;
+			} else {
+				i2s->dma_capture.addr_width = 4;
+				i2s->dma_capture.maxburst = 4;
+			}
+		} else {
+			if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+				i2s->dma_playback.addr_width = 2;
+				i2s->dma_playback.maxburst = 2;
+			} else {
+				i2s->dma_capture.addr_width = 2;
+				i2s->dma_capture.maxburst = 2;
+			}
+		}
 		break;
 	default:
 		dev_err(&i2s->pdev->dev, "%d channels not supported\n",
@@ -1511,6 +1532,8 @@ static int samsung_i2s_probe(struct platform_device *pdev)
 	pri_dai->dma_capture.chan_name = "rx";
 	pri_dai->dma_playback.addr_width = 4;
 	pri_dai->dma_capture.addr_width = 4;
+	pri_dai->dma_playback.maxburst = 4;
+	pri_dai->dma_capture.maxburst = 4;
 	pri_dai->priv = priv;
 
 	if (priv->quirks & QUIRK_PRI_6CHAN)
@@ -1533,6 +1556,7 @@ static int samsung_i2s_probe(struct platform_device *pdev)
 		}
 
 		sec_dai->dma_playback.addr_width = 4;
+		sec_dai->dma_playback.maxburst = 4;
 		sec_dai->idma_playback.addr = idma_addr;
 		sec_dai->pri_dai = pri_dai;
 		sec_dai->priv = priv;
@@ -1656,16 +1680,16 @@ static const struct samsung_i2s_variant_regs i2sv6_regs = {
 };
 
 static const struct samsung_i2s_variant_regs i2sv5_i2s1_regs = {
-	.bfs_off = 0,
+	.bfs_off = 1,
 	.rfs_off = 3,
-	.sdf_off = 6,
+	.sdf_off = 5,
 	.txr_off = 8,
 	.rclksrc_off = 10,
 	.mss_off = 11,
 	.cdclkcon_off = 12,
-	.lrp_off = 15,
-	.bfs_mask = 0x7,
-	.rfs_mask = 0x7,
+	.lrp_off = 7,
+	.bfs_mask = 0x3,
+	.rfs_mask = 0x3,
 	.ftx0cnt_off = 8,
 };
 
@@ -1711,7 +1735,7 @@ static const struct samsung_i2s_dai_data i2sv7_dai_type __maybe_unused = {
 };
 
 static const struct samsung_i2s_dai_data i2sv5_dai_type_i2s1 __maybe_unused = {
-	.quirks = QUIRK_PRI_6CHAN | QUIRK_NEED_RSTCLR,
+	.quirks = QUIRK_PRI_6CHAN | QUIRK_NEED_RSTCLR | QUIRK_FORCE_TXRX,
 	.pcm_rates = SNDRV_PCM_RATE_8000_192000,
 	.i2s_variant_regs = &i2sv5_i2s1_regs,
 };
