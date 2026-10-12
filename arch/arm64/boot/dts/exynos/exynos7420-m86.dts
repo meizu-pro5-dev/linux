@@ -255,7 +255,7 @@
 			label = "Power";
 			linux,code = <KEY_POWER>;
 			gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
+			debounce-interval = <25>;
 			wakeup-source;
 		};
 		volume-down {
