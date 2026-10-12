@@ -36,18 +36,12 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* Preserve the vendor exynos-snapshot area during bring-up. */
-		vendor-log@46000000 {
-			reg = <0x0 0x46000000 0x0 0x02000000>;
-			no-map;
-		};
-
 		/*
-		 * Includes all stock static modem/media/secure reservations and
-		 * high RAM used by the bootloader. Reclaim only after live proof.
+		 * Preserves only the bootloader display handoff buffer (through 0xe4800000).
+		 * Reclaimed: vendor-log (32 MiB) and legacy modem/media/video (335.5 MiB).
 		 */
 		vendor-reserved@e1000000 {
-			reg = <0x0 0xe1000000 0x0 0x18780000>;
+			reg = <0x0 0xe1000000 0x0 0x03800000>;
 			no-map;
 		};
 
