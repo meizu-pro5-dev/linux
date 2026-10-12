@@ -26,6 +26,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/bug.h>
 #include <linux/reset.h>
+#include <linux/sizes.h>
 
 #include "dmaengine.h"
 #define PL330_MAX_CHAN		8
@@ -251,6 +252,7 @@ enum pl330_byteswap {
 /* Use this _only_ to wait on transient states */
 #define UNTIL(t, s)	while (!(_state(t) & (s))) cpu_relax();
 
+/* #define PL330_DEBUG_MCGEN 1 */
 #ifdef PL330_DEBUG_MCGEN
 static unsigned cmd_line;
 #define PL330_DBGCMD_DUMP(off, x...)	do { \
@@ -1049,6 +1051,9 @@ static bool _trigger(struct pl330_thread *thrd)
 	writel(readl(regs + INTEN) | (1 << thrd->ev), regs + INTEN);
 
 	/* Only manager can execute GO */
+	dev_dbg(thrd->dmac->ddma.dev,
+		"pl330 trigger: thrd=%d chan=%d go.addr=0x%08x ns=%d req=%p ev=%d state=%d\n",
+		thrd->id, go.chan, go.addr, go.ns, req, thrd->ev, _state(thrd));
 	_execute_DBGINSN(thrd, insn, true);
 
 	thrd->req_running = idx;
@@ -2289,6 +2294,18 @@ static int pl330_terminate_all(struct dma_chan *chan)
 	spin_lock_irqsave(&pch->lock, flags);
 
 	spin_lock(&pl330->lock);
+	if (pch->thread) {
+		void __iomem *regs = pl330->base;
+		int tid = pch->thread->id;
+		dev_dbg(pl330->ddma.dev,
+			"pl330 term: chan=%d thrd=%d CS=0x%08x CPC=0x%08x SA=0x%08x DA=0x%08x CC=0x%08x FSC=0x%08x FTC=0x%08x DS=0x%08x INT=0x%08x DBG=0x%08x\n",
+			pch->chan.chan_id, tid,
+			readl(regs + CS(tid)), readl(regs + CPC(tid)),
+			readl(regs + SA(tid)), readl(regs + DA(tid)),
+			readl(regs + CC(tid)),
+			readl(regs + FSC), readl(regs + FTC(tid)),
+			readl(regs + DS), readl(regs + INTSTATUS), readl(regs + DBGSTATUS));
+	}
 	_stop(pch->thread);
 	pch->thread->req[0].desc = NULL;
 	pch->thread->req[1].desc = NULL;
@@ -2765,6 +2782,11 @@ static struct dma_async_tx_descriptor *pl330_prep_dma_cyclic(
 	if (!desc)
 		return NULL;
 
+	dev_dbg(pch->dmac->ddma.dev,
+		"pl330 cyclic: chan=%d peri=%u len=%zu period=%zu src=0x%llx dst=0x%llx bsz=%d blen=%d\n",
+		pch->chan.chan_id, desc->peri, len, period_len,
+		(u64)src, (u64)dst, pch->burst_sz, pch->burst_len);
+
 	pch->cyclic = true;
 
 	return &desc->txd;
@@ -2973,6 +2995,20 @@ static inline void init_pl330_debugfs(struct pl330_dmac *pl330)
  * It is assumed here that IRQ safe runtime PM is chosen in probe and amba
  * bus driver will only disable/enable the clock in runtime PM callbacks.
  */
+static int pl330_fixup_ctrl(struct device *dev)
+{
+	if (of_machine_is_compatible("samsung,exynos7420")) {
+		void __iomem *base = ioremap(0x10ef0000, SZ_32);
+		if (base) {
+			u32 val = readl(base);
+			dev_info(dev, "Exynos7420 PDMA fixup 0x10ef0000: 0x%08x -> 0\n", val);
+			writel(0, base);
+			iounmap(base);
+		}
+	}
+	return 0;
+}
+
 static int __maybe_unused pl330_suspend(struct device *dev)
 {
 	struct amba_device *pcdev = to_amba_device(dev);
@@ -2992,13 +3028,22 @@ static int __maybe_unused pl330_resume(struct device *dev)
 	if (ret)
 		return ret;
 
+	pl330_fixup_ctrl(dev);
+
 	pm_runtime_force_resume(dev);
 
 	return ret;
 }
 
+static int __maybe_unused pl330_runtime_resume(struct device *dev)
+{
+	pl330_fixup_ctrl(dev);
+	return 0;
+}
+
 static const struct dev_pm_ops pl330_pm = {
 	SET_LATE_SYSTEM_SLEEP_PM_OPS(pl330_suspend, pl330_resume)
+	SET_RUNTIME_PM_OPS(NULL, pl330_runtime_resume, NULL)
 };
 
 static int
@@ -3168,12 +3213,13 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
 
 
 	init_pl330_debugfs(pl330);
+	pl330_fixup_ctrl(&adev->dev);
 	dev_info(&adev->dev,
 		"Loaded driver for PL330 DMAC-%x\n", adev->periphid);
 	dev_info(&adev->dev,
-		"\tDBUFF-%ux%ubytes Num_Chans-%u Num_Peri-%u Num_Events-%u\n",
+		"\tDBUFF-%ux%ubytes Num_Chans-%u Num_Peri-%u Num_Events-%u mode=0x%x peri_ns=0x%08x irq_ns=0x%08x\n",
 		pcfg->data_buf_dep, pcfg->data_bus_width / 8, pcfg->num_chan,
-		pcfg->num_peri, pcfg->num_events);
+		pcfg->num_peri, pcfg->num_events, pcfg->mode, pcfg->peri_ns, pcfg->irq_ns);
 
 	pm_runtime_irq_safe(&adev->dev);
 	pm_runtime_use_autosuspend(&adev->dev);

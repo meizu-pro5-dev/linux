@@ -401,6 +401,11 @@
 			regulator-boot-on;
 			regulator-always-on;
 		};
+		m86_es705_1v1: LDO22 {
+			regulator-name = "vdd11_nr";
+			regulator-min-microvolt = <1100000>;
+			regulator-max-microvolt = <1100000>;
+		};
 		m86_touch_1v8: LDO23 {
 			regulator-name = "vdd18_touch";
 			regulator-min-microvolt = <1800000>;
@@ -1033,13 +1038,44 @@
 	status = "okay";
 };
 
+&pinctrl_ff {
+	spi3_cs: spi3-cs-pins {
+		samsung,pins = "gpg4-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+};
+
+&spi_3 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3_bus &spi3_cs>;
+	cs-gpios = <&gpg4 1 GPIO_ACTIVE_LOW>;
+	num-cs = <1>;
+
+	es705: audio-dsp@0 {
+		compatible = "audience,es705";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		spi-cpha;
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+		};
+	};
+};
+
 / {
 	sound {
 		compatible = "samsung,meizu-m86-audio";
 		model = "Meizu-PRO5";
 		samsung,pmu = <&pmu_system_controller>;
+		samsung,rtc = <&rtc>;
+		samsung,dsp = <&es705>;
 		amp-reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
 		dsp-reset-gpios = <&gpf5 5 GPIO_ACTIVE_HIGH>;
+		dsp-wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
+		dsp-core-supply = <&m86_es705_1v1>;
 		samsung,audio-routing =
 			"Headphone", "HPOUTL",
 			"Headphone", "HPOUTR",

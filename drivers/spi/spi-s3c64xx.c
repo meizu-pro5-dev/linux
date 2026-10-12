@@ -340,6 +340,7 @@ static void s3c64xx_spi_set_cs(struct spi_device *spi, bool enable)
 		} else {
 			u32 ssel = readl(sdd->regs + S3C64XX_SPI_CS_REG);
 
+			ssel &= ~S3C64XX_SPI_CS_SIG_INACT;
 			ssel |= (S3C64XX_SPI_CS_AUTO |
 						S3C64XX_SPI_CS_NSC_CNT_2);
 			writel(ssel, sdd->regs + S3C64XX_SPI_CS_REG);
@@ -756,11 +757,11 @@ static int s3c64xx_spi_transfer_one(struct spi_controller *host,
 
 	reinit_completion(&sdd->xfer_completion);
 
-	/* Only BPW and Speed may change across transfers */
+	/* Only BPW, Speed and Mode may change across transfers */
 	bpw = xfer->bits_per_word;
-	speed = xfer->speed_hz;
+	speed = xfer->speed_hz ? : spi->max_speed_hz;
 
-	if (bpw != sdd->cur_bpw || speed != sdd->cur_speed) {
+	if (bpw != sdd->cur_bpw || speed != sdd->cur_speed || spi->mode != sdd->cur_mode) {
 		sdd->cur_bpw = bpw;
 		sdd->cur_speed = speed;
 		sdd->cur_mode = spi->mode;
@@ -861,6 +862,7 @@ static int s3c64xx_spi_transfer_one(struct spi_controller *host,
 					dev_err(&spi->dev, "RX residue: %d\n", s.residue);
 				}
 			}
+			s3c64xx_flush_fifo(sdd);
 		} else {
 			s3c64xx_flush_fifo(sdd);
 		}

@@ -28,6 +28,7 @@ struct samsung_i2s_type {
 #define QUIRK_NEED_RSTCLR	(1 << 3)
 #define QUIRK_SUPPORTS_TDM	(1 << 4)
 #define QUIRK_SUPPORTS_IDMA	(1 << 5)
+#define QUIRK_FORCE_TXRX	(1 << 6)
 	/* Quirks of the I2S controller */
 	u32 quirks;
 	dma_addr_t idma_addr;
