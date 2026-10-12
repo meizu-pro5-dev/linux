@@ -218,6 +218,15 @@ static int m86_update_status(struct backlight_device *bl)
 		goto out;
 	}
 
+	if (ctx->faulted) {
+		/* Attempt recovery of faulted FIFO upon unblank request */
+		u32 mask = readl(ctx->regs + DSIM_INTMSK);
+		writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
+		readl(ctx->regs + DSIM_INTMSK);
+		ctx->ready = (mask & (PH_EMPTY | PL_EMPTY)) == (PH_EMPTY | PL_EMPTY);
+		ctx->faulted = false;
+	}
+
 	/* PRO5 DIMMING_SPEED={0x53,0x20}; LUMINANCE={0x51,v} */
 	{
 		u8 dim[2] = { 0x53, 0x20 };
@@ -262,11 +271,18 @@ static int s6e3fa3_pm_suspend(struct device *dev)
 		if (!ret) {
 			ctx->blanked = true;
 			msleep(10);
+		} else {
+			/* Suspend failed: PM core skips resume for failed devices;
+			 * do not latch suspended, and clear faulted so system can retry.
+			 */
+			ctx->faulted = false;
+			mutex_unlock(&ctx->lock);
+			return ret;
 		}
 	}
 	ctx->suspended = true;
 	mutex_unlock(&ctx->lock);
-	return ret;
+	return 0;
 }
 
 static int s6e3fa3_pm_resume(struct device *dev)
