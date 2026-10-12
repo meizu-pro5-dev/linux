@@ -7,6 +7,7 @@
  *	Ajay Kumar <ajaykumar.rs@samsung.com>
  */
 
+#include <linux/backlight.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/delay.h>
@@ -697,9 +698,18 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 
 	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
 	if (ctx->i80_if) {
+		struct backlight_device *bd;
+
 		ctx->i80_handoff_processed = true;
 		/* Trigger a fresh frame transmission on the next TE edge upon resume */
 		atomic_set(&ctx->frame_pending, 1);
+
+		bd = backlight_device_get_by_name("m86-panel");
+		if (bd) {
+			backlight_enable(bd);
+			put_device(&bd->dev);
+			dev_info(ctx->dev, "m86-panel: display unblanked on DPMS enable\n");
+		}
 	}
 }
 
@@ -718,6 +728,16 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	 */
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_disable_plane(crtc, &ctx->planes[i]);
+
+	if (ctx->i80_if) {
+		struct backlight_device *bd = backlight_device_get_by_name("m86-panel");
+
+		if (bd) {
+			backlight_disable(bd);
+			put_device(&bd->dev);
+			dev_info(ctx->dev, "m86-panel: display blanked on DPMS disable\n");
+		}
+	}
 
 	pm_runtime_put_sync(ctx->dev);
 
