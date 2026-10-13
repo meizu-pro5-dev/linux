@@ -1065,6 +1065,19 @@
 	};
 };
 
+&hsi2c_7 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	audio_pa_tfa9890: audio-codec@34 {
+		compatible = "nxp,tfa9890";
+		reg = <0x34>;
+		vddd-supply = <&m86_wm8998_1v8>;
+		reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+	};
+};
+
 / {
 	sound {
 		compatible = "samsung,meizu-m86-audio";
@@ -1072,18 +1085,17 @@
 		samsung,pmu = <&pmu_system_controller>;
 		samsung,rtc = <&rtc>;
 		samsung,dsp = <&es705>;
-		amp-reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
 		dsp-reset-gpios = <&gpf5 5 GPIO_ACTIVE_HIGH>;
 		dsp-wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
 		dsp-core-supply = <&m86_es705_1v1>;
+		audio-amplifier = <&audio_pa_tfa9890>;
 		samsung,audio-routing =
 			"Headphone", "HPOUTL",
 			"Headphone", "HPOUTR",
 			"Earpiece", "EPOUT",
-			"Speaker", "SPKOUTLN",
-			"Speaker", "SPKOUTLP",
-			"Speaker", "SPKOUTRN",
-			"Speaker", "SPKOUTRP",
+			"AIFINL", "AIF3TX1",
+			"AIFINR", "AIF3TX2",
+			"Speaker", "OUT",
 			"Headset Mic", "MICBIAS1",
 			"IN2B", "Headset Mic",
 			"Main Mic", "MICBIAS2",
