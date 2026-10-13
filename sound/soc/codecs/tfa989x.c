@@ -7,6 +7,7 @@
  * Copyright (C) 2013 Sony Mobile Communications Inc.
  */
 
+#include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
@@ -60,6 +61,7 @@ struct tfa989x {
 	const struct tfa989x_rev *rev;
 	struct regulator *vddd_supply;
 	struct gpio_desc *rcv_gpiod;
+	struct gpio_desc *reset_gpiod;
 };
 
 static bool tfa989x_writeable_reg(struct device *dev, unsigned int reg)
@@ -360,6 +362,18 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 	ret = devm_add_action_or_reset(dev, tfa989x_regulator_disable, tfa989x);
 	if (ret)
 		return ret;
+
+	tfa989x->reset_gpiod = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(tfa989x->reset_gpiod))
+		return PTR_ERR(tfa989x->reset_gpiod);
+
+	if (tfa989x->reset_gpiod) {
+		/* Assert reset (high), wait, de-assert (low), wait for PLL/I2C readiness */
+		gpiod_set_value_cansleep(tfa989x->reset_gpiod, 1);
+		usleep_range(1000, 2000);
+		gpiod_set_value_cansleep(tfa989x->reset_gpiod, 0);
+		usleep_range(2000, 5000);
+	}
 
 	/* Bypass regcache for reset and init sequence */
 	regcache_cache_bypass(regmap, true);
