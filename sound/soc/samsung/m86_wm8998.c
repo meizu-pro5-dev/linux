@@ -33,7 +33,7 @@
 #include <linux/mfd/arizona/registers.h>
 #include "../codecs/wm8998.h"
 
-#define MCLK_RATE		24000000U
+#define MCLK_RATE		32000000U
 
 /* PMU DEBUG: CLKOUT_SEL[12:8], CLKOUT_DISABLE[0]; sel 0x10 = XXTI 24 MHz */
 #define PMU_DEBUG_REG		0x0A00

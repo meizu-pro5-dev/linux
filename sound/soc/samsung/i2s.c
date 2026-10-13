@@ -738,9 +738,6 @@ static void i2s_set_dma_width(struct samsung_i2s_priv *priv, struct i2s_dai *i2s
 						      &i2s->dma_capture;
 
 	dma_data->addr_width = width;
-	/* Exynos7420 I2S1 + PDMA0: 4-word bursts, as in the vendor driver. */
-	if (priv->quirks & QUIRK_FORCE_TXRX)
-		dma_data->maxburst = 4;
 }
 
 static int i2s_hw_params(struct snd_pcm_substream *substream,
