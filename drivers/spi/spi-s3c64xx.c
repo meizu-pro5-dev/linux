@@ -340,7 +340,6 @@ static void s3c64xx_spi_set_cs(struct spi_device *spi, bool enable)
 		} else {
 			u32 ssel = readl(sdd->regs + S3C64XX_SPI_CS_REG);
 
-			ssel &= ~S3C64XX_SPI_CS_SIG_INACT;
 			ssel |= (S3C64XX_SPI_CS_AUTO |
 						S3C64XX_SPI_CS_NSC_CNT_2);
 			writel(ssel, sdd->regs + S3C64XX_SPI_CS_REG);
@@ -862,7 +861,6 @@ static int s3c64xx_spi_transfer_one(struct spi_controller *host,
 					dev_err(&spi->dev, "RX residue: %d\n", s.residue);
 				}
 			}
-			s3c64xx_flush_fifo(sdd);
 		} else {
 			s3c64xx_flush_fifo(sdd);
 		}

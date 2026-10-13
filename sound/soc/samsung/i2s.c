@@ -625,7 +625,6 @@ static int i2s_set_sysclk(struct snd_soc_dai *dai, int clk_id, unsigned int rfs,
 	mod = (mod & ~mask) | val;
 	writel(mod, priv->addr + I2SMOD);
 	spin_unlock_irqrestore(&priv->lock, flags);
-	pr_info("m86-i2s: set_sysclk id=%d rfs=%u dir=%d mod=0x%08x\n", clk_id, rfs, dir, mod);
 done:
 	pm_runtime_put(dai->dev);
 
@@ -726,11 +725,22 @@ static int i2s_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	writel(mod, priv->addr + I2SMOD);
 	priv->slave_mode = (mod & mod_slave);
 	spin_unlock_irqrestore(&priv->lock, flags);
-	pr_info("m86-i2s: set_fmt fmt=0x%08x tmp=0x%08x mod=0x%08x slave=%d (mss_off=%d)\n",
-		fmt, tmp, mod, priv->slave_mode, priv->variant_regs->mss_off);
 	pm_runtime_put(dai->dev);
 
 	return 0;
+}
+
+static void i2s_set_dma_width(struct samsung_i2s_priv *priv, struct i2s_dai *i2s,
+			      int stream, u32 width)
+{
+	struct snd_dmaengine_dai_dma_data *dma_data =
+		stream == SNDRV_PCM_STREAM_PLAYBACK ? &i2s->dma_playback :
+						      &i2s->dma_capture;
+
+	dma_data->addr_width = width;
+	/* Exynos7420 I2S1 + PDMA0: 4-word bursts, as in the vendor driver. */
+	if (priv->quirks & QUIRK_FORCE_TXRX)
+		dma_data->maxburst = 4;
 }
 
 static int i2s_hw_params(struct snd_pcm_substream *substream,
@@ -753,34 +763,17 @@ static int i2s_hw_params(struct snd_pcm_substream *substream,
 		fallthrough;
 	case 4:
 		val |= MOD_DC1_EN;
-		fallthrough;
+		break;
 	case 2:
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			i2s->dma_playback.addr_width = 4;
-			i2s->dma_playback.maxburst = 4;
-		} else {
-			i2s->dma_capture.addr_width = 4;
-			i2s->dma_capture.maxburst = 4;
-		}
+		i2s_set_dma_width(priv, i2s, substream->stream, 4);
 		break;
 	case 1:
+		/* TXR=2 controllers were only validated with stereo frames. */
 		if (priv->quirks & QUIRK_FORCE_TXRX) {
-			if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-				i2s->dma_playback.addr_width = 4;
-				i2s->dma_playback.maxburst = 4;
-			} else {
-				i2s->dma_capture.addr_width = 4;
-				i2s->dma_capture.maxburst = 4;
-			}
-		} else {
-			if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-				i2s->dma_playback.addr_width = 2;
-				i2s->dma_playback.maxburst = 2;
-			} else {
-				i2s->dma_capture.addr_width = 2;
-				i2s->dma_capture.maxburst = 2;
-			}
+			dev_err(&i2s->pdev->dev, "mono not supported\n");
+			return -EINVAL;
 		}
+		i2s_set_dma_width(priv, i2s, substream->stream, 2);
 		break;
 	default:
 		dev_err(&i2s->pdev->dev, "%d channels not supported\n",
@@ -992,17 +985,10 @@ static int i2s_trigger(struct snd_pcm_substream *substream,
 			i2s_txctrl(i2s, 1);
 
 		spin_unlock_irqrestore(&priv->lock, flags);
-		pr_info("m86-i2s: trigger START I2SCON=0x%08x I2SMOD=0x%08x I2SFIC=0x%08x I2SPSR=0x%08x slave=%d\n",
-			readl(priv->addr + I2SCON), readl(priv->addr + I2SMOD),
-			readl(priv->addr + I2SFIC), readl(priv->addr + I2SPSR),
-			priv->slave_mode);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		pr_info("m86-i2s: trigger STOP I2SCON=0x%08x I2SMOD=0x%08x I2SFIC=0x%08x\n",
-			readl(priv->addr + I2SCON), readl(priv->addr + I2SMOD),
-			readl(priv->addr + I2SFIC));
 		spin_lock_irqsave(&priv->lock, flags);
 
 		if (capture) {
@@ -1532,12 +1518,15 @@ static int samsung_i2s_probe(struct platform_device *pdev)
 	pri_dai->dma_capture.chan_name = "rx";
 	pri_dai->dma_playback.addr_width = 4;
 	pri_dai->dma_capture.addr_width = 4;
-	pri_dai->dma_playback.maxburst = 4;
-	pri_dai->dma_capture.maxburst = 4;
 	pri_dai->priv = priv;
 
 	if (priv->quirks & QUIRK_PRI_6CHAN)
 		pri_dai->drv->playback.channels_max = 6;
+
+	if (priv->quirks & QUIRK_FORCE_TXRX) {
+		pri_dai->drv->playback.channels_min = 2;
+		pri_dai->drv->capture.channels_min = 2;
+	}
 
 	ret = samsung_asoc_dma_platform_register(&pdev->dev, pri_dai->filter,
 						 "tx", "rx", NULL);
@@ -1556,7 +1545,6 @@ static int samsung_i2s_probe(struct platform_device *pdev)
 		}
 
 		sec_dai->dma_playback.addr_width = 4;
-		sec_dai->dma_playback.maxburst = 4;
 		sec_dai->idma_playback.addr = idma_addr;
 		sec_dai->pri_dai = pri_dai;
 		sec_dai->priv = priv;
@@ -1679,6 +1667,10 @@ static const struct samsung_i2s_variant_regs i2sv6_regs = {
 	.ftx0cnt_off = 8,
 };
 
+/*
+ * Exynos7 I2S1 I2SMOD layout from the vendor 3.10 i2s-regs.h:
+ * BFS[2:1], RFS[4:3], SDF[6:5], LRP[7], TXR[9:8], RCLKSRC[10], MSS[11].
+ */
 static const struct samsung_i2s_variant_regs i2sv5_i2s1_regs = {
 	.bfs_off = 1,
 	.rfs_off = 3,

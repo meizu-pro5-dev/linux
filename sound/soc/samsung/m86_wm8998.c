@@ -6,16 +6,21 @@
  * Author: Pair Programmer <kophapro@gmail.com>
  *
  * Based on sound/soc/samsung/tm2_wm5110.c and vendor meizu_audio_primary.c
+ *
+ * Audio path: AP I2S1 (slave) <-> Audience ES705 Port D <-> Port A <-> WM8998
+ * AIF1 (master).  The ES705 is booted over SPI3 and left in Direct Hardware
+ * Pass-Through (DHWPT); its firmware is loaded from /lib/firmware on the first
+ * hw_params, so the root filesystem must be mounted before audio is used.
  */
 
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
-#include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/mfd/syscon.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/regmap.h>
@@ -27,17 +32,18 @@
 #include "i2s.h"
 #include <linux/mfd/arizona/registers.h>
 #include "../codecs/wm8998.h"
-#include "m86_es705_fw.h"
 
 #define MCLK_RATE		24000000U
+
+/* PMU DEBUG: CLKOUT_SEL[12:8], CLKOUT_DISABLE[0]; sel 0x10 = XXTI 24 MHz */
 #define PMU_DEBUG_REG		0x0A00
-#define PMU_DEBUG_MCLK_EN	0x1000
+#define PMU_DEBUG_CLKOUT_MASK	0x1f01
+#define PMU_DEBUG_CLKOUT_XXTI	0x1000
+#define PMU_DEBUG_CLKOUT_DIS	0x0001
 #define PMU_RTC_CLKO_SEL_REG	0x001C
 #define EXYNOS_RTCCON_REG	0x0040
 #define EXYNOS_RTCCON_CLKOUTEN	(1 << 9)
 
-#define ES_SYNC_CMD		0x8000
-#define ES_SYNC_POLLING		0x0000
 #define ES_SYNC_ACK		0x80000000
 #define ES_SPI_SBL_SYNC_CMD	0x80000000
 #define ES_SPI_SBL_SYNC_ACK	0x8000FFFF
@@ -45,12 +51,15 @@
 #define ES_SPI_SYNC_ACK		0x0000
 #define ES_SPI_BOOT_CMD		0x0001
 #define ES_SPI_BOOT_ACK		0x0001
-#define ES_CMD_DHWPT_D_A	0x805200f3
+#define ES705_FW_NAME		"audience-es705-fw.bin"
+/* ESCORE_SPI_PACKET_LEN: also the bounce buffer size */
+#define ES705_SPI_PACKET	64
 
 struct m86_machine_priv {
 	struct snd_soc_component *component;
 	struct regmap *pmu;
 	struct clk *mclk;
+	bool mclk_enabled;
 	void __iomem *rtc_base;
 	struct regulator *dsp_core;
 	bool dsp_core_enabled;
@@ -58,8 +67,12 @@ struct m86_machine_priv {
 	struct gpio_desc *dsp_reset;
 	struct gpio_desc *dsp_wakeup;
 	struct spi_device *spi_dsp;
+	/* Serialises ES705 SPI traffic and es705_booted */
+	struct mutex es705_lock;
+	u8 *spi_buf;		/* DMA-safe SPI bounce buffer */
 	bool es705_booted;
 	unsigned int sysclk_rate;
+	unsigned int fll_rate;	/* FLL1 output currently programmed, 0 = off */
 	struct snd_soc_aux_dev amp_dev;
 };
 
@@ -74,6 +87,10 @@ static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
 			pr_err("m86-audio: regmap_write PMU_RTC_CLKO_SEL_REG failed: %d\n", ret);
 	}
 
+	/*
+	 * RTCCON is shared with rtc-s3c, which only rewrites it in its
+	 * probe/suspend/resume paths; CLKOUTEN[9] is not touched there.
+	 */
 	if (priv->rtc_base) {
 		reg = readl(priv->rtc_base + EXYNOS_RTCCON_REG);
 		if (on)
@@ -81,8 +98,6 @@ static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
 		else
 			reg &= ~EXYNOS_RTCCON_CLKOUTEN;
 		writel(reg, priv->rtc_base + EXYNOS_RTCCON_REG);
-		pr_debug("m86-audio: RTC 32kHz clkout %s (RTCCON=0x%08x)\n",
-			 on ? "enabled" : "disabled", readl(priv->rtc_base + EXYNOS_RTCCON_REG));
 	}
 }
 
@@ -91,31 +106,33 @@ static void m86_enable_mclk(struct m86_machine_priv *priv, bool on)
 	int ret;
 
 	if (priv->pmu) {
-		ret = regmap_write(priv->pmu, PMU_DEBUG_REG, on ? PMU_DEBUG_MCLK_EN : 0x1001);
+		ret = regmap_update_bits(priv->pmu, PMU_DEBUG_REG,
+					 PMU_DEBUG_CLKOUT_MASK,
+					 on ? PMU_DEBUG_CLKOUT_XXTI :
+					      PMU_DEBUG_CLKOUT_XXTI | PMU_DEBUG_CLKOUT_DIS);
 		if (ret)
-			pr_err("m86-audio: regmap_write PMU_DEBUG_REG failed: %d\n", ret);
-		else
-			pr_debug("m86-audio: PMU MCLK %s (0x%04x)\n", on ? "enabled" : "disabled",
-				 on ? PMU_DEBUG_MCLK_EN : 0x1001);
+			pr_err("m86-audio: PMU_DEBUG update failed: %d\n", ret);
 	}
 
-	if (priv->mclk) {
-		if (on)
-			clk_prepare_enable(priv->mclk);
-		else
+	if (priv->mclk && on != priv->mclk_enabled) {
+		if (on) {
+			ret = clk_prepare_enable(priv->mclk);
+			if (ret) {
+				pr_err("m86-audio: mclk enable failed: %d\n", ret);
+				return;
+			}
+		} else {
 			clk_disable_unprepare(priv->mclk);
+		}
+		priv->mclk_enabled = on;
 	}
 }
 
-static int m86_es705_init_hw(struct device *dev, struct m86_machine_priv *priv)
+static void m86_es705_init_hw(struct device *dev, struct m86_machine_priv *priv)
 {
 	int ret;
 
-	/* 1. Voice processor ES705 startup sequencing:
-	 *    RESET_N pin should not be de-asserted without CLK_IN present.
-	 *    meizu_enable_mclk(true);
-	 *    meizu_enable_32khz(true);
-	 */
+	/* RESET_N must not be released without CLK_IN present. */
 	m86_enable_mclk(priv, true);
 	m86_enable_32khz(priv, true);
 	usleep_range(2000, 3000);
@@ -124,7 +141,7 @@ static int m86_es705_init_hw(struct device *dev, struct m86_machine_priv *priv)
 	if (priv->dsp_reset)
 		gpiod_set_value_cansleep(priv->dsp_reset, 0);
 
-	/* 2. VDD_CORE (LDO22 1.1V vdd11_nr): power cycle to ensure sequence */
+	/* VDD_CORE (LDO22 1.1V vdd11_nr): power cycle to ensure sequence */
 	if (priv->dsp_core) {
 		if (!priv->dsp_core_enabled) {
 			ret = regulator_enable(priv->dsp_core);
@@ -149,7 +166,7 @@ static int m86_es705_init_hw(struct device *dev, struct m86_machine_priv *priv)
 		usleep_range(5000, 6000);
 	}
 
-	/* 3. Reset sequence: assert reset (0), wait 5ms, deassert reset (1), wait 20ms */
+	/* Reset pulse: assert 5 ms, release, settle 20 ms */
 	if (priv->dsp_reset) {
 		gpiod_set_value_cansleep(priv->dsp_reset, 0);
 		usleep_range(5000, 6000);
@@ -157,18 +174,36 @@ static int m86_es705_init_hw(struct device *dev, struct m86_machine_priv *priv)
 		msleep(20);
 	}
 
-	/* 4. Wakeup pin: set high per vendor driver */
 	if (priv->dsp_wakeup) {
 		gpiod_set_value_cansleep(priv->dsp_wakeup, 1);
 		usleep_range(1000, 2000);
 	}
-
-	dev_info(dev, "ES705 HW init: MCLK on, RTC on, core 1.1V, reset released\n");
-	return 0;
 }
 
-static int m86_es705_spi_cmd(struct spi_device *spi, u32 cmd, u32 *resp)
+static int m86_es705_write(struct m86_machine_priv *priv, const void *data,
+			   size_t len)
 {
+	if (WARN_ON(len > ES705_SPI_PACKET))
+		return -EINVAL;
+	memcpy(priv->spi_buf, data, len);
+	return spi_write(priv->spi_dsp, priv->spi_buf, len);
+}
+
+static int m86_es705_read(struct m86_machine_priv *priv, void *data, size_t len)
+{
+	int ret;
+
+	if (WARN_ON(len > ES705_SPI_PACKET))
+		return -EINVAL;
+	ret = spi_read(priv->spi_dsp, priv->spi_buf, len);
+	if (ret == 0)
+		memcpy(data, priv->spi_buf, len);
+	return ret;
+}
+
+static int m86_es705_spi_cmd(struct m86_machine_priv *priv, u32 cmd, u32 *resp)
+{
+	struct device *dev = &priv->spi_dsp->dev;
 	__be32 cmd_be = cpu_to_be32(cmd);
 	__be16 resp16 = 0, resp16_lo = 0;
 	bool no_resp = (cmd & BIT(28));
@@ -176,9 +211,9 @@ static int m86_es705_spi_cmd(struct spi_device *spi, u32 cmd, u32 *resp)
 
 	*resp = 0;
 
-	ret = spi_write(spi, &cmd_be, sizeof(cmd_be));
+	ret = m86_es705_write(priv, &cmd_be, sizeof(cmd_be));
 	if (ret < 0) {
-		dev_err(&spi->dev, "Failed to write SPI cmd 0x%08x: %d\n", cmd, ret);
+		dev_err(dev, "Failed to write SPI cmd 0x%08x: %d\n", cmd, ret);
 		return ret;
 	}
 
@@ -191,23 +226,23 @@ static int m86_es705_spi_cmd(struct spi_device *spi, u32 cmd, u32 *resp)
 	usleep_range(1000, 1500);
 
 	while (retry-- > 0) {
-		ret = spi_read(spi, &resp16, sizeof(resp16));
+		ret = m86_es705_read(priv, &resp16, sizeof(resp16));
 		if (ret < 0) {
-			dev_err(&spi->dev, "Failed to read SPI cmd response: %d\n", ret);
+			dev_err(dev, "Failed to read SPI cmd response: %d\n", ret);
 			return ret;
 		}
 
 		if (resp16 != 0) {
-			ret = spi_read(spi, &resp16_lo, sizeof(resp16_lo));
+			ret = m86_es705_read(priv, &resp16_lo, sizeof(resp16_lo));
 			if (ret < 0) {
-				dev_err(&spi->dev, "Failed to read SPI cmd response low: %d\n", ret);
+				dev_err(dev, "Failed to read SPI cmd response low: %d\n", ret);
 				return ret;
 			}
 
 			*resp = ((u32)be16_to_cpu(resp16) << 16) | be16_to_cpu(resp16_lo);
 
 			if ((*resp & 0xffff0000) == 0xffff0000) {
-				dev_err(&spi->dev, "ES705 rejected cmd 0x%08x (resp 0x%08x)\n",
+				dev_err(dev, "ES705 rejected cmd 0x%08x (resp 0x%08x)\n",
 					cmd, *resp);
 				return -EINVAL;
 			}
@@ -217,7 +252,7 @@ static int m86_es705_spi_cmd(struct spi_device *spi, u32 cmd, u32 *resp)
 		usleep_range(1000, 1500);
 	}
 
-	dev_warn(&spi->dev, "ES705 cmd 0x%08x timed out waiting for response\n", cmd);
+	dev_warn(dev, "ES705 cmd 0x%08x timed out waiting for response\n", cmd);
 	return -ETIMEDOUT;
 }
 
@@ -230,186 +265,172 @@ static const u32 m86_es705_dhwpt_cmds[] = {
 	0x805200f3, /* DHWPT: Port D to A, clock from Port D */
 };
 
-static int m86_es705_enable_dhwpt_sequence(struct spi_device *spi, struct device *dev)
+static int m86_es705_enable_dhwpt_sequence(struct m86_machine_priv *priv,
+					   struct device *dev)
 {
 	u32 resp = 0;
 	int i, ret;
 
 	for (i = 0; i < ARRAY_SIZE(m86_es705_dhwpt_cmds); i++) {
-		ret = m86_es705_spi_cmd(spi, m86_es705_dhwpt_cmds[i], &resp);
+		ret = m86_es705_spi_cmd(priv, m86_es705_dhwpt_cmds[i], &resp);
 		if (ret < 0) {
 			dev_err(dev, "Failed to send ES705 DHWPT cmd 0x%08x: %d\n",
 				m86_es705_dhwpt_cmds[i], ret);
 			return ret;
 		}
-		dev_info(dev, "ES705 DHWPT cmd 0x%08x -> resp 0x%08x\n",
-			 m86_es705_dhwpt_cmds[i], resp);
+		dev_dbg(dev, "ES705 DHWPT cmd 0x%08x -> resp 0x%08x\n",
+			m86_es705_dhwpt_cmds[i], resp);
 		usleep_range(2000, 5000);
 	}
 	dev_info(dev, "ES705 DHWPT active (Port D <-> Port A pass-through)\n");
 	return 0;
 }
 
-static int m86_es705_boot_and_dhwpt(struct m86_machine_priv *priv, struct device *dev)
+static int m86_es705_sbl_handshake(struct m86_machine_priv *priv,
+				   struct device *dev)
 {
-	struct spi_device *spi = priv->spi_dsp;
-	const struct firmware *fw = NULL;
-	const u8 *fw_data;
-	size_t fw_size, offset, chunk;
 	__be32 sync_cmd = cpu_to_be32(ES_SPI_SBL_SYNC_CMD);
 	__be32 sync_ack = 0;
 	__be16 sbl_sync_cmd = cpu_to_be16(ES_SPI_SYNC_CMD);
 	__be16 sbl_sync_ack = 0;
 	__be16 boot_cmd = cpu_to_be16(ES_SPI_BOOT_CMD);
 	__be16 boot_ack = 0;
-	u32 resp = 0;
 	int ret, retry, i;
 
-	if (!spi)
-		return -ENODEV;
-
-	if (priv->es705_booted) {
-		/* Already booted, ensure DHWPT is active */
-		ret = m86_es705_enable_dhwpt_sequence(spi, dev);
-		if (ret == 0)
-			return 0;
-		dev_warn(dev, "ES705 DHWPT re-check failed (%d), re-running full boot\n", ret);
-		priv->es705_booted = false;
+	/* SBL sync: write 0x80000000, expect 0x8000FFFF */
+	for (retry = 0; retry < 10; retry++) {
+		sync_ack = 0;
+		ret = m86_es705_write(priv, &sync_cmd, sizeof(sync_cmd));
+		if (ret == 0) {
+			for (i = 0; i < 5; i++) {
+				ret = m86_es705_read(priv, &sync_ack, sizeof(sync_ack));
+				if (ret == 0 && be32_to_cpu(sync_ack) == ES_SPI_SBL_SYNC_ACK)
+					break;
+				msleep(10);
+			}
+			if (be32_to_cpu(sync_ack) == ES_SPI_SBL_SYNC_ACK)
+				break;
+		}
+		dev_dbg(dev, "ES705 SBL sync retry %d: read 0x%08x\n",
+			retry, be32_to_cpu(sync_ack));
+		msleep(10);
+	}
+	if (be32_to_cpu(sync_ack) != ES_SPI_SBL_SYNC_ACK) {
+		dev_err(dev, "ES705 SBL sync failed: got 0x%08x, expected 0x%08x\n",
+			be32_to_cpu(sync_ack), ES_SPI_SBL_SYNC_ACK);
+		return -EIO;
 	}
 
-	/* Setup SPI device: Mode 1 (CPOL=0, CPHA=1), 4MHz, 8-bit */
+	/* SBL prepare: write 0x0000, wait 4 ms, expect 0x0000 */
+	ret = m86_es705_write(priv, &sbl_sync_cmd, sizeof(sbl_sync_cmd));
+	if (ret < 0)
+		return ret;
+	msleep(4);
+	ret = m86_es705_read(priv, &sbl_sync_ack, sizeof(sbl_sync_ack));
+	if (ret < 0 || be16_to_cpu(sbl_sync_ack) != ES_SPI_SYNC_ACK) {
+		dev_err(dev, "ES705 SBL prepare ack mismatch: 0x%04x (ret %d)\n",
+			be16_to_cpu(sbl_sync_ack), ret);
+		return -EIO;
+	}
+
+	/* SBL boot: write 0x0001, wait 1 ms, expect 0x0001 */
+	for (retry = 0; retry < 5; retry++) {
+		ret = m86_es705_write(priv, &boot_cmd, sizeof(boot_cmd));
+		if (ret == 0) {
+			usleep_range(1000, 1500);
+			ret = m86_es705_read(priv, &boot_ack, sizeof(boot_ack));
+			if (ret == 0 && be16_to_cpu(boot_ack) == ES_SPI_BOOT_ACK)
+				return 0;
+		}
+		usleep_range(1000, 1500);
+	}
+	dev_err(dev, "ES705 SBL boot ack mismatch: 0x%04x\n", be16_to_cpu(boot_ack));
+	return -EIO;
+}
+
+static int m86_es705_boot_and_dhwpt(struct m86_machine_priv *priv,
+				    struct device *dev)
+{
+	struct spi_device *spi = priv->spi_dsp;
+	const struct firmware *fw;
+	size_t offset, chunk;
+	u32 resp = 0;
+	int ret, retry;
+
+	lockdep_assert_held(&priv->es705_lock);
+
+	/* Fetch firmware before touching the DSP so a missing file is cheap. */
+	ret = request_firmware(&fw, ES705_FW_NAME, dev);
+	if (ret) {
+		dev_err(dev, "ES705 firmware /lib/firmware/%s unavailable: %d\n",
+			ES705_FW_NAME, ret);
+		return ret;
+	}
+
+	/* SPI mode 1 (CPOL=0, CPHA=1), 4 MHz, 8-bit; matches the DT node */
 	spi->mode = SPI_MODE_1;
 	spi->max_speed_hz = 4000000;
 	spi->bits_per_word = 8;
 	ret = spi_setup(spi);
 	if (ret < 0) {
 		dev_err(dev, "Failed to setup SPI for ES705: %d\n", ret);
-		return ret;
+		goto out;
 	}
 
-	/* Execute hardware reset & power sequence to place ES705 in SBL mode */
 	m86_es705_init_hw(dev, priv);
 
-	/* 1. SBL Sync: write 0x80000000, wait for 0x8000FFFF */
-	retry = 10;
-	while (retry-- > 0) {
-		sync_ack = 0;
-		ret = spi_write(spi, &sync_cmd, sizeof(sync_cmd));
+	ret = m86_es705_sbl_handshake(priv, dev);
+	if (ret)
+		goto out;
+
+	for (offset = 0; offset < fw->size; offset += chunk) {
+		chunk = min_t(size_t, fw->size - offset, ES705_SPI_PACKET);
+		ret = m86_es705_write(priv, fw->data + offset, chunk);
 		if (ret < 0) {
-			msleep(10);
-			continue;
-		}
-		for (i = 0; i < 5; i++) {
-			sync_ack = 0;
-			ret = spi_read(spi, &sync_ack, sizeof(sync_ack));
-			if (ret == 0 && be32_to_cpu(sync_ack) == ES_SPI_SBL_SYNC_ACK)
-				break;
-			msleep(10);
-		}
-		if (be32_to_cpu(sync_ack) == ES_SPI_SBL_SYNC_ACK)
-			break;
-		dev_warn(dev, "ES705 SBL sync retry %d: read 0x%08x\n",
-			 10 - retry, be32_to_cpu(sync_ack));
-		msleep(10);
-	}
-
-	if (be32_to_cpu(sync_ack) != ES_SPI_SBL_SYNC_ACK) {
-		/* Check if firmware is already loaded */
-		ret = m86_es705_enable_dhwpt_sequence(spi, dev);
-		if (ret == 0) {
-			dev_info(dev, "ES705 DHWPT activated after reset\n");
-			priv->es705_booted = true;
-			return 0;
-		}
-		dev_err(dev, "ES705 SBL sync pattern mismatch: got 0x%08x, expected 0x%08x\n",
-			be32_to_cpu(sync_ack), ES_SPI_SBL_SYNC_ACK);
-		return -EIO;
-	}
-	dev_info(dev, "ES705 SBL sync acknowledged\n");
-
-	/* 2. SBL prepare cmd: write 0x0000, wait 4ms, read 0x0000 */
-	ret = spi_write(spi, &sbl_sync_cmd, sizeof(sbl_sync_cmd));
-	if (ret < 0) {
-		dev_err(dev, "Failed to send SBL prepare cmd: %d\n", ret);
-		return ret;
-	}
-	msleep(4);
-	ret = spi_read(spi, &sbl_sync_ack, sizeof(sbl_sync_ack));
-	if (ret < 0 || be16_to_cpu(sbl_sync_ack) != ES_SPI_SYNC_ACK) {
-		dev_err(dev, "ES705 SBL prepare ack mismatch: got 0x%04x (ret %d)\n",
-			be16_to_cpu(sbl_sync_ack), ret);
-		return -EIO;
-	}
-
-	/* 3. SBL boot cmd: write 0x0001, wait 1ms, read 0x0001 */
-	retry = 5;
-	while (retry-- > 0) {
-		ret = spi_write(spi, &boot_cmd, sizeof(boot_cmd));
-		if (ret < 0)
-			continue;
-		usleep_range(1000, 1500);
-		ret = spi_read(spi, &boot_ack, sizeof(boot_ack));
-		if (ret == 0 && be16_to_cpu(boot_ack) == ES_SPI_BOOT_ACK)
-			break;
-	}
-	if (be16_to_cpu(boot_ack) != ES_SPI_BOOT_ACK) {
-		dev_err(dev, "ES705 SBL boot ack mismatch: got 0x%04x\n",
-			be16_to_cpu(boot_ack));
-		return -EIO;
-	}
-	dev_info(dev, "ES705 SBL ready for firmware download\n");
-
-	/* 4. Obtain firmware: check request_firmware_direct, fallback to built-in */
-	ret = request_firmware_direct(&fw, "audience-es705-fw.bin", dev);
-	if (ret == 0 && fw && fw->size > 0) {
-		fw_data = fw->data;
-		fw_size = fw->size;
-		dev_info(dev, "Using filesystem firmware (%zu bytes)\n", fw_size);
-	} else {
-		fw_data = m86_es705_fw_blob;
-		fw_size = sizeof(m86_es705_fw_blob);
-		dev_info(dev, "Using built-in firmware blob (%zu bytes)\n", fw_size);
-	}
-
-	/* 5. Stream firmware over SPI in 64-byte packets per ESCORE_SPI_PACKET_LEN */
-	for (offset = 0; offset < fw_size; offset += chunk) {
-		chunk = min_t(size_t, fw_size - offset, 64);
-		ret = spi_write(spi, fw_data + offset, chunk);
-		if (ret < 0) {
-			dev_err(dev, "Failed to stream ES705 firmware chunk at %zu: %d\n", offset, ret);
-			if (fw)
-				release_firmware(fw);
-			return ret;
+			dev_err(dev, "ES705 firmware write failed at %zu: %d\n",
+				offset, ret);
+			goto out;
 		}
 	}
-	if (fw)
-		release_firmware(fw);
-	dev_info(dev, "ES705 firmware streamed successfully\n");
 
-	/* 6. Wait for firmware to boot and sync */
+	/* Wait for firmware to boot and sync */
 	msleep(50);
-	retry = 50;
-	while (retry-- > 0) {
-		ret = m86_es705_spi_cmd(spi, ES_SPI_SBL_SYNC_CMD, &resp);
+	for (retry = 0; retry < 50; retry++) {
+		ret = m86_es705_spi_cmd(priv, ES_SPI_SBL_SYNC_CMD, &resp);
 		if (ret == 0 && resp == ES_SYNC_ACK)
 			break;
 		msleep(10);
 	}
 	if (resp != ES_SYNC_ACK) {
 		dev_err(dev, "ES705 post-boot sync failed: resp=0x%08x\n", resp);
-		return -EIO;
-	}
-	dev_info(dev, "ES705 firmware booted and synced successfully\n");
-
-	/* 7. Put ES705 into Direct Hardware Pass-Through (DHWPT) mode */
-	ret = m86_es705_enable_dhwpt_sequence(spi, dev);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set ES705 DHWPT: %d\n", ret);
-		return ret;
+		ret = -EIO;
+		goto out;
 	}
 
-	priv->es705_booted = true;
-	return 0;
+	ret = m86_es705_enable_dhwpt_sequence(priv, dev);
+	if (ret == 0) {
+		priv->es705_booted = true;
+		dev_info(dev, "ES705 booted with %zu-byte firmware\n", fw->size);
+	}
+out:
+	release_firmware(fw);
+	return ret;
+}
+
+/* Boot the ES705 once; later calls are no-ops until es705_booted is cleared. */
+static int m86_es705_ensure(struct m86_machine_priv *priv, struct device *dev)
+{
+	int ret = 0;
+
+	if (!priv->spi_dsp)
+		return 0;
+
+	mutex_lock(&priv->es705_lock);
+	if (!priv->es705_booted)
+		ret = m86_es705_boot_and_dhwpt(priv, dev);
+	mutex_unlock(&priv->es705_lock);
+
+	return ret;
 }
 
 static int m86_start_sysclk(struct snd_soc_card *card)
@@ -425,35 +446,36 @@ static int m86_start_sysclk(struct snd_soc_card *card)
 	m86_enable_mclk(priv, true);
 	m86_enable_32khz(priv, true);
 
-	/* Disable FLL1 REFCLK synchroniser per vendor driver */
-	ret = snd_soc_component_set_pll(component, WM8998_FLL1_REFCLK,
-					ARIZONA_FLL_SRC_NONE,
-					0, 0);
-	if (ret < 0) {
-		dev_err(component->dev, "Failed to stop FLL1 REF: %d\n", ret);
-		return ret;
+	/* Reprogramming FLL1 unchanged would glitch a running stream. */
+	if (priv->fll_rate != priv->sysclk_rate) {
+		/* Disable FLL1 REFCLK synchroniser per vendor driver */
+		ret = snd_soc_component_set_pll(component, WM8998_FLL1_REFCLK,
+						ARIZONA_FLL_SRC_NONE, 0, 0);
+		if (ret < 0) {
+			dev_err(component->dev, "Failed to stop FLL1 REF: %d\n", ret);
+			return ret;
+		}
+
+		/* FLL1: MCLK1 24 MHz -> 24.576 MHz (48k) or 22.5792 MHz (44.1k) */
+		ret = snd_soc_component_set_pll(component, WM8998_FLL1,
+						ARIZONA_FLL_SRC_MCLK1,
+						MCLK_RATE, priv->sysclk_rate);
+		if (ret < 0) {
+			dev_err(component->dev, "Failed to start FLL1: %d\n", ret);
+			return ret;
+		}
+
+		ret = snd_soc_component_set_sysclk(component, ARIZONA_CLK_SYSCLK,
+						   ARIZONA_CLK_SRC_FLL1,
+						   priv->sysclk_rate,
+						   SND_SOC_CLOCK_IN);
+		if (ret < 0) {
+			dev_err(component->dev, "Failed to set SYSCLK source: %d\n", ret);
+			return ret;
+		}
+		priv->fll_rate = priv->sysclk_rate;
 	}
 
-	/* FLL1 locks MCLK1 (24MHz) to 24.576MHz (48k) or 22.5792MHz (44.1k) */
-	ret = snd_soc_component_set_pll(component, WM8998_FLL1,
-					ARIZONA_FLL_SRC_MCLK1,
-					MCLK_RATE,
-					priv->sysclk_rate);
-	if (ret < 0) {
-		dev_err(component->dev, "Failed to start FLL1: %d\n", ret);
-		return ret;
-	}
-
-	ret = snd_soc_component_set_sysclk(component, ARIZONA_CLK_SYSCLK,
-					   ARIZONA_CLK_SRC_FLL1,
-					   priv->sysclk_rate,
-					   SND_SOC_CLOCK_IN);
-	if (ret < 0) {
-		dev_err(component->dev, "Failed to set SYSCLK source: %d\n", ret);
-		return ret;
-	}
-
-	/* Explicitly enable SYSCLK in ARIZONA_SYSTEM_CLOCK_1 */
 	regmap_update_bits(component->regmap, ARIZONA_SYSTEM_CLOCK_1,
 			   ARIZONA_SYSCLK_ENA, ARIZONA_SYSCLK_ENA);
 
@@ -464,22 +486,6 @@ static int m86_start_sysclk(struct snd_soc_card *card)
 			   ARIZONA_AIF1TX_LRCLK_FRC, ARIZONA_AIF1TX_LRCLK_FRC);
 	regmap_update_bits(component->regmap, ARIZONA_AIF1_RX_PIN_CTRL,
 			   ARIZONA_AIF1RX_LRCLK_FRC, ARIZONA_AIF1RX_LRCLK_FRC);
-
-	/* Ensure Audience ES705 DSP was initialized at probe */
-	if (priv->spi_dsp && !priv->es705_booted) {
-		ret = m86_es705_boot_and_dhwpt(priv, card->dev);
-		if (ret < 0) {
-			dev_err(card->dev, "Failed to activate ES705 DHWPT: %d\n", ret);
-			return ret;
-		}
-	}
-
-	pr_info("m86-audio: start_sysclk FLL1=%d rate=%u wm8998: 0x101=0x%04x 0x171=0x%04x 0x500=0x%04x 0x501=0x%04x\n",
-		ret, priv->sysclk_rate,
-		snd_soc_component_read(component, ARIZONA_SYSTEM_CLOCK_1),
-		snd_soc_component_read(component, ARIZONA_FLL1_CONTROL_1),
-		snd_soc_component_read(component, ARIZONA_AIF1_BCLK_CTRL),
-		snd_soc_component_read(component, ARIZONA_AIF1_TX_PIN_CTRL));
 
 	return 0;
 }
@@ -492,8 +498,6 @@ static int m86_stop_sysclk(struct snd_soc_card *card)
 
 	if (!component)
 		return 0;
-
-	pr_info("m86-audio: stop_sysclk\n");
 
 	regmap_update_bits(component->regmap, ARIZONA_AIF1_BCLK_CTRL,
 			   ARIZONA_AIF1_BCLK_FRC, 0);
@@ -513,6 +517,7 @@ static int m86_stop_sysclk(struct snd_soc_card *card)
 	if (ret < 0)
 		dev_err(component->dev, "Failed to stop FLL1: %d\n", ret);
 
+	priv->fll_rate = 0;
 	return 0;
 }
 
@@ -592,7 +597,12 @@ static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 	if (ret < 0)
 		dev_warn(codec_dai->dev, "Failed to set codec DAI SYSCLK: %d\n", ret);
 
-	return m86_start_sysclk(rtd->card);
+	ret = m86_start_sysclk(rtd->card);
+	if (ret)
+		return ret;
+
+	/* Without DHWPT the ES705 does not forward Port D to the codec. */
+	return m86_es705_ensure(priv, rtd->card->dev);
 }
 
 static const struct snd_soc_ops m86_aif1_ops = {
@@ -641,6 +651,8 @@ static struct snd_soc_dai_link m86_dai_links[] = {
 		.ops		= &m86_aif1_ops,
 		.dai_fmt	= SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
 				  SND_SOC_DAIFMT_CBM_CFM,
+		/* TXR=2 (I2S1) and one FLL1 serve both directions */
+		.symmetric_rate	= 1,
 		SND_SOC_DAILINK_REG(aif1),
 	},
 };
@@ -702,48 +714,94 @@ static int m86_late_probe(struct snd_soc_card *card)
 	return 0;
 }
 
+static void m86_put_device(void *data)
+{
+	put_device(data);
+}
+
+static int m86_get_dsp(struct device *dev, struct m86_machine_priv *priv)
+{
+	struct device_node *dsp_np;
+	struct device *dsp_dev;
+	int ret;
+
+	dsp_np = of_parse_phandle(dev->of_node, "samsung,dsp", 0);
+	if (!dsp_np)
+		return 0;
+
+	dsp_dev = bus_find_device_by_of_node(&spi_bus_type, dsp_np);
+	of_node_put(dsp_np);
+	if (!dsp_dev)
+		return -EPROBE_DEFER;
+
+	ret = devm_add_action_or_reset(dev, m86_put_device, dsp_dev);
+	if (ret)
+		return ret;
+
+	priv->spi_buf = devm_kzalloc(dev, ES705_SPI_PACKET, GFP_KERNEL);
+	if (!priv->spi_buf)
+		return -ENOMEM;
+
+	priv->spi_dsp = to_spi_device(dsp_dev);
+	return 0;
+}
+
+static void __iomem *m86_map_rtc(struct device *dev)
+{
+	struct device_node *np;
+	struct resource res;
+	void __iomem *base = NULL;
+
+	np = of_parse_phandle(dev->of_node, "samsung,rtc", 0);
+	if (!np)
+		return NULL;
+	/* rtc-s3c owns the region; map only, do not request it. */
+	if (!of_address_to_resource(np, 0, &res))
+		base = devm_ioremap(dev, res.start, resource_size(&res));
+	of_node_put(np);
+	return base;
+}
+
 static int m86_audio_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct snd_soc_card *card = &m86_card;
 	struct m86_machine_priv *priv;
-	struct device_node *cpu_np, *codec_np, *amp_np, *dsp_np;
+	struct device_node *cpu_np, *codec_np, *amp_np;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
+	mutex_init(&priv->es705_lock);
+
 	snd_soc_card_set_drvdata(card, priv);
 	card->dev = dev;
 	card->late_probe = m86_late_probe;
+
+	ret = m86_get_dsp(dev, priv);
+	if (ret)
+		return dev_err_probe(dev, ret, "Audience ES705 SPI device unavailable\n");
 
 	priv->pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pmu");
 	if (IS_ERR(priv->pmu)) {
 		dev_warn(dev, "Failed to get samsung,pmu: %ld\n", PTR_ERR(priv->pmu));
 		priv->pmu = NULL;
-	} else {
-		dev_info(dev, "PMU regmap acquired\n");
 	}
 
 	priv->mclk = devm_clk_get_optional(dev, "mclk");
 	if (IS_ERR(priv->mclk))
 		priv->mclk = NULL;
 
-	priv->rtc_base = devm_ioremap(dev, 0x10590000, 0x100);
-	if (IS_ERR(priv->rtc_base)) {
-		dev_warn(dev, "Failed to ioremap RTC base: %ld\n", PTR_ERR(priv->rtc_base));
-		priv->rtc_base = NULL;
-	} else {
-		dev_info(dev, "RTC base ioremapped\n");
-	}
+	priv->rtc_base = m86_map_rtc(dev);
+	if (!priv->rtc_base)
+		dev_warn(dev, "RTC not mapped; 32 kHz clkout left unchanged\n");
 
 	priv->dsp_core = devm_regulator_get_optional(dev, "dsp-core");
 	if (IS_ERR(priv->dsp_core)) {
 		dev_warn(dev, "Failed to get dsp-core supply: %ld\n", PTR_ERR(priv->dsp_core));
 		priv->dsp_core = NULL;
-	} else {
-		dev_info(dev, "dsp-core regulator acquired\n");
 	}
 
 	/* Hardware reset pulse for TFA9890 amplifier */
@@ -794,23 +852,6 @@ static int m86_audio_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	/* Look for Audience ES705 DSP on SPI bus */
-	dsp_np = of_parse_phandle(dev->of_node, "samsung,dsp", 0);
-	if (dsp_np) {
-		struct device *dsp_dev = bus_find_device_by_of_node(&spi_bus_type, dsp_np);
-		of_node_put(dsp_np);
-		if (!dsp_dev) {
-			dev_info(dev, "Audience ES705 SPI device not yet available, deferring probe\n");
-			of_node_put(cpu_np);
-			of_node_put(codec_np);
-			return -EPROBE_DEFER;
-		}
-		priv->spi_dsp = to_spi_device(dsp_dev);
-		ret = m86_es705_boot_and_dhwpt(priv, dev);
-		if (ret < 0)
-			dev_warn(dev, "Initial ES705 firmware boot failed (%d), will retry on stream start\n", ret);
-	}
-
 	card->dai_link[0].cpus->of_node = cpu_np;
 	card->dai_link[0].platforms->of_node = cpu_np;
 	card->dai_link[0].codecs->of_node = codec_np;
@@ -833,36 +874,27 @@ static int m86_audio_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int m86_audio_remove(struct platform_device *pdev)
-{
-	struct snd_soc_card *card = platform_get_drvdata(pdev);
-	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(card);
-
-	if (priv && priv->spi_dsp)
-		put_device(&priv->spi_dsp->dev);
-
-	return 0;
-}
-
 static int m86_pm_prepare(struct device *dev)
 {
 	struct snd_soc_card *card = dev_get_drvdata(dev);
+	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(card);
+
+	/* LDO22 may drop in suspend: re-download ES705 firmware on next use. */
+	mutex_lock(&priv->es705_lock);
+	priv->es705_booted = false;
+	mutex_unlock(&priv->es705_lock);
 
 	return m86_stop_sysclk(card);
 }
 
-static void m86_pm_complete(struct device *dev)
-{
-	struct snd_soc_card *card = dev_get_drvdata(dev);
-
-	m86_start_sysclk(card);
-}
-
+/*
+ * No .complete: after resume the next STANDBY transition or hw_params calls
+ * m86_start_sysclk(), so an idle card keeps FLL1 and BCLK forcing off.
+ */
 static const struct dev_pm_ops m86_pm_ops = {
 	.prepare	= m86_pm_prepare,
 	.suspend	= snd_soc_suspend,
 	.resume		= snd_soc_resume,
-	.complete	= m86_pm_complete,
 	.freeze		= snd_soc_suspend,
 	.thaw		= snd_soc_resume,
 	.poweroff	= snd_soc_poweroff,
@@ -882,10 +914,10 @@ static struct platform_driver m86_audio_driver = {
 		.of_match_table	= m86_audio_of_match,
 	},
 	.probe	= m86_audio_probe,
-	.remove	= m86_audio_remove,
 };
 module_platform_driver(m86_audio_driver);
 
 MODULE_AUTHOR("Pair Programmer <kophapro@gmail.com>");
 MODULE_DESCRIPTION("ALSA SoC Meizu PRO 5 Audio Support");
 MODULE_LICENSE("GPL");
+MODULE_FIRMWARE(ES705_FW_NAME);
