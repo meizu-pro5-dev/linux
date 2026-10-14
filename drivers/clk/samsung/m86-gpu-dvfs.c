@@ -494,279 +494,302 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  for(i=0;i<ARRAY_SIZE(rates);i++)if(rates[i].hz==*freq)r=&rates[i];
  if(!r || r->hz>d->cap){ret=-ERANGE;goto put;}
  if(!d->active_voltage && !d->normal_on_voltage && *freq==266000000) {*freq=266000000;ret=0;goto put;}
- stage="thermal";
- ret=d->zone ? thermal_zone_get_temp(d->zone,&temp) : -EOPNOTSUPP;
- if(ret || temp < -20000) {ret=ret ?: -ERANGE;goto fault;}
- /* 50ms Panfrost governor invokes target even for unchanged frequency.
-  * Fresh TMU measurement precedes the same-rate fast path. Valid high
-  * temperature caps normally, including >=90C; the thermal zone retains
-  * its independent 95C critical shutdown. Sensor/state errors stay fatal. */
- if(temp>=75000 && r->hz>266000000) {r=&rates[0];*freq=r->hz;}
- stage="old-rate";
- old=clk_get_rate(d->clock);
- if(!old){ret=-EIO;goto fault;}
- stage="MIF-floor";
- ret=bus_floor(d,r->mif);if(ret)goto fault;
- {
-  struct pro5_int_always_on_rates int_rates;
-  stage="INT-read";
-  ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);if(ret)goto fault;
-  stage="INT-floor";
-  ret=pro5_topc_int_always_on_floor(&int_rates,r->int_qos);
-  if(ret) {
-   dev_err(d->dev,"GPU INT floor failure logical_request=%u leaf_Hz bus0/bus1/bus1_low/pclk/imem/imem_low=%llu/%llu/%llu/%llu/%llu/%llu ret=%d\n",
-           r->int_qos,int_rates.bus0,int_rates.bus1,int_rates.bus1_low,
-           int_rates.pclk,int_rates.imem,int_rates.imem_low,ret);
-   goto fault;
+  stage="old-rate";
+  old=clk_get_rate(d->clock);
+  if(!old){ret=-EIO;goto fault;}
+  /* When already at minimum 266MHz and requesting 266MHz, thermal capping
+   * (>75C -> 266MHz) is a no-op and the 500ms thermal zone poll handles
+   * critical trips; skip redundant 20Hz TMU & GPIO-I2C reads. */
+  if(old==266000000 && r->hz==266000000){ret=0;goto finish;}
+  stage="thermal";
+  ret=d->zone ? thermal_zone_get_temp(d->zone,&temp) : -EOPNOTSUPP;
+  if(ret || temp < -20000) {ret=ret ?: -ERANGE;goto fault;}
+  /* 50ms Panfrost governor invokes target even for unchanged frequency.
+   * Fresh TMU measurement precedes the same-rate fast path when >266MHz.
+   * Valid high temperature caps normally, including >=90C; the thermal zone
+   * retains its independent 95C critical shutdown. */
+  if(temp>=75000 && r->hz>266000000) {r=&rates[0];*freq=r->hz;}
+  if(old==r->hz){ret=0;goto finish;} /* Fast-path unchanged rate without GPIO-I2C storm. */
+  stage="MIF-floor";
+  ret=bus_floor(d,r->mif);if(ret)goto fault;
+  {
+   struct pro5_int_always_on_rates int_rates;
+   stage="INT-read";
+   ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);if(ret)goto fault;
+   stage="INT-floor";
+   ret=pro5_topc_int_always_on_floor(&int_rates,r->int_qos);
+   if(ret) {
+    dev_err(d->dev,"GPU INT floor failure logical_request=%u leaf_Hz bus0/bus1/bus1_low/pclk/imem/imem_low=%llu/%llu/%llu/%llu/%llu/%llu ret=%d\n",
+            r->int_qos,int_rates.bus0,int_rates.bus1,int_rates.bus1_low,
+            int_rates.pclk,int_rates.imem,int_rates.imem_low,ret);
+    goto fault;
+   }
   }
- }
- if(d->normal_on_voltage) {
-  stage="normal-pair-before";
-  ret=check_normal_on_state(d,old);if(ret)goto fault;
- }
- if(old==r->hz){ret=0;goto finish;} /* Preserve proven inherited266/raw39. */
- stage="MCS-before";
- ret=regmap_read(d->sysreg,0x1224,&mcs);if(ret)goto fault;
- if(mcs!=0x31){ret=-EOPNOTSUPP;goto fault;}
- stage="rail-before";
- device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
- if(ret)goto fault;
- if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
- dev_info(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
- if(r->hz>old) {
-  if(d->bus_qos_active && r->mif > d->cur_mif_qos) {
-   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
-   d->cur_mif_qos = r->mif;
+  if(d->normal_on_voltage) {
+   stage="normal-pair-before";
+   ret=check_normal_on_state(d,old);if(ret)goto fault;
   }
-  stage="up-voltage";
-  ret=set_voltage(d,r->uv);if(ret)goto fault;
-  if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
-  stage="up-clock";
-  ret=set_clock(d,r->hz);if(ret)goto fault;
- } else {
-  stage="down-clock";
-  ret=set_clock(d,r->hz);if(ret)goto fault;
-  if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
-  stage="down-voltage";
-  ret=set_voltage(d,r->uv);if(ret)goto fault;
-  if(d->bus_qos_active && r->mif < d->cur_mif_qos) {
-   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
-   d->cur_mif_qos = r->mif;
-  }
- }
- if(d->normal_on_voltage) {
-  stage="normal-pair-after";
-  ret=check_normal_on_state(d,r->hz);if(ret)goto fault;
- }
- dev_info(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),r->uv);
-finish:
- ret=0;goto put;
-fault:
- dev_err(d->dev,"GPU first guard failure stage=%s ret=%d requested=%lu target=%lu old=%lu temp=%d selector=%#x MCS=%#x (old0/tempINT_MIN/0xffffffff=unsampled, before throttle)\n",
-         stage,ret,requested,r ? r->hz : 0,old,temp,selector,mcs);
- if(!d->failed && clk_get_rate(d->clock)>266000000)
-  if(set_clock(d,266000000))dev_err(d->dev,"emergency GPU clock throttle failed\n");
- /* Throughput vote has no electrical safety role, including after failure. */
- mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
- dev_err(d->dev,"GPU transaction failed%d; no voltage rollback; all switching frozen\n",ret);
-put:
- mutex_unlock(&d->transaction);
- pm_runtime_mark_last_busy(gpu);pm_runtime_put_autosuspend(gpu);
-unlock:
- mutex_unlock(&instance_lock);return ret;
-}
-EXPORT_SYMBOL_GPL(m86_gpu_devfreq_target);
-static int m86_gpu_cold_power_on(struct gpu_dvfs *d)
-{
- struct regmap *map;
- u32 val, sel;
- int ret, timeout;
-
- if(!d->pmic)return -ENODEV;
- map=dev_get_regmap(d->pmic,NULL);
- if(!map)return -EPROBE_DEFER;
-
- /* 1. PMIC S2MPS15 BUCK6: selector 0x39, ramp 0x20, LDO10 ON, BUCK6 Normal-ON, sync bit6 clear */
- ret=regmap_write(map,0x24,0x39);if(ret)return ret;
- ret=regmap_write(map,0x57,0x20);if(ret)return ret;
- ret=regmap_update_bits(map,0x3d,0xc0,0xc0);if(ret)return ret;
- usleep_range(200,300);
- ret=regmap_update_bits(map,0x23,0xfe,0xf8);if(ret)return ret;
- usleep_range(200,300);
- ret=regmap_update_bits(map,0x52,0x40,0);if(ret)return ret;
- usleep_range(200,300);
-
- /* 2. PMU G3D Power Domain */
- ret=regmap_write(d->pmu,0x4100,0x0f);if(ret)return ret;
- timeout=1000;
- while(timeout--) {
-  ret=regmap_read(d->pmu,0x4104,&val);
-  if(!ret && (val&0x0f)==0x0f)break;
-  usleep_range(10,20);
- }
- if(timeout<0)return -ETIMEDOUT;
-
- /* 3. CMU_G3D PLL & Clock Setup (266MHz) */
- sel=readl(d->cmu+0x200);
- sel|=BIT(0)|BIT(8);
- writel(sel,d->cmu+0x200);
- ret=readl_poll_timeout(d->cmu+0x400,val,!(val&BIT(10)),1,10000);
- if(ret)return ret;
-
- writel(6*150,d->cmu+0x000);
- val=BIT(31)|(133<<16)|(6<<8)|1;
- writel(val,d->cmu+0x100);
- usleep_range(48,60);
- ret=readl_poll_timeout(d->cmu+0x100,val,
-  (val&BIT(29)) && ((val&PMS_MASK)==(BIT(31)|(133<<16)|(6<<8)|1)),1,10000);
- if(ret)return ret;
-
- sel=readl(d->cmu+0x200);
- sel&=~BIT(8);
- writel(sel,d->cmu+0x200);
- ret=readl_poll_timeout(d->cmu+0x400,val,!(val&BIT(10)),1,10000);
- if(ret)return ret;
-
- val=readl(d->cmu+0x800);
- writel(val|1,d->cmu+0x800);
-
- /* 4. SYSREG MCS 0x31 */
- ret=regmap_write(d->sysreg,0x1224,0x31);
- if(ret)return ret;
-
- return 0;
-}
-static void put_zone(void *data){put_device(&((struct thermal_zone_device *)data)->device);}
-static void put_pmic(void *data){put_device(data);}
-static void put_node(void *data){of_node_put(data);}
-static void put_clock(void *data){clk_put(data);}
-static void put_exclusive(void *data){clk_rate_exclusive_put(data);}
-#if IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT)
-/* Explicit experimental board lifecycle: provider and coordinator are built-in,
- * bind attributes suppressed, and no other enabled CMU_G3D consumer exists.
- * Provider lock -> instance -> transaction -> short hardware. No CCF/thermal
- * call while hardware is held; TOP CCF also stays outside the TMU wrapper. */
-static bool glue_domain_on(void *data) { return domain_on(data); }
-static int glue_rail(void *data,u32 expected)
-{
- struct gpu_dvfs *d=data;
- u32 selector,ramp;
- int ret;
- device_lock(d->pmic);
- ret=check_rail(d,&selector,&ramp);
- device_unlock(d->pmic);
- return ret ?: (selector==expected ? 0 : -EOPNOTSUPP);
-}
-static struct m86_g3d_cmu_access glue_access(struct gpu_dvfs *d)
-{
- return (struct m86_g3d_cmu_access){ .cmu=d->cmu,.sysreg=d->sysreg,
-  .transaction=&d->transaction,.hardware=&d->hardware,.data=d,
-  .cap=d->cap,.domain_on=glue_domain_on,.validate_rail=glue_rail };
-}
-static void glue_unlock(struct gpu_dvfs *d)
-{
- mutex_unlock(&d->transaction);
- mutex_unlock(&instance_lock);
-}
-static int glue_prepare(void *data,bool on)
-{
- struct gpu_dvfs *d=data;
- struct m86_g3d_cmu_access access=glue_access(d);
- unsigned long hz;
- u32 selector,ramp;
- int ret=0;
- mutex_lock(&instance_lock);
- mutex_lock(&d->transaction);
- if(instance!=d || d->failed) { ret=-EIO;goto fail; }
- if(on) {
-  if(!d->saved.valid) { ret=-EINVAL;goto fail; }
-  ret=glue_rail(d,d->saved.selector);
- } else {
-  hz=clk_get_rate(d->clock);
-  ret=check_normal_on_state(d,hz);
-  if(ret)goto fail;
+  stage="MCS-before";
+  ret=regmap_read(d->sysreg,0x1224,&mcs);if(ret)goto fault;
+  if(mcs!=0x31){ret=-EOPNOTSUPP;goto fault;}
+  stage="rail-before";
   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
-  if(ret)goto fail;
-  mutex_lock(&d->hardware);
-  ret=m86_g3d_cmu_save(&access,&d->saved,hz,selector);
-  /* Wait out any recalc already inside hardware, then close normal MMIO
-   * access before PMU/gate writes. Restore/LPI use the explicit owner path. */
-  if(!ret)d->mmio_quiesced=true;
-  mutex_unlock(&d->hardware);
+  if(ret)goto fault;
+  if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
+  dev_info(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
+  if(r->hz>old) {
+   if(d->bus_qos_active && r->mif > d->cur_mif_qos) {
+    dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
+    d->cur_mif_qos = r->mif;
+   }
+   stage="up-voltage";
+   ret=set_voltage(d,r->uv);if(ret)goto fault;
+   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
+   stage="up-clock";
+   ret=set_clock(d,r->hz);if(ret)goto fault;
+  } else {
+   stage="down-clock";
+   ret=set_clock(d,r->hz);if(ret)goto fault;
+   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
+   stage="down-voltage";
+   ret=set_voltage(d,r->uv);if(ret)goto fault;
+   if(d->bus_qos_active && r->mif < d->cur_mif_qos) {
+    dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
+    d->cur_mif_qos = r->mif;
+   }
+  }
+  if(d->normal_on_voltage) {
+   stage="normal-pair-after";
+   ret=check_normal_on_state(d,r->hz);if(ret)goto fault;
+  }
+  dev_info(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),r->uv);
+ finish:
+  ret=0;goto put;
+ fault:
+  dev_err(d->dev,"GPU first guard failure stage=%s ret=%d requested=%lu target=%lu old=%lu temp=%d selector=%#x MCS=%#x (old0/tempINT_MIN/0xffffffff=unsampled, before throttle)\n",
+          stage,ret,requested,r ? r->hz : 0,old,temp,selector,mcs);
+  if(!d->failed && clk_get_rate(d->clock)>266000000)
+   if(set_clock(d,266000000))dev_err(d->dev,"emergency GPU clock throttle failed\n");
+  /* Throughput vote has no electrical safety role, including after failure. */
+  mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
+  dev_err(d->dev,"GPU transaction failed%d; no voltage rollback; all switching frozen\n",ret);
+ put:
+  mutex_unlock(&d->transaction);
+  pm_runtime_mark_last_busy(gpu);pm_runtime_put_autosuspend(gpu);
+ unlock:
+  mutex_unlock(&instance_lock);return ret;
  }
- if(!ret)return 0;
-fail:
- if(ret!=-EBUSY) {
-  mutex_lock(&d->hardware);
-  if(!d->domain_error)d->domain_error=ret;
-  d->failed=true;
-  mutex_unlock(&d->hardware);
+ EXPORT_SYMBOL_GPL(m86_gpu_devfreq_target);
+ static int m86_gpu_cold_power_on(struct gpu_dvfs *d)
+ {
+  struct regmap *map;
+  u32 val, sel;
+  int ret, timeout;
+ 
+  if(!d->pmic)return -ENODEV;
+  device_lock(d->pmic);
+  map=dev_get_regmap(d->pmic,NULL);
+  if(!map) { device_unlock(d->pmic); return -EPROBE_DEFER; }
+ 
+  /* 1. PMIC S2MPS15 BUCK6: selector 0x39, ramp 0x20, LDO10 ON, BUCK6 Normal-ON, sync bit6 clear */
+  ret=regmap_write(map,0x24,0x39);if(ret){device_unlock(d->pmic);return ret;}
+  ret=regmap_write(map,0x57,0x20);if(ret){device_unlock(d->pmic);return ret;}
+  ret=regmap_update_bits(map,0x3d,0xc0,0xc0);if(ret){device_unlock(d->pmic);return ret;}
+  usleep_range(200,300);
+  ret=regmap_update_bits(map,0x23,0xfe,0xf8);if(ret){device_unlock(d->pmic);return ret;}
+  usleep_range(200,300);
+  ret=regmap_update_bits(map,0x52,0x40,0);
+  device_unlock(d->pmic);
+  if(ret)return ret;
+  usleep_range(200,300);
+ 
+  /* 2. PMU G3D Power Domain */
+  ret=regmap_write(d->pmu,0x4100,0x0f);if(ret)return ret;
+  timeout=1000;
+  while(timeout--) {
+   ret=regmap_read(d->pmu,0x4104,&val);
+   if(!ret && (val&0x0f)==0x0f)break;
+   usleep_range(10,20);
+  }
+  if(timeout<0)return -ETIMEDOUT;
+ 
+  /* 3. CMU_G3D PLL & Clock Setup (266MHz) */
+  sel=readl(d->cmu+0x200);
+  sel|=BIT(0)|BIT(8);
+  writel(sel,d->cmu+0x200);
+  ret=readl_poll_timeout(d->cmu+0x400,val,!(val&BIT(10)),1,10000);
+  if(ret)return ret;
+ 
+  writel(6*150,d->cmu+0x000);
+  val=BIT(31)|(133<<16)|(6<<8)|1;
+  writel(val,d->cmu+0x100);
+  usleep_range(48,60);
+  ret=readl_poll_timeout(d->cmu+0x100,val,
+   (val&BIT(29)) && ((val&(BIT(31)|PMS_MASK))==(BIT(31)|(133<<16)|(6<<8)|1)),1,10000);
+  if(ret)return ret;
+ 
+  val=readl(d->cmu+0x600);
+  val=(val&~((3U<<8)|7U))|(1U<<8);
+  writel(val,d->cmu+0x600);
+  ret=readl_poll_timeout(d->cmu+0x700,val,!(val&(BIT(8)|BIT(4)|BIT(0))),1,10000);
+  if(ret)return ret;
+ 
+  sel=readl(d->cmu+0x200);
+  sel&=~BIT(8);
+  writel(sel,d->cmu+0x200);
+  ret=readl_poll_timeout(d->cmu+0x400,val,!(val&BIT(10)),1,10000);
+  if(ret)return ret;
+ 
+  val=readl(d->cmu+0x800);
+  writel(val|1,d->cmu+0x800);
+ 
+  /* 4. SYSREG MCS 0x31 */
+  ret=regmap_write(d->sysreg,0x1224,0x31);
+  if(ret)return ret;
+ 
+  return 0;
  }
- glue_unlock(d);
- return ret;
-}
-static void glue_cancel(void *data)
-{
- struct gpu_dvfs *d=data;
- mutex_lock(&d->hardware);d->mmio_quiesced=false;mutex_unlock(&d->hardware);
- glue_unlock(d);
-}
-static int glue_top(void *data,bool on)
-{ return m86_g3d_top_gate_set(&((struct gpu_dvfs *)data)->top_gate,on); }
-static int glue_lpi(void *data)
-{
- struct gpu_dvfs *d=data;
- bool was_enabled;
- int ret;
- mutex_lock(&d->hardware);
- ret=m86_exynos7_g3d_lpi_clock(d->pmu,&d->transaction,&d->hardware,&was_enabled);
- mutex_unlock(&d->hardware);
- return ret;
-}
-static int glue_idle(void *data)
-{ return m86_panfrost_domain_idle(((struct gpu_dvfs *)data)->gpu_device); }
-static int glue_mode(void *data)
-{
- struct gpu_dvfs *d=data;
- return d->normal_on_voltage && !d->active_voltage && !d->failed ? 0 : -EOPNOTSUPP;
-}
-static int glue_run_on(void *data,int (*transition)(void *),void *arg)
-{ return m86_tmu_gpu_transition(transition,arg); }
-static int glue_restore(void *data)
-{
- struct gpu_dvfs *d=data;
- struct m86_g3d_cmu_access access=glue_access(d);
- int ret;
- mutex_lock(&d->hardware);
- ret=m86_g3d_cmu_restore(&access,&d->saved);
- mutex_unlock(&d->hardware);
- return ret;
-}
-static void glue_finish(void *data,bool on)
-{
- struct gpu_dvfs *d=data;
- /* On has completed PMU, context and TMU restore; off stays closed. */
- if(on) {
+ static void put_zone(void *data){put_device(&((struct thermal_zone_device *)data)->device);}
+ static void put_pmic(void *data){put_device(data);}
+ static void put_node(void *data){of_node_put(data);}
+ static void put_clock(void *data){clk_put(data);}
+ static void put_exclusive(void *data){clk_rate_exclusive_put(data);}
+ static void put_bus_qos(void *data)
+ {
+  struct gpu_dvfs *d = data;
+  if (d->bus_qos_active) {
+   dev_pm_qos_remove_request(&d->bus_qos_req);
+   d->bus_qos_active = false;
+  }
+ }
+ #if IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT)
+ /* Explicit experimental board lifecycle: provider and coordinator are built-in,
+  * bind attributes suppressed, and no other enabled CMU_G3D consumer exists.
+  * Provider lock -> instance -> transaction -> short hardware. No CCF/thermal
+  * call while hardware is held; TOP CCF also stays outside the TMU wrapper. */
+ static bool glue_domain_on(void *data) { return domain_on(data); }
+ static int glue_rail(void *data,u32 expected)
+ {
+  struct gpu_dvfs *d=data;
+  u32 selector,ramp;
+  int ret;
+  device_lock(d->pmic);
+  ret=check_rail(d,&selector,&ramp);
+  device_unlock(d->pmic);
+  return ret ?: (selector==expected ? 0 : -EOPNOTSUPP);
+ }
+ static struct m86_g3d_cmu_access glue_access(struct gpu_dvfs *d)
+ {
+  return (struct m86_g3d_cmu_access){ .cmu=d->cmu,.sysreg=d->sysreg,
+   .transaction=&d->transaction,.hardware=&d->hardware,.data=d,
+   .cap=d->cap,.domain_on=glue_domain_on,.validate_rail=glue_rail };
+ }
+ static void glue_unlock(struct gpu_dvfs *d)
+ {
+  mutex_unlock(&d->transaction);
+  mutex_unlock(&instance_lock);
+ }
+ static int glue_prepare(void *data,bool on)
+ {
+  struct gpu_dvfs *d=data;
+  struct m86_g3d_cmu_access access=glue_access(d);
+  unsigned long hz;
+  u32 selector,ramp;
+  int ret=0;
+  mutex_lock(&instance_lock);
+  mutex_lock(&d->transaction);
+  if(instance!=d || d->failed) { ret=-EIO;goto fail; }
+  if(on) {
+   if(!d->saved.valid) { ret=-EINVAL;goto fail; }
+   ret=glue_rail(d,d->saved.selector);
+  } else {
+   hz=clk_get_rate(d->clock);
+   ret=check_normal_on_state(d,hz);
+   if(ret)goto fail;
+   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
+   if(ret)goto fail;
+   mutex_lock(&d->hardware);
+   ret=m86_g3d_cmu_save(&access,&d->saved,hz,selector);
+   /* Wait out any recalc already inside hardware, then close normal MMIO
+    * access before PMU/gate writes. Restore/LPI use the explicit owner path. */
+   if(!ret)d->mmio_quiesced=true;
+   mutex_unlock(&d->hardware);
+  }
+  if(!ret)return 0;
+ fail:
+  if(ret!=-EBUSY) {
+   mutex_lock(&d->hardware);
+   if(!d->domain_error)d->domain_error=ret;
+   d->failed=true;
+   mutex_unlock(&d->hardware);
+  }
+  glue_unlock(d);
+  return ret;
+ }
+ static void glue_cancel(void *data)
+ {
+  struct gpu_dvfs *d=data;
   mutex_lock(&d->hardware);d->mmio_quiesced=false;mutex_unlock(&d->hardware);
+  glue_unlock(d);
  }
- glue_unlock(d);
-}
-static void glue_abort(void *data,int error,u32 status,bool prepared)
-{
- struct gpu_dvfs *d=data;
- if(!prepared) { mutex_lock(&instance_lock);mutex_lock(&d->transaction); }
- mutex_lock(&d->hardware);
- if(!d->domain_error)d->domain_error=error;
- d->failed=true;d->mmio_quiesced=true;
- mutex_unlock(&d->hardware);
- dev_err(d->dev,"external domain quarantined: first=%d status=%#x\n",d->domain_error,status);
- glue_unlock(d);
-}
-static const struct m86_g3d_domain_ops glue_ops={
- .prepare=glue_prepare,.cancel_prepare=glue_cancel,.top_gate=glue_top,
- .local_lpi_clock=glue_lpi,.check_idle=glue_idle,.validate_mode=glue_mode,
- .run_on=glue_run_on,.restore=glue_restore,.finish=glue_finish,.abort=glue_abort,
-};
+ static int glue_top(void *data,bool on)
+ { return m86_g3d_top_gate_set(&((struct gpu_dvfs *)data)->top_gate,on); }
+ static int glue_lpi(void *data)
+ {
+  struct gpu_dvfs *d=data;
+  bool was_enabled;
+  int ret;
+  mutex_lock(&d->hardware);
+  ret=m86_exynos7_g3d_lpi_clock(d->pmu,&d->transaction,&d->hardware,&was_enabled);
+  mutex_unlock(&d->hardware);
+  return ret;
+ }
+ static int glue_idle(void *data)
+ { return m86_panfrost_domain_idle(((struct gpu_dvfs *)data)->gpu_device); }
+ static int glue_mode(void *data)
+ {
+  struct gpu_dvfs *d=data;
+  return d->normal_on_voltage && !d->active_voltage && !d->failed ? 0 : -EOPNOTSUPP;
+ }
+ static int glue_run_on(void *data,int (*transition)(void *),void *arg)
+ { return m86_tmu_gpu_transition(transition,arg); }
+ static int glue_run_off(void *data,int (*transition)(void *),void *arg)
+ { return m86_tmu_gpu_power_off(transition,arg); }
+ static int glue_restore(void *data)
+ {
+  struct gpu_dvfs *d=data;
+  struct m86_g3d_cmu_access access=glue_access(d);
+  int ret;
+  mutex_lock(&d->hardware);
+  ret=m86_g3d_cmu_restore(&access,&d->saved);
+  mutex_unlock(&d->hardware);
+  return ret;
+ }
+ static void glue_finish(void *data,bool on)
+ {
+  struct gpu_dvfs *d=data;
+  /* On has completed PMU, context and TMU restore; off stays closed. */
+  if(on) {
+   mutex_lock(&d->hardware);d->mmio_quiesced=false;mutex_unlock(&d->hardware);
+  }
+  glue_unlock(d);
+ }
+ static void glue_abort(void *data,int error,u32 status,bool prepared)
+ {
+  struct gpu_dvfs *d=data;
+  if(!prepared) { mutex_lock(&instance_lock);mutex_lock(&d->transaction); }
+  mutex_lock(&d->hardware);
+  if(!d->domain_error)d->domain_error=error;
+  d->failed=true;d->mmio_quiesced=true;
+  mutex_unlock(&d->hardware);
+  dev_err(d->dev,"external domain quarantined: first=%d status=%#x\n",d->domain_error,status);
+  glue_unlock(d);
+ }
+ static const struct m86_g3d_domain_ops glue_ops={
+  .prepare=glue_prepare,.cancel_prepare=glue_cancel,.top_gate=glue_top,
+  .local_lpi_clock=glue_lpi,.check_idle=glue_idle,.validate_mode=glue_mode,
+  .run_on=glue_run_on,.run_off=glue_run_off,.restore=glue_restore,.finish=glue_finish,.abort=glue_abort,
+ };
 static void glue_put_gpu(void *arg) { put_device(arg); }
 static void glue_unregister(void *arg) { platform_device_unregister(arg); }
 static int glue_register(struct gpu_dvfs *d)
@@ -794,6 +817,8 @@ static int glue_register(struct gpu_dvfs *d)
  d->domain_device=provider;
  return devm_add_action_or_reset(d->dev,glue_unregister,provider);
 put:
+ of_node_put(provider->dev.of_node);
+ provider->dev.of_node=NULL;
  platform_device_put(provider);
  return ret;
 }
@@ -945,7 +970,11 @@ static int gpu_probe(struct platform_device *pdev)
   if(d->bus_dev) {
    d->cur_mif_qos=rates[0].mif;
    ret=dev_pm_qos_add_request(d->bus_dev,&d->bus_qos_req,DEV_PM_QOS_MIN_FREQUENCY,d->cur_mif_qos);
-   if(ret >= 0)d->bus_qos_active=true;
+   if(ret >= 0) {
+    d->bus_qos_active=true;
+    ret=devm_add_action_or_reset(&pdev->dev,put_bus_qos,d);
+    if(ret)return ret;
+   }
   }
  }
  mutex_lock(&instance_lock);

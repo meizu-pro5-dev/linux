@@ -60,6 +60,7 @@ struct m86_machine_priv {
 	struct regmap *pmu;
 	struct clk *mclk;
 	bool mclk_enabled;
+	struct clk *rtc_clk;
 	void __iomem *rtc_base;
 	struct regulator *dsp_core;
 	bool dsp_core_enabled;
@@ -75,6 +76,9 @@ struct m86_machine_priv {
 	unsigned int fll_rate;	/* FLL1 output currently programmed, 0 = off */
 	struct snd_soc_aux_dev amp_dev;
 	struct snd_soc_component *amp_component;
+	struct device_node *cpu_np;
+	struct device_node *codec_np;
+	struct device_node *amp_np;
 };
 
 static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
@@ -93,12 +97,18 @@ static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
 	 * probe/suspend/resume paths; CLKOUTEN[9] is not touched there.
 	 */
 	if (priv->rtc_base) {
+		bool clk_on = false;
+
+		if (priv->rtc_clk && !clk_prepare_enable(priv->rtc_clk))
+			clk_on = true;
 		reg = readl(priv->rtc_base + EXYNOS_RTCCON_REG);
 		if (on)
 			reg |= EXYNOS_RTCCON_CLKOUTEN;
 		else
 			reg &= ~EXYNOS_RTCCON_CLKOUTEN;
 		writel(reg, priv->rtc_base + EXYNOS_RTCCON_REG);
+		if (clk_on)
+			clk_disable_unprepare(priv->rtc_clk);
 	}
 }
 
@@ -519,6 +529,11 @@ static int m86_stop_sysclk(struct snd_soc_card *card)
 		dev_err(component->dev, "Failed to stop FLL1: %d\n", ret);
 
 	priv->fll_rate = 0;
+
+	/* Gate 24MHz XCLKOUT (0x105c0a00 = 0x1001) when audio is idle and ES705 is unbooted */
+	if (!priv->es705_booted)
+		m86_enable_mclk(priv, false);
+
 	return 0;
 }
 
@@ -535,7 +550,7 @@ static int m86_set_bias_level(struct snd_soc_card *card,
 
 	switch (level) {
 	case SND_SOC_BIAS_STANDBY:
-		if (card->dapm.bias_level == SND_SOC_BIAS_OFF)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF)
 			return m86_start_sysclk(card);
 		break;
 	case SND_SOC_BIAS_OFF:
@@ -560,6 +575,7 @@ static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 
 	switch (params_rate(params)) {
 	case 8000:
+	case 12000:
 	case 16000:
 	case 24000:
 	case 32000:
@@ -612,9 +628,23 @@ static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 				   ARIZONA_AIF1RX_LRCLK_MSTR | ARIZONA_AIF1RX_LRCLK_FRC);
 	}
 
-	/* Synchronize sample rate to TFA9890 amplifier (44.1k = index 7, 48k = index 8) */
+	/* Synchronize sample rate to TFA9890 amplifier (indices 0..8 per tfa989x_rates[]) */
 	if (priv->amp_component) {
-		int sr = (params_rate(params) % 4000) ? 7 : 8;
+		int sr;
+
+		switch (params_rate(params)) {
+		case 8000:   sr = 0; break;
+		case 11025:  sr = 1; break;
+		case 12000:  sr = 2; break;
+		case 16000:  sr = 3; break;
+		case 22050:  sr = 4; break;
+		case 24000:  sr = 5; break;
+		case 32000:  sr = 6; break;
+		case 44100:
+		case 88200:
+		case 176400: sr = 7; break;
+		default:     sr = 8; break;
+		}
 		snd_soc_component_update_bits(priv->amp_component,
 					      0x04 /* TFA989X_I2SREG */,
 					      0xf000 /* TFA989X_I2SREG_I2SSR_MSK */,
@@ -625,8 +655,22 @@ static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 	return m86_es705_ensure(priv, rtd->card->dev);
 }
 
+static int m86_aif1_prepare(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(rtd->card);
+	int ret;
+
+	ret = m86_start_sysclk(rtd->card);
+	if (ret)
+		return ret;
+
+	return m86_es705_ensure(priv, rtd->card->dev);
+}
+
 static const struct snd_soc_ops m86_aif1_ops = {
 	.hw_params = m86_aif1_hw_params,
+	.prepare   = m86_aif1_prepare,
 };
 
 static const struct snd_kcontrol_new m86_controls[] = {
@@ -704,7 +748,7 @@ static int m86_late_probe(struct snd_soc_card *card)
 	/* Default sysclk to 48kHz family (24.576 MHz) */
 	priv->sysclk_rate = 24576000;
 
-	/* Keep reference clocks running */
+	/* Enable reference clocks during initial codec configuration */
 	m86_enable_mclk(priv, true);
 	m86_enable_32khz(priv, true);
 
@@ -767,6 +811,11 @@ static int m86_late_probe(struct snd_soc_card *card)
 	regmap_write(priv->component->regmap, ARIZONA_AIF3TX2MIX_INPUT_1_VOLUME, 0x80);
 	regmap_update_bits(priv->component->regmap, ARIZONA_AIF3_TX_ENABLES, 0x3, 0x3);
 
+	/* Gate 24MHz XCLKOUT after probe (matching vendor meizu_audio_WM8998.c:1303);
+	 * m86_start_sysclk() and m86_es705_init_hw() re-enable it on audio playback. */
+	if (!priv->es705_booted)
+		m86_enable_mclk(priv, false);
+
 	return 0;
 }
 
@@ -802,10 +851,11 @@ static int m86_get_dsp(struct device *dev, struct m86_machine_priv *priv)
 	return 0;
 }
 
-static void __iomem *m86_map_rtc(struct device *dev)
+static void __iomem *m86_map_rtc(struct device *dev, struct m86_machine_priv *priv)
 {
 	struct device_node *np;
 	struct resource res;
+	struct clk *clk;
 	void __iomem *base = NULL;
 
 	np = of_parse_phandle(dev->of_node, "samsung,rtc", 0);
@@ -814,8 +864,35 @@ static void __iomem *m86_map_rtc(struct device *dev)
 	/* rtc-s3c owns the region; map only, do not request it. */
 	if (!of_address_to_resource(np, 0, &res))
 		base = devm_ioremap(dev, res.start, resource_size(&res));
+	clk = of_clk_get_by_name(np, "rtc");
+	if (!IS_ERR(clk))
+		priv->rtc_clk = clk;
 	of_node_put(np);
 	return base;
+}
+
+static void m86_cleanup_resources(void *data)
+{
+	struct m86_machine_priv *priv = data;
+
+	if (priv->mclk_enabled)
+		m86_enable_mclk(priv, false);
+	if (priv->dsp_core_enabled && priv->dsp_core) {
+		regulator_disable(priv->dsp_core);
+		priv->dsp_core_enabled = false;
+	}
+	if (priv->rtc_clk) {
+		clk_put(priv->rtc_clk);
+		priv->rtc_clk = NULL;
+	}
+	m86_card.dai_link[0].cpus->of_node = NULL;
+	m86_card.dai_link[0].platforms->of_node = NULL;
+	m86_card.dai_link[0].codecs->of_node = NULL;
+	m86_card.aux_dev = NULL;
+	m86_card.num_aux_devs = 0;
+	of_node_put(priv->cpu_np);
+	of_node_put(priv->codec_np);
+	of_node_put(priv->amp_np);
 }
 
 static int m86_audio_probe(struct platform_device *pdev)
@@ -823,7 +900,6 @@ static int m86_audio_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct snd_soc_card *card = &m86_card;
 	struct m86_machine_priv *priv;
-	struct device_node *cpu_np, *codec_np, *amp_np;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -835,6 +911,8 @@ static int m86_audio_probe(struct platform_device *pdev)
 	snd_soc_card_set_drvdata(card, priv);
 	card->dev = dev;
 	card->late_probe = m86_late_probe;
+	card->aux_dev = NULL;
+	card->num_aux_devs = 0;
 
 	ret = m86_get_dsp(dev, priv);
 	if (ret)
@@ -850,7 +928,7 @@ static int m86_audio_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->mclk))
 		priv->mclk = NULL;
 
-	priv->rtc_base = m86_map_rtc(dev);
+	priv->rtc_base = m86_map_rtc(dev, priv);
 	if (!priv->rtc_base)
 		dev_warn(dev, "RTC not mapped; 32 kHz clkout left unchanged\n");
 
@@ -885,6 +963,8 @@ static int m86_audio_probe(struct platform_device *pdev)
 	ret = snd_soc_of_parse_card_name(card, "model");
 	if (ret < 0) {
 		dev_err(dev, "Card name is not specified\n");
+		if (priv->rtc_clk)
+			clk_put(priv->rtc_clk);
 		return ret;
 	}
 
@@ -895,39 +975,43 @@ static int m86_audio_probe(struct platform_device *pdev)
 			dev_warn(dev, "Audio routing is not specified\n");
 	}
 
-	cpu_np = of_parse_phandle(dev->of_node, "i2s-controller", 0);
-	if (!cpu_np) {
+	priv->cpu_np = of_parse_phandle(dev->of_node, "i2s-controller", 0);
+	if (!priv->cpu_np) {
 		dev_err(dev, "i2s-controller property missing\n");
+		if (priv->rtc_clk)
+			clk_put(priv->rtc_clk);
 		return -EINVAL;
 	}
 
-	codec_np = of_parse_phandle(dev->of_node, "audio-codec", 0);
-	if (!codec_np) {
+	priv->codec_np = of_parse_phandle(dev->of_node, "audio-codec", 0);
+	if (!priv->codec_np) {
 		dev_err(dev, "audio-codec property missing\n");
-		of_node_put(cpu_np);
+		of_node_put(priv->cpu_np);
+		if (priv->rtc_clk)
+			clk_put(priv->rtc_clk);
 		return -EINVAL;
 	}
 
-	card->dai_link[0].cpus->of_node = cpu_np;
-	card->dai_link[0].platforms->of_node = cpu_np;
-	card->dai_link[0].codecs->of_node = codec_np;
+	card->dai_link[0].cpus->of_node = priv->cpu_np;
+	card->dai_link[0].platforms->of_node = priv->cpu_np;
+	card->dai_link[0].codecs->of_node = priv->codec_np;
 
-	amp_np = of_parse_phandle(dev->of_node, "audio-amplifier", 0);
-	if (amp_np) {
-		priv->amp_dev.dlc.of_node = amp_np;
+	priv->amp_np = of_parse_phandle(dev->of_node, "audio-amplifier", 0);
+	if (priv->amp_np) {
+		priv->amp_dev.dlc.of_node = priv->amp_np;
 		card->aux_dev = &priv->amp_dev;
 		card->num_aux_devs = 1;
 	}
 
+	ret = devm_add_action_or_reset(dev, m86_cleanup_resources, priv);
+	if (ret)
+		return ret;
+
 	ret = devm_snd_soc_register_card(dev, card);
 	if (ret < 0)
-		dev_err_probe(dev, ret, "Failed to register card\n");
+		return dev_err_probe(dev, ret, "Failed to register card\n");
 
-	of_node_put(cpu_np);
-	of_node_put(codec_np);
-	of_node_put(amp_np);
-
-	return ret;
+	return 0;
 }
 
 static int m86_pm_prepare(struct device *dev)

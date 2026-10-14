@@ -5,4 +5,5 @@
  * devfreq APIs. Serializes all monitor readers until GPU sensing is valid.
  */
 int m86_tmu_gpu_transition(int (*transition)(void *), void *data);
+int m86_tmu_gpu_power_off(int (*transition)(void *), void *data);
 #endif

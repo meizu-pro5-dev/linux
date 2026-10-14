@@ -9,6 +9,7 @@
 #include <linux/fb.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/m86-fts.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm.h>
@@ -223,8 +224,9 @@ static int m86_update_status(struct backlight_device *bl)
 		u32 mask = readl(ctx->regs + DSIM_INTMSK);
 		writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
 		readl(ctx->regs + DSIM_INTMSK);
+		mask = readl(ctx->regs + DSIM_INTMSK);
 		ctx->ready = (mask & (PH_EMPTY | PL_EMPTY)) == (PH_EMPTY | PL_EMPTY);
-		ctx->faulted = false;
+		ctx->faulted = !ctx->ready;
 	}
 
 	/* PRO5 DIMMING_SPEED={0x53,0x20}; LUMINANCE={0x51,v} */
@@ -244,6 +246,8 @@ static int m86_update_status(struct backlight_device *bl)
 	}
 out:
 	mutex_unlock(&ctx->lock);
+	if (!ret)
+		m86_fts_set_blank(blank);
 	return ret;
 }
 
@@ -340,25 +344,26 @@ static int m86_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	platform_set_drvdata(pdev, ctx);
-	bl = devm_backlight_device_register(dev, "m86-panel", dev, ctx,
-					  &m86_ops, &props);
-	if (IS_ERR(bl))
-		return PTR_ERR(bl);
-	ctx->bl = bl;
 
-	/* Publication can race update_status; serialize mask setup with writes. */
-	mutex_lock(&ctx->lock);
 	/* Exclusively reserve DSIM above, then switch only FIFO completion
-	 * sources to polling. Preserve all other bootloader interrupt masks.
+	 * sources to polling before publishing the backlight device.
+	 * Preserve all other bootloader interrupt masks.
 	 */
+	mutex_lock(&ctx->lock);
 	mask = readl(ctx->regs + DSIM_INTMSK);
 	writel(mask | PH_EMPTY | PL_EMPTY, ctx->regs + DSIM_INTMSK);
 	readl(ctx->regs + DSIM_INTMSK); /* Flush posted write before publication. */
 	mask = readl(ctx->regs + DSIM_INTMSK);
 	ctx->ready = (mask & (PH_EMPTY | PL_EMPTY)) == (PH_EMPTY | PL_EMPTY);
 	mutex_unlock(&ctx->lock);
-	if ((mask & (PH_EMPTY | PL_EMPTY)) != (PH_EMPTY | PL_EMPTY))
+	if (!ctx->ready)
 		return dev_err_probe(dev, -EIO, "FIFO IRQ mask did not latch\n");
+
+	bl = devm_backlight_device_register(dev, "m86-panel", dev, ctx,
+					  &m86_ops, &props);
+	if (IS_ERR(bl))
+		return PTR_ERR(bl);
+	ctx->bl = bl;
 	dev_info(dev, "polling FIFO completion; INTMSK=%#010x\n", mask);
 	/* No backlight_update_status(): preserve BL brightness at probe. */
 	return 0;

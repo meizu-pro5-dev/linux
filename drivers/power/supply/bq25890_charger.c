@@ -124,6 +124,7 @@ struct bq25890_device {
 
 	/* PRO 5 OEM ordinary-5V parallel charging policy. */
 	bool m86, m86_secondary, m86_charge_enabled, otg_vbus_enabled, m86_temp_tripped;
+	bool m86_terminate, m86_conv_rate, m86_applied;
 	int m86_input_limit, m86_charge_current, m86_source_type, m86_source_max, m86_source_voltage;
 	struct power_supply *m86_source_psy;
 	int m86_ico_stage, m86_budget;
@@ -484,7 +485,8 @@ static void bq25890_update_state(struct bq25890_device *bq,
 	/* update state in case we lost an interrupt */
 	__bq25890_handle_irq(bq);
 	*state = bq->state;
-	do_adc_conv = (!state->online || state->hiz) && bq25890_is_adc_property(psp);
+	do_adc_conv = (bq->m86 || !state->online || state->hiz) &&
+		      bq25890_is_adc_property(psp);
 	if (do_adc_conv)
 		bq25890_field_write(bq, F_CONV_START, 1);
 	mutex_unlock(&bq->lock);
@@ -857,14 +859,16 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 		new_state.hiz = 1;
 	}
 
-	/* Should period ADC sampling be enabled? */
-	adc_conv_rate = bq->state.online && !bq->state.hiz;
-	new_adc_conv_rate = new_state.online && !new_state.hiz;
+	/* Should period ADC sampling be enabled? (m86 uses one-shot ADC except during ICO) */
+	if (!bq->m86) {
+		adc_conv_rate = bq->state.online && !bq->state.hiz;
+		new_adc_conv_rate = new_state.online && !new_state.hiz;
 
-	if (new_adc_conv_rate != adc_conv_rate) {
-		ret = bq25890_field_write(bq, F_CONV_RATE, new_adc_conv_rate);
-		if (ret < 0)
-			goto error;
+		if (new_adc_conv_rate != adc_conv_rate) {
+			ret = bq25890_field_write(bq, F_CONV_RATE, new_adc_conv_rate);
+			if (ret < 0)
+				goto error;
+		}
 	}
 
 	bq->state = new_state;
@@ -928,7 +932,20 @@ static int bq25890_m86_charge_current(const char *cell, int temp, int voltage)
 static int bq25890_m86_apply(struct bq25890_device *bq, bool enable,
 			   int input, int charge, bool terminate)
 {
+	bool conv_rate = enable && !bq->m86_secondary && bq->m86_ico_stage < 2;
 	int ret;
+
+	/*
+	 * Avoid redundant GPIO-I2C register read-modify-writes and status reads
+	 * on every poll tick when the target charging configuration is unchanged.
+	 */
+	if (bq->m86_applied &&
+	    enable == bq->m86_charge_enabled &&
+	    input == bq->m86_input_limit &&
+	    charge == bq->m86_charge_current &&
+	    terminate == bq->m86_terminate &&
+	    conv_rate == bq->m86_conv_rate)
+		return 0;
 
 	/* CE is independent of silicon HiZ/CHG_CFG, including failed writes. */
 	if (!enable) gpiod_set_value_cansleep(bq->m86_ce, 0);
@@ -940,10 +957,15 @@ static int bq25890_m86_apply(struct bq25890_device *bq, bool enable,
 	if (!ret) ret = bq25890_field_write(bq, F_ITERM, terminate ? 1 : 0);
 	if (!ret) ret = bq25890_field_write(bq, F_TERM_EN, terminate);
 	if (!ret) ret = bq25890_field_write(bq, F_CHG_CFG, enable);
-	if (!ret) ret = bq25890_field_write(bq, F_CONV_RATE, enable);
+	if (!ret) ret = bq25890_field_write(bq, F_CONV_RATE, conv_rate);
 	if (ret) {
 		enable = false;
+		bq->m86_applied = false;
 		bq25890_field_write(bq, F_CHG_CFG, 0);
+	} else {
+		bq->m86_applied = true;
+		bq->m86_terminate = terminate;
+		bq->m86_conv_rate = conv_rate;
 	}
 	gpiod_set_value_cansleep(bq->m86_ce, enable);
 	bq->force_hiz = bq->m86_secondary && !enable;
@@ -1016,11 +1038,12 @@ static void bq25890_m86_poll(struct work_struct *work)
 		terminate = capacity.intval == 100;
 	}
 	if (!enable) {
+		if (bq->m86_ico_stage != 0)
+			bq25890_field_write(bq, F_ICO_EN, 0);
 		bq->m86_ico_stage = 0;
 		bq->m86_source_type = -1;
 		bq->m86_source_max = 0;
 		bq->m86_budget = 500000;
-		bq25890_field_write(bq, F_ICO_EN, 0);
 		goto apply;
 	}
 	if (type.intval != bq->m86_source_type || maximum.intval != bq->m86_source_max ||
@@ -1039,10 +1062,12 @@ static void bq25890_m86_poll(struct work_struct *work)
 		 * VINDPM is fixed at 4400mV (idx=18) in bq2589x_init_device across
 		 * all 5V/9V/12V modes to prevent false throttling under cable load.
 		 */
-		bq25890_field_write(bq, F_FORCE_VINDPM, 1);
-		bq25890_field_write(bq, F_VINDPM, 18);
-		bq25890_field_write(aux, F_FORCE_VINDPM, 1);
-		bq25890_field_write(aux, F_VINDPM, 18);
+		if (bq->m86_ico_stage != 2) {
+			bq25890_field_write(bq, F_FORCE_VINDPM, 1);
+			bq25890_field_write(bq, F_VINDPM, 18);
+			bq25890_field_write(aux, F_FORCE_VINDPM, 1);
+			bq25890_field_write(aux, F_VINDPM, 18);
+		}
 
 		budget = clamp(maximum.intval, 500000, 3250000);
 		bq->m86_budget = budget;
@@ -1063,6 +1088,11 @@ static void bq25890_m86_poll(struct work_struct *work)
 		/* Supplier CURRENT_MAX is the detection ceiling, not an assertion
 		 * that an Apple/nonstandard adapter can deliver that current. ICO
 		 * measures the usable budget; aux is isolated throughout probing. */
+		if (!bq->m86_conv_rate) {
+			bq25890_field_write(bq, F_CONV_START, 1);
+			regmap_field_read_poll_timeout(bq->rmap_fields[F_CONV_START],
+						       ret, !ret, 25000, 1000000);
+		}
 		vbus = bq25890_field_read(bq, F_VBUSV);
 		if (vbus < 0) { enable = false; goto cancel; }
 		if (vbus > 29) {
@@ -1118,6 +1148,8 @@ static void bq25890_m86_poll(struct work_struct *work)
 		if (bq->m86_ico_stage == 2 && budget >= 1200000 &&
 		    capacity.intval < 95 && voltage.intval < 4300000)
 			aux_input = budget - 1000000;
+	} else {
+		bq->m86_ico_stage = 2;
 	}
 apply:
 	/* Quiesce aux before changing main; never exceed the measured total. */
@@ -1144,7 +1176,8 @@ cancel:
 out:
 	mutex_unlock(&aux->lock);
 	mutex_unlock(&bq->lock);
-	queue_delayed_work(system_power_efficient_wq, &bq->m86_work, HZ);
+	queue_delayed_work(system_power_efficient_wq, &bq->m86_work,
+			   (enable && bq->m86_ico_stage < 2) ? HZ : 5 * HZ);
 }
 
 static void bq25890_m86_stop(void *data)
@@ -1278,8 +1311,9 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 		return ret;
 	}
 
-	/* Configure ADC for continuous conversions when charging */
-	ret = bq25890_field_write(bq, F_CONV_RATE, bq->state.online && !bq->state.hiz);
+	/* Configure ADC for continuous conversions when charging (one-shot on m86) */
+	ret = bq25890_field_write(bq, F_CONV_RATE,
+				  !bq->m86 && bq->state.online && !bq->state.hiz);
 	if (ret < 0) {
 		dev_dbg(bq->dev, "Config ADC failed %d\n", ret);
 		return ret;
@@ -1778,7 +1812,7 @@ static int bq25890_probe(struct i2c_client *client)
 
 	mutex_init(&bq->lock);
 	INIT_DELAYED_WORK(&bq->pump_express_work, bq25890_pump_express_work);
-	INIT_DELAYED_WORK(&bq->m86_work, bq25890_m86_poll);
+	INIT_DEFERRABLE_WORK(&bq->m86_work, bq25890_m86_poll);
 	bq->m86 = of_device_is_compatible(dev->of_node, "meizu,m86-bq25892");
 	bq->m86_secondary = device_property_read_bool(dev, "meizu,secondary-charger");
 	bq->force_hiz = bq->m86_secondary;
@@ -1946,12 +1980,13 @@ static int bq25890_resume(struct device *dev)
 
 	mutex_lock(&bq->lock);
 
+	bq->m86_applied = false;
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0)
 		goto unlock;
 
-	/* Re-enable ADC only if charger is plugged in. */
-	if (bq->state.online) {
+	/* Re-enable ADC only if charger is plugged in (m86 uses one-shot ADC). */
+	if (!bq->m86 && bq->state.online) {
 		ret = bq25890_field_write(bq, F_CONV_RATE, 1);
 		if (ret < 0)
 			goto unlock;

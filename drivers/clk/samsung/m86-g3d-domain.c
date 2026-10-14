@@ -69,6 +69,15 @@ static int turn_on(void *arg)
  /* Local MMIO is only legal after the status confirms all local power bits. */
  return d->platform->ops->restore(d->platform->data);
 }
+static int turn_off(void *arg)
+{
+ struct m86_domain *d = arg;
+ int ret;
+ ret = prepare_sys_power(d);
+ if (ret)
+  return ret;
+ return switch_domain(d, false);
+}
 static int transition(struct generic_pm_domain *genpd, bool on)
 {
  struct m86_domain *d = container_of(genpd, struct m86_domain, genpd);
@@ -112,9 +121,7 @@ static int transition(struct generic_pm_domain *genpd, bool on)
   if (!ret)
    ret = ops->local_lpi_clock(d->platform->data);
   if (!ret)
-   ret = prepare_sys_power(d);
-  if (!ret)
-   ret = switch_domain(d, false);
+   ret = ops->run_off ? ops->run_off(d->platform->data, turn_off, d) : turn_off(d);
   if (!ret)
    ret = ops->top_gate(d->platform->data, false);
  }

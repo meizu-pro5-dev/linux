@@ -23,6 +23,8 @@
 #include <linux/slab.h>
 #include <linux/arm-smccc.h>
 #include <asm/cpuidle.h>
+#include <asm/cputype.h>
+#include <asm/smp_plat.h>
 #include <asm/suspend.h>
 
 #define EXYNOS_PMU_BASE_DEFAULT		0x105C0000
@@ -31,26 +33,81 @@
 #define EXYNOS_PMU_CPU_STRIDE		0x80
 #define EXYNOS_PMU_LOCAL_PWR_CFG	0x0F
 
+/* CMU_ATLAS / CMU_APOLLO PWR_CTRL registers for L2 Q-Channel clock down (from 3.10 regs-clock-exynos7420.h) */
+#define EXYNOS7420_ATLAS_PWR_CTRL_PA		0x11801020
+#define EXYNOS7420_APOLLO_PWR_CTRL_PA		0x11901020
+#define EXYNOS7420_USE_L2QACTIVE		BIT(14)
+
+/* PMU offsets for read-only boot telemetry */
+#define EXYNOS_PMU_ATLAS_CPU0_OPTION		0x2008
+#define EXYNOS_PMU_APOLLO_CPU0_OPTION		0x2208
+#define EXYNOS_PMU_ATLAS_CPUSEQUENCER_OPTION	0x2488
+#define EXYNOS_PMU_ATLAS_L2_OPTION		0x2608
+#define EXYNOS_PMU_APOLLO_L2_OPTION		0x2628
+#define EXYNOS_PMU_AUD_STATUS			0x4004
+#define EXYNOS_PMU_CAM0_STATUS			0x4044
+#define EXYNOS_PMU_CAM1_STATUS			0x4064
+#define EXYNOS_PMU_DISP_STATUS			0x4084
+#define EXYNOS_PMU_G3D_STATUS			0x4104
+#define EXYNOS_PMU_ISP0_STATUS			0x4144
+#define EXYNOS_PMU_ISP1_STATUS			0x4184
+#define EXYNOS_PMU_MFC_STATUS			0x41A4
+#define EXYNOS_PMU_MSCL_STATUS			0x41C4
+#define EXYNOS_PMU_VPP_STATUS			0x41E4
+
 #define PSCI_0_1_FN_CPU_SUSPEND		0xC4000001
 
 static void __iomem *pmu_base;
+static void __iomem *atlas_pwr_ctrl;
+static void __iomem *apollo_pwr_ctrl;
 static struct cpuidle_device __percpu *exynos7420_cpuidle_devices;
 static enum cpuhp_state exynos7420_hp_state;
 
-static inline u32 exynos7420_pmu_cpu_config_offset(unsigned int cpu)
+static void exynos7420_enable_l2_qactive(void)
 {
-	/*
-	 * Apollo: Linux CPU 0..3 -> Cluster 1 (phys 4..7) -> 0x2200 + 0x80 * cpu
-	 * Atlas:  Linux CPU 4..7 -> Cluster 0 (phys 0..3) -> 0x2000 + 0x80 * (cpu - 4)
-	 */
-	if (cpu < 4)
-		return EXYNOS_PMU_ATLAS_CPU0_CONFIG + EXYNOS_PMU_CPU_STRIDE * (cpu + 4);
-	else
-		return EXYNOS_PMU_ATLAS_CPU0_CONFIG + EXYNOS_PMU_CPU_STRIDE * (cpu - 4);
+	if (atlas_pwr_ctrl)
+		writel_relaxed(readl_relaxed(atlas_pwr_ctrl) | EXYNOS7420_USE_L2QACTIVE,
+			       atlas_pwr_ctrl);
+	if (apollo_pwr_ctrl)
+		writel_relaxed(readl_relaxed(apollo_pwr_ctrl) | EXYNOS7420_USE_L2QACTIVE,
+			       apollo_pwr_ctrl);
+
+	pr_info("PMU options: ATLAS_CPU0_OPT=%#x APOLLO_CPU0_OPT=%#x ATLAS_SEQ_OPT=%#x ATLAS_L2_OPT=%#x APOLLO_L2_OPT=%#x\n",
+		readl_relaxed(pmu_base + EXYNOS_PMU_ATLAS_CPU0_OPTION),
+		readl_relaxed(pmu_base + EXYNOS_PMU_APOLLO_CPU0_OPTION),
+		readl_relaxed(pmu_base + EXYNOS_PMU_ATLAS_CPUSEQUENCER_OPTION),
+		readl_relaxed(pmu_base + EXYNOS_PMU_ATLAS_L2_OPTION),
+		readl_relaxed(pmu_base + EXYNOS_PMU_APOLLO_L2_OPTION));
+
+	pr_info("PMU block status: AUD=%#x CAM0=%#x CAM1=%#x DISP=%#x G3D=%#x ISP0=%#x ISP1=%#x MFC=%#x MSCL=%#x VPP=%#x\n",
+		readl_relaxed(pmu_base + EXYNOS_PMU_AUD_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_CAM0_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_CAM1_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_DISP_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_G3D_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_ISP0_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_ISP1_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_MFC_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_MSCL_STATUS) & 0xf,
+		readl_relaxed(pmu_base + EXYNOS_PMU_VPP_STATUS) & 0xf);
 }
 
-static int exynos7420_enter_wfi(struct cpuidle_device *dev,
-				struct cpuidle_driver *drv, int index)
+static inline u32 exynos7420_pmu_cpu_config_offset(unsigned int cpu)
+{
+	u64 mpidr = cpu_logical_map(cpu);
+	unsigned int cluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
+	unsigned int core = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+
+	/*
+	 * Atlas:  MPIDR Aff1=0, Aff0=0..3 -> phys 0..3 -> 0x2000 + 0x80 * core
+	 * Apollo: MPIDR Aff1=1, Aff0=0..3 -> phys 4..7 -> 0x2200 + 0x80 * core
+	 */
+	return EXYNOS_PMU_ATLAS_CPU0_CONFIG +
+	       EXYNOS_PMU_CPU_STRIDE * ((cluster ? 4 : 0) + (core & 3));
+}
+
+static __cpuidle int exynos7420_enter_wfi(struct cpuidle_device *dev,
+					  struct cpuidle_driver *drv, int index)
 {
 	cpu_do_idle();
 	return index;
@@ -72,8 +129,8 @@ static int exynos7420_c2_finisher(unsigned long arg)
 	return res.a0;
 }
 
-static int exynos7420_enter_c2(struct cpuidle_device *dev,
-			       struct cpuidle_driver *drv, int index)
+static __cpuidle int exynos7420_enter_c2(struct cpuidle_device *dev,
+					 struct cpuidle_driver *drv, int index)
 {
 	unsigned int cpu = dev->cpu;
 	u32 cfg_off = exynos7420_pmu_cpu_config_offset(cpu);
@@ -82,25 +139,29 @@ static int exynos7420_enter_c2(struct cpuidle_device *dev,
 
 	/* 1. Save local CPU peripheral state (GIC Interface and local timers) */
 	ret = cpu_pm_enter();
-	if (ret)
+	if (ret) {
+		cpu_do_idle();
 		return drv->safe_state_index;
+	}
 
 	/* 2. Clear LOCAL_PWR_CFG (0x0F) in PMU to signal power cut-off to Central Sequencer */
 	val = readl_relaxed(pmu_base + cfg_off);
-	writel_relaxed(val & ~EXYNOS_PMU_LOCAL_PWR_CFG, pmu_base + cfg_off);
+	writel(val & ~EXYNOS_PMU_LOCAL_PWR_CFG, pmu_base + cfg_off);
 
 	/* 3. Save CPU architectural context on stack and call SMC 0xC4000001 */
 	ret = cpu_suspend(0, exynos7420_c2_finisher);
 
 	/* 4. Unconditionally restore PMU LOCAL_PWR_CFG (0x0F) on wake or abort */
 	val = readl_relaxed(pmu_base + cfg_off);
-	writel_relaxed(val | EXYNOS_PMU_LOCAL_PWR_CFG, pmu_base + cfg_off);
+	writel(val | EXYNOS_PMU_LOCAL_PWR_CFG, pmu_base + cfg_off);
 
 	/* 5. Restore local CPU peripheral state */
 	cpu_pm_exit();
 
-	if (ret)
+	if (ret) {
+		cpu_do_idle();
 		return drv->safe_state_index;
+	}
 
 	return index;
 }
@@ -189,8 +250,17 @@ static int __init exynos7420_cpuidle_init(void)
 		}
 	}
 
+	/* Enable L2 Q-Channel clock down when all cores in a cluster are idle (3.10 exynos_idle_clock_down) */
+	atlas_pwr_ctrl  = ioremap(EXYNOS7420_ATLAS_PWR_CTRL_PA, 4);
+	apollo_pwr_ctrl = ioremap(EXYNOS7420_APOLLO_PWR_CTRL_PA, 4);
+	exynos7420_enable_l2_qactive();
+
 	exynos7420_cpuidle_devices = alloc_percpu(struct cpuidle_device);
 	if (!exynos7420_cpuidle_devices) {
+		if (atlas_pwr_ctrl)
+			iounmap(atlas_pwr_ctrl);
+		if (apollo_pwr_ctrl)
+			iounmap(apollo_pwr_ctrl);
 		iounmap(pmu_base);
 		return -ENOMEM;
 	}
@@ -202,6 +272,10 @@ static int __init exynos7420_cpuidle_init(void)
 		pr_err("cpuidle driver registration failed: %d\n", ret);
 		free_percpu(exynos7420_cpuidle_devices);
 		exynos7420_cpuidle_devices = NULL;
+		if (atlas_pwr_ctrl)
+			iounmap(atlas_pwr_ctrl);
+		if (apollo_pwr_ctrl)
+			iounmap(apollo_pwr_ctrl);
 		iounmap(pmu_base);
 		return ret;
 	}
@@ -213,12 +287,16 @@ static int __init exynos7420_cpuidle_init(void)
 		cpuidle_unregister_driver(&exynos7420_idle_driver);
 		free_percpu(exynos7420_cpuidle_devices);
 		exynos7420_cpuidle_devices = NULL;
+		if (atlas_pwr_ctrl)
+			iounmap(atlas_pwr_ctrl);
+		if (apollo_pwr_ctrl)
+			iounmap(apollo_pwr_ctrl);
 		iounmap(pmu_base);
 		return ret;
 	}
 	exynos7420_hp_state = ret;
 
-	pr_info("Driver registered (%d states, %u CPUs)\n",
+	pr_info("Driver registered (%d states, %u CPUs, L2 QACTIVE clock-down enabled)\n",
 		exynos7420_idle_driver.state_count, num_possible_cpus());
 	return 0;
 }
