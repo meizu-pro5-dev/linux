@@ -375,8 +375,8 @@ unlock:
 
 static const struct bcm_set_sleep_mode default_sleep_params = {
 	.sleep_mode = 1,	/* 0=Disabled, 1=UART, 2=Reserved, 3=USB */
-	.idle_host = 2,		/* idle threshold HOST, in 300ms */
-	.idle_dev = 2,		/* idle threshold device, in 300ms */
+	.idle_host = 240,	/* idle threshold HOST (240 * 12.5ms = 3000ms on BCM43455) */
+	.idle_dev = 240,	/* idle threshold device (prevents sleep between 40ms A2DP frames) */
 	.bt_wake_active = 1,	/* BT_WAKE active mode: 1 = high, 0 = low */
 	.host_wake_active = 0,	/* HOST_WAKE active mode: 1 = high, 0 = low */
 	.allow_host_sleep = 1,	/* Allow host sleep in SCO flag */
@@ -386,7 +386,7 @@ static const struct bcm_set_sleep_mode default_sleep_params = {
 	.usb_auto_sleep = 0,
 	.usb_resume_timeout = 0,
 	.break_to_host = 0,
-	.pulsed_host_wake = 1,
+	.pulsed_host_wake = 0,
 };
 
 static int bcm_setup_sleep(struct hci_uart *hu)
