@@ -16,6 +16,7 @@
 
 	aliases {
 		serial0 = &serial_2;
+		serial4 = &serial_4;
 		i2c6 = &hsi2c_6;
 		i2c8 = &hsi2c_8;
 		i2c11 = &hsi2c_11;
@@ -210,11 +211,11 @@
 &tmuctrl_3 { status = "disabled"; };
 &atlas_thermal { status = "disabled"; };
 &cmu_g3d { status = "okay"; };
-&cmu_aud { status = "disabled"; };
+&cmu_aud { status = "okay"; };
 &cmu_disp { status = "disabled"; };
 &pd_g3d { status = "disabled"; };
 &pd_disp { status = "disabled"; };
-&pinctrl_aud { status = "disabled"; };
+&pinctrl_aud { status = "okay"; };
 &sysmmu_disp_ro { status = "disabled"; };
 &sysmmu_disp_rw { status = "disabled"; };
 
@@ -1065,5 +1066,41 @@
 		status = "okay";
 	};
 };
+
+&pinctrl_alive {
+	bt_hostwake: bt-hostwake-pins {
+		samsung,pins = "gpa2-6";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+};
+
+&pinctrl_bus1 {
+	bt_ctrl: bt-ctrl-pins {
+		samsung,pins = "gpf5-7", "gpf4-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+};
+
+&serial_4 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4_bus &bt_ctrl &bt_hostwake>;
+	samsung,uart-fifosize = <64>;
+
+	bluetooth {
+		compatible = "brcm,bcm4345c5";
+		max-speed = <1500000>;
+		shutdown-gpios = <&gpf5 7 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpf4 0 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&gpa2>;
+		interrupts = <6 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "host-wakeup";
+	};
+};
+
 
 

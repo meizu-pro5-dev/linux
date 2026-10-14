@@ -6,6 +6,7 @@
 
 #include <linux/clk-provider.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/io.h>
 #include <linux/math64.h>
 #include <linux/lockdep.h>
@@ -1403,7 +1404,8 @@ static const struct samsung_div_clock aud_div_clks[] __initconst = {
 
 	DIV(0, "dout_sclk_i2s", "mout_sclk_i2s", DIV_AUD1, 0, 4),
 	DIV(0, "dout_sclk_pcm", "mout_sclk_pcm", DIV_AUD1, 4, 8),
-	DIV(0, "dout_sclk_uart", "dout_aud_cdclk", DIV_AUD1, 12, 4),
+	DIV_F(0, "dout_sclk_uart", "dout_aud_cdclk",
+			DIV_AUD1, 12, 4, CLK_SET_RATE_PARENT, 0),
 	DIV(0, "dout_sclk_slimbus", "dout_aud_cdclk", DIV_AUD1, 16, 5),
 	DIV(0, "dout_aud_cdclk", "mout_aud_pll_user", DIV_AUD1, 24, 4),
 };
@@ -1414,12 +1416,14 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 	GATE(SCLK_I2S, "sclk_i2s", "dout_sclk_i2s",
 			ENABLE_SCLK_AUD, 28, CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_UART, "sclk_uart", "dout_sclk_uart",
-			ENABLE_SCLK_AUD, 29, 0, 0),
+			ENABLE_SCLK_AUD, 29, CLK_SET_RATE_PARENT, 0),
 	GATE(0, "sclk_slimbus", "dout_sclk_slimbus",
 			ENABLE_SCLK_AUD, 30, 0, 0),
 
-	GATE(0, "pclk_dbg_aud", "dout_aud_pclk_dbg", ENABLE_PCLK_AUD, 19, 0, 0),
-	GATE(0, "pclk_gpio_aud", "dout_aclk_aud", ENABLE_PCLK_AUD, 20, 0, 0),
+	GATE(0, "pclk_dbg_aud", "dout_aud_pclk_dbg",
+			ENABLE_PCLK_AUD, 19, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_gpio_aud", "dout_aclk_aud",
+			ENABLE_PCLK_AUD, 20, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "pclk_wdt1", "dout_aclk_aud", ENABLE_PCLK_AUD, 22, 0, 0),
 	GATE(0, "pclk_wdt0", "dout_aclk_aud", ENABLE_PCLK_AUD, 23, 0, 0),
 	GATE(0, "pclk_slimbus", "dout_aclk_aud", ENABLE_PCLK_AUD, 24, 0, 0),
@@ -1429,12 +1433,17 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 			ENABLE_PCLK_AUD, 26, CLK_SET_RATE_PARENT, 0),
 	GATE(PCLK_I2S, "pclk_i2s", "dout_aclk_aud",
 			ENABLE_PCLK_AUD, 27, CLK_SET_RATE_PARENT, 0),
-	GATE(0, "pclk_timer", "dout_aclk_aud", ENABLE_PCLK_AUD, 28, 0, 0),
-	GATE(0, "pclk_smmu_aud", "dout_aclk_aud", ENABLE_PCLK_AUD, 31, 0, 0),
+	GATE(0, "pclk_timer", "dout_aclk_aud",
+			ENABLE_PCLK_AUD, 28, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_smmu_aud", "dout_aclk_aud",
+			ENABLE_PCLK_AUD, 31, CLK_IGNORE_UNUSED, 0),
 
-	GATE(0, "aclk_smmu_aud", "dout_aclk_aud", ENABLE_ACLK_AUD, 27, 0, 0),
+	GATE(0, "aclk_axi_lh_async_si_top", "dout_aclk_aud",
+			ENABLE_ACLK_AUD, 23, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_smmu_aud", "dout_aclk_aud",
+			ENABLE_ACLK_AUD, 27, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk_acel_lh_async_si_top", "dout_aclk_aud",
-			 ENABLE_ACLK_AUD, 28, 0, 0),
+			ENABLE_ACLK_AUD, 28, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_ADMA, "aclk_dmac", "dout_aclk_aud", ENABLE_ACLK_AUD, 31, 0, 0),
 };
 
@@ -1452,6 +1461,37 @@ static const struct samsung_cmu_info aud_cmu_info __initconst = {
 
 static void __init exynos7_clk_aud_init(struct device_node *np)
 {
+	void __iomem *reg_base = of_iomap(np, 0);
+
+	if (reg_base) {
+		u32 val;
+
+		/*
+		 * Reparent mout_aud_pll_user (BIT 20) to fin_pll (24 MHz) and
+		 * zero DIV_AUD0/DIV_AUD1 so BLK_AUD (serial_4, pinctrl_aud,
+		 * i2s0, adma) runs off the 24 MHz oscillator without aud_pll.
+		 */
+		val = readl_relaxed(reg_base + MUX_SEL_AUD);
+		val &= ~(BIT(20) | BIT(16) | BIT(12));
+		writel_relaxed(val, reg_base + MUX_SEL_AUD);
+		writel_relaxed(0x0, reg_base + DIV_AUD0);
+		writel_relaxed(0x0, reg_base + DIV_AUD1);
+
+		val = readl_relaxed(reg_base + ENABLE_ACLK_AUD);
+		val |= BIT(31) | BIT(28) | BIT(27) | BIT(23);
+		writel_relaxed(val, reg_base + ENABLE_ACLK_AUD);
+
+		val = readl_relaxed(reg_base + ENABLE_PCLK_AUD);
+		val |= BIT(31) | BIT(28) | BIT(27) | BIT(25) | BIT(20);
+		writel_relaxed(val, reg_base + ENABLE_PCLK_AUD);
+
+		val = readl_relaxed(reg_base + ENABLE_SCLK_AUD);
+		val |= BIT(29);
+		writel_relaxed(val, reg_base + ENABLE_SCLK_AUD);
+
+		iounmap(reg_base);
+	}
+
 	samsung_cmu_register_one(np, &aud_cmu_info);
 }
 

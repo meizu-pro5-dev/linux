@@ -446,27 +446,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] __initconst = 
 	{ 0x105c158c, BIT(0) },
 };
 
-/*
- * BLK_AUD (0x105c4000, CMU_AUD 0x114c0000):
- * PRO 5 uses PERIC1 I2S1 + ES705 + WM8998 + TFA9890, so BLK_AUD (Cortex-A5
- * Seiren + ADMA + I2S0) has no consumers in Linux 6.6.
- */
-static const struct exynos7420_reg_bits exynos7420_local_clks_aud[] __initconst = {
-	{ 0x114c0800, 0xffffffff },
-	{ 0x114c0900, 0xffffffff },
-	{ 0x114c0a00, 0xffffffff },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_aud[] __initconst = {
-	{ 0x105c1204, BIT(0) },
-	{ 0x105c1340, BIT(0) },
-	{ 0x105c1440, BIT(0) },
-	{ 0x105c1480, BIT(0) },
-	{ 0x105c14c0, BIT(0) },
-	{ 0x105c1500, BIT(0) },
-	{ 0x105c1540, BIT(1) | BIT(0) },
-	{ 0x105c1580, BIT(0) },
-};
-
 static const struct exynos7420_unused_pd exynos7420_unused_pds[] __initconst = {
 	{
 		.name = "pd-mfc",
@@ -539,16 +518,89 @@ static const struct exynos7420_unused_pd exynos7420_unused_pds[] __initconst = {
 		.sys_pwr_regs = exynos7420_sys_pwr_cam1,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam1),
 	},
-	{
-		.name = "pd-aud",
-		.pmu_off = 0x4000,
-		.is_aud = true,
-		.local_clks = exynos7420_local_clks_aud,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_aud),
-		.sys_pwr_regs = exynos7420_sys_pwr_aud,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_aud),
-	},
 };
+
+/*
+ * Initialize BLK_AUD (0x105c4000) and LPASS Top SFRs (0x11400000) before
+ * postcore_initcall(pinctrl-samsung) and device_initcall(samsung-uart / i2s0):
+ *  - Release gpz0/gpz1 pad retention (0x105c1340 = 0x1, 0x105c3028 = BIT(28))
+ *  - Enable 32.768 kHz LPO clock on XCLKOUT2 for Broadcom BT/Wi-Fi
+ *  - Deassert LPASS_CORE_SW_RESET (0x11400008 = 0x503: UART + I2S + MEM + DMA)
+ *  - Route LPASS interrupts to AP GIC (0x11400058 = 0x73: DMA|GPIO|I2S|UART|SFR)
+ *  - Bypass sysmmu_aud (0x114e0000 = 0x0) for direct ADMA physical addressing
+ */
+static int __init exynos7420_init_aud_lpass(void)
+{
+	void __iomem *pmu_base, *lpass_base, *smmu_base, *ccore_base, *rtc_base;
+	u32 sw_reset, intr_mask;
+
+	if (!of_machine_is_compatible("meizu,m86") &&
+	    !of_machine_is_compatible("samsung,exynos7"))
+		return 0;
+
+	pmu_base = ioremap(0x105c0000, 0x5000);
+	if (!pmu_base)
+		return -ENOMEM;
+
+	if ((readl_relaxed(pmu_base + 0x4004) & 0xf) != 0xf) {
+		int timeout = 200;
+
+		writel_relaxed(0x1, pmu_base + 0x1340);
+		writel_relaxed(0x0102, pmu_base + 0x4008);
+		writel_relaxed(0xf, pmu_base + 0x4000);
+		while ((readl_relaxed(pmu_base + 0x4004) & 0xf) != 0xf && --timeout > 0)
+			udelay(10);
+	}
+
+	writel_relaxed(0x1, pmu_base + 0x1340);
+	writel_relaxed(BIT(28), pmu_base + 0x3028);
+
+	/* Route 32.768 kHz RTC clock to XCLKOUT2 (PMU_RTC_CLKO_SEL = 0x0) */
+	writel_relaxed(0x0, pmu_base + 0x001c);
+	iounmap(pmu_base);
+
+	/* Ensure PCLK_RTC (0x105b0900 BIT(2)) is enabled before touching RTCCON */
+	ccore_base = ioremap(0x105b0000, 0x1000);
+	rtc_base = ioremap(0x10590000, 0x100);
+	if (ccore_base && rtc_base) {
+		u32 pclk_ccore = readl_relaxed(ccore_base + 0x0900);
+
+		writel_relaxed(pclk_ccore | BIT(2), ccore_base + 0x0900);
+		readl_relaxed(ccore_base + 0x0900);
+		writel_relaxed(readl_relaxed(rtc_base + 0x0040) | BIT(9),
+			       rtc_base + 0x0040);
+	}
+	if (rtc_base)
+		iounmap(rtc_base);
+	if (ccore_base)
+		iounmap(ccore_base);
+
+	lpass_base = ioremap(0x11400000, 0x100);
+	if (lpass_base) {
+		writel_relaxed(0x0, lpass_base + 0x0008);
+		udelay(100);
+		/* LPASS_SW_RESET_UART(10) | I2S(8) | MEM(1) | DMA(0) */
+		writel_relaxed(0x00000503, lpass_base + 0x0008);
+		writel_relaxed(0x00000000, lpass_base + 0x0048);
+		/* LPASS_INTR_DMA(6) | GPIO(5) | I2S(4) | UART(1) | SFR(0) */
+		writel_relaxed(0x00000073, lpass_base + 0x0058);
+		sw_reset = readl_relaxed(lpass_base + 0x0008);
+		intr_mask = readl_relaxed(lpass_base + 0x0058);
+		iounmap(lpass_base);
+
+		pr_info("exynos-pd: initialized BLK_AUD LPASS (sw_reset=%#x intr_mask=%#x)\n",
+			sw_reset, intr_mask);
+	}
+
+	smmu_base = ioremap(0x114e0000, 0x100);
+	if (smmu_base) {
+		writel_relaxed(0x0, smmu_base + 0x0000);
+		iounmap(smmu_base);
+	}
+
+	return 0;
+}
+core_initcall(exynos7420_init_aud_lpass);
 
 static int __init exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
 {
