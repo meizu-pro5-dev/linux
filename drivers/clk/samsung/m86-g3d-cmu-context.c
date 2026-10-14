@@ -47,6 +47,9 @@ static int pair_valid(const struct m86_g3d_cmu_access *a,
 	case 350000000: expected_selector = 0x3a; expected_pms = (175U << 16) | (6U << 8) | 1; break;
 	case 420000000: expected_selector = 0x3b; expected_pms = (105U << 16) | (3U << 8) | 1; break;
 	case 544000000: expected_selector = 0x41; expected_pms = (68U << 16) | (3U << 8); break;
+	case 600000000: expected_selector = 0x47; expected_pms = (75U << 16) | (3U << 8); break;
+	case 700000000: expected_selector = 0x4e; expected_pms = (175U << 16) | (6U << 8); break;
+	case 772000000: expected_selector = 0x54; expected_pms = (193U << 16) | (6U << 8); break;
 	default: return -EOPNOTSUPP;
 	}
 	if (c->hz > a->cap || c->selector != expected_selector || c->ema != 0x31)
@@ -54,7 +57,7 @@ static int pair_valid(const struct m86_g3d_cmu_access *a,
 	m = (c->con0 >> 16) & 1023;
 	p = (c->con0 >> 8) & 63;
 	s = c->con0 & 7;
-	expected_hpm = c->hz == 544000000 ? 2 : 1;
+	expected_hpm = c->hz >= 544000000 ? 2 : 1;
 	if (!m || !p || !(c->con0 & PLL_ENABLED) || !(c->con0 & PLL_LOCKED) ||
 	    !(c->mux & PLL_SELECTED) || (c->mux & FIN_SELECTED) ||
 	    (c->div & 7) || ((c->div >> 8) & 3) != expected_hpm ||

@@ -96,18 +96,16 @@ int m86_tmu_gpu_transition(int (*transition)(void *), void *data)
  }
  b = t->base[2];
  control = readl(b + 0x20);
- if (!(control & BIT(0))) {
-  ret = -ENODATA;
-  goto unlock;
+ if (control & BIT(0)) {
+  writel(control & ~BIT(0), b + 0x20);
+  ret = readl_poll_timeout(b + 0x28, status, status & BIT(0), 10, 20000);
+ } else {
+  ret = 0;
  }
- writel(control & ~BIT(0), b + 0x20);
- ret = readl_poll_timeout(b + 0x28, status, status & BIT(0), 10, 20000);
  if (!ret)
   ret = transition(data);
- /* Restore sensing even after an unsuccessful domain operation. A caller
-  * must treat either failure as failed resume and never touch GPU MMIO.
-  */
- writel(control, b + 0x20);
+ /* Restore sensing after domain-on operation completes. */
+ writel(control | BIT(0), b + 0x20);
  restore_ret = m86_read_locked(t->hwmon, hwmon_temp,
                               hwmon_temp_input, 2, &temperature);
  if (restore_ret)
@@ -120,6 +118,44 @@ unlock:
  return ret;
 }
 EXPORT_SYMBOL_GPL(m86_tmu_gpu_transition);
+
+/* Disable TMU2 (EXYNOS_TMU_CORE_GPU) before cutting BLK_G3D power so that
+ * the unpowered G3D remote thermal diode does not glitch and trigger
+ * hardware THERM_TRIP or critical thermal shutdown. Leave TMU2 disabled
+ * while BLK_G3D remains off; m86_tmu_gpu_transition re-enables it on power-on.
+ */
+int m86_tmu_gpu_power_off(int (*transition)(void *), void *data)
+{
+ struct m86_tmu *t;
+ void __iomem *b;
+ u32 control, status;
+ int ret;
+ if (!transition)
+  return -EINVAL;
+ mutex_lock(&m86_tmu_access);
+ t = m86_tmu_instance;
+ if (!t) {
+  ret = -EPROBE_DEFER;
+  goto unlock;
+ }
+ b = t->base[2];
+ control = readl(b + 0x20);
+ if (control & BIT(0)) {
+  writel(control & ~BIT(0), b + 0x20);
+  ret = readl_poll_timeout(b + 0x28, status, status & BIT(0), 10, 20000);
+  if (ret) {
+   writel(control, b + 0x20);
+   goto unlock;
+  }
+ }
+ ret = transition(data);
+ if (ret)
+  writel(control | BIT(0), b + 0x20);
+unlock:
+ mutex_unlock(&m86_tmu_access);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_gpu_power_off);
 
 static const struct hwmon_ops m86_ops = {
 	.is_visible = m86_visible, .read = m86_read,
@@ -134,11 +170,21 @@ static int m86_thermal_temp(struct thermal_zone_device *tz, int *temp)
 	struct m86_tmu *t = thermal_zone_device_priv(tz);
 	long value;
 	int i, ret, maximum = INT_MIN;
+	mutex_lock(&m86_tmu_access);
 	for (i = 0; i < 4; i++) {
-		ret = m86_read(t->hwmon, hwmon_temp, hwmon_temp_input, i, &value);
-		if (ret) return ret;
+		/* Skip GPU TMU2 while sensing is disabled during BLK_G3D power-off. */
+		if (i == 2 && !(readl(t->base[2] + 0x20) & BIT(0)))
+			continue;
+		ret = m86_read_locked(t->hwmon, hwmon_temp, hwmon_temp_input, i, &value);
+		if (ret) {
+			mutex_unlock(&m86_tmu_access);
+			return ret;
+		}
 		maximum = max(maximum, (int)value);
 	}
+	mutex_unlock(&m86_tmu_access);
+	if (maximum == INT_MIN)
+		return -ENODATA;
 	*temp = maximum;
 	return 0;
 }

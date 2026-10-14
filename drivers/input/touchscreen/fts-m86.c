@@ -7,8 +7,11 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
+#include <linux/m86-fts.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/pm.h>
 
 #define FTS_FINGERS 10
 #define FTS_EVENT_SIZE 8
@@ -18,7 +21,14 @@ struct m86_fts {
 	struct i2c_client *client;
 	struct input_dev *input;
 	struct touchscreen_properties prop;
+	struct mutex lock;
+	bool dpms_blanked;
+	bool pm_suspended;
+	bool hw_asleep;
 };
+
+static DEFINE_MUTEX(m86_fts_global_lock);
+static struct m86_fts *m86_fts_instance;
 
 static int m86_fts_read(struct m86_fts *fts, const u8 *cmd, unsigned int ncmd,
 			u8 *data, unsigned int size)
@@ -145,14 +155,105 @@ error:
 	return IRQ_HANDLED;
 }
 
+static void m86_fts_update_power_locked(struct m86_fts *fts)
+{
+	const u8 disable[] = { 0xb6, 0x00, 0x1c, 0x00 };
+	const u8 enable[] = { 0xb6, 0x00, 0x1c, 0x41 };
+	bool want_sleep = fts->dpms_blanked || fts->pm_suspended;
+
+	if (want_sleep == fts->hw_asleep)
+		return;
+
+	if (want_sleep) {
+		disable_irq(fts->client->irq);
+		m86_fts_write(fts, disable, sizeof(disable));
+		/* 3.10 fts.c FB_BLANK_POWERDOWN: SLEEPIN (0x90) + FLUSHBUFFER (0xa1) */
+		m86_fts_command(fts, 0x90);
+		m86_fts_command(fts, 0xa1);
+		m86_fts_release_all(fts);
+		input_mt_sync_frame(fts->input);
+		input_sync(fts->input);
+		fts->hw_asleep = true;
+		dev_info(&fts->client->dev, "entered SLEEPIN (0x90) on display blank/suspend\n");
+	} else {
+		/* 3.10 fts.c FB_BLANK_UNBLANK: SLEEPOUT (0x91) + SENSEON (0x93) + FLUSHBUFFER (0xa1) */
+		m86_fts_command(fts, 0x91);
+		msleep(20);
+		m86_fts_command(fts, 0x93);
+		m86_fts_command(fts, 0xa1);
+		m86_fts_write(fts, enable, sizeof(enable));
+		fts->hw_asleep = false;
+		enable_irq(fts->client->irq);
+		dev_info(&fts->client->dev, "resumed SENSEON (0x93) on display unblank/resume\n");
+	}
+}
+
+void m86_fts_set_blank(bool blank)
+{
+	struct m86_fts *fts;
+
+	mutex_lock(&m86_fts_global_lock);
+	fts = m86_fts_instance;
+	if (fts) {
+		mutex_lock(&fts->lock);
+		if (fts->dpms_blanked != blank) {
+			fts->dpms_blanked = blank;
+			m86_fts_update_power_locked(fts);
+		}
+		mutex_unlock(&fts->lock);
+	}
+	mutex_unlock(&m86_fts_global_lock);
+}
+EXPORT_SYMBOL_GPL(m86_fts_set_blank);
+
+static int m86_fts_pm_suspend(struct device *dev)
+{
+	struct m86_fts *fts = dev_get_drvdata(dev);
+
+	if (!fts)
+		return 0;
+
+	mutex_lock(&fts->lock);
+	fts->pm_suspended = true;
+	m86_fts_update_power_locked(fts);
+	mutex_unlock(&fts->lock);
+	return 0;
+}
+
+static int m86_fts_pm_resume(struct device *dev)
+{
+	struct m86_fts *fts = dev_get_drvdata(dev);
+
+	if (!fts)
+		return 0;
+
+	mutex_lock(&fts->lock);
+	fts->pm_suspended = false;
+	m86_fts_update_power_locked(fts);
+	mutex_unlock(&fts->lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(m86_fts_pm_ops, m86_fts_pm_suspend, m86_fts_pm_resume);
+
 static void m86_fts_disable(void *data)
 {
 	struct m86_fts *fts = data;
 	const u8 disable[] = { 0xb6, 0x00, 0x1c, 0x00 };
 
-	disable_irq(fts->client->irq);
-	m86_fts_write(fts, disable, sizeof(disable));
-	m86_fts_command(fts, 0x92);
+	mutex_lock(&m86_fts_global_lock);
+	if (m86_fts_instance == fts)
+		m86_fts_instance = NULL;
+	mutex_unlock(&m86_fts_global_lock);
+
+	mutex_lock(&fts->lock);
+	if (!fts->hw_asleep) {
+		disable_irq(fts->client->irq);
+		m86_fts_write(fts, disable, sizeof(disable));
+		m86_fts_command(fts, 0x92);
+		fts->hw_asleep = true;
+	}
+	mutex_unlock(&fts->lock);
 }
 
 static int m86_fts_probe(struct i2c_client *client)
@@ -173,6 +274,7 @@ static int m86_fts_probe(struct i2c_client *client)
 	if (!fts)
 		return -ENOMEM;
 	fts->client = client;
+	mutex_init(&fts->lock);
 	ret = m86_fts_read(fts, id_cmd, sizeof(id_cmd), id, sizeof(id));
 	if (ret)
 		return dev_err_probe(&client->dev, ret, "cannot read FTS ID\n");
@@ -228,6 +330,9 @@ static int m86_fts_probe(struct i2c_client *client)
 		return ret;
 	enable_irq(client->irq);
 	i2c_set_clientdata(client, fts);
+	mutex_lock(&m86_fts_global_lock);
+	m86_fts_instance = fts;
+	mutex_unlock(&m86_fts_global_lock);
 	return devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
 }
 
@@ -241,6 +346,7 @@ static struct i2c_driver m86_fts_driver = {
 	.driver = {
 		.name = "fts-m86",
 		.of_match_table = m86_fts_match,
+		.pm = pm_sleep_ptr(&m86_fts_pm_ops),
 	},
 	.probe = m86_fts_probe,
 };

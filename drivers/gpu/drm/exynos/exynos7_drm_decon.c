@@ -21,6 +21,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/pm_qos.h>
 #include <linux/m86-bus-qos.h>
+#include <linux/m86-fts.h>
 
 #include <video/of_display_timing.h>
 #include <video/of_videomode.h>
@@ -64,6 +65,8 @@ struct decon_context {
 	atomic_t			wait_vsync_event;
 	struct gpio_desc		*te_gpio;
 	int				te_irq;
+	spinlock_t			te_lock;
+	bool				te_irq_enabled;
 	atomic_t			frame_pending;
 
 	struct drm_encoder *encoder;
@@ -99,12 +102,43 @@ static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
 	DRM_PLANE_TYPE_CURSOR,
 };
 
+static void decon_enable_te_irq(struct decon_context *ctx)
+{
+	unsigned long flags;
+
+	if (ctx->te_irq <= 0)
+		return;
+
+	spin_lock_irqsave(&ctx->te_lock, flags);
+	if (!ctx->te_irq_enabled && !READ_ONCE(ctx->suspended)) {
+		enable_irq(ctx->te_irq);
+		ctx->te_irq_enabled = true;
+	}
+	spin_unlock_irqrestore(&ctx->te_lock, flags);
+}
+
+static void decon_disable_te_irq_nosync(struct decon_context *ctx)
+{
+	unsigned long flags;
+
+	if (ctx->te_irq <= 0)
+		return;
+
+	spin_lock_irqsave(&ctx->te_lock, flags);
+	if (ctx->te_irq_enabled) {
+		disable_irq_nosync(ctx->te_irq);
+		ctx->te_irq_enabled = false;
+	}
+	spin_unlock_irqrestore(&ctx->te_lock, flags);
+}
+
 static void decon_wait_for_vblank(struct decon_context *ctx)
 {
 	if (ctx->suspended)
 		return;
 
 	atomic_set(&ctx->wait_vsync_event, 1);
+	decon_enable_te_irq(ctx);
 
 	/*
 	 * wait for DECON to signal VSYNC interrupt or return after
@@ -263,6 +297,8 @@ static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
 		writel(val, ctx->regs + VIDINTCON0);
 	}
 
+	decon_enable_te_irq(ctx);
+
 	return 0;
 }
 
@@ -285,6 +321,10 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 
 		writel(val, ctx->regs + VIDINTCON0);
 	}
+
+	if (!atomic_read(&ctx->frame_pending) &&
+	    !atomic_read(&ctx->wait_vsync_event))
+		decon_disable_te_irq_nosync(ctx);
 }
 
 static void decon_win_set_pixfmt(struct decon_context *ctx, unsigned int win,
@@ -503,13 +543,6 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	val |= WINCONx_TRIPLE_BUF_MODE;
 	val |= WINCONx_ENWIN;
 	writel(val, ctx->regs + WINCON(win));
-
-	/* Enable DMA channel and unprotect windows */
-	decon_shadow_protect_win(ctx, win, false);
-
-	val = readl(ctx->regs + DECON_UPDATE);
-	val |= DECON_UPDATE_STANDALONE_F;
-	writel(val, ctx->regs + DECON_UPDATE);
 }
 
 static void decon_disable_plane(struct exynos_drm_crtc *crtc,
@@ -538,9 +571,12 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 {
 	struct decon_context *ctx = dev_id;
+	unsigned long flags;
 
-	if (ctx->suspended || !ctx->drm_dev)
+	if (READ_ONCE(ctx->suspended) || !ctx->drm_dev) {
+		decon_disable_te_irq_nosync(ctx);
 		return IRQ_HANDLED;
+	}
 
 	/*
 	 * True hardware VBLANK: Panel physical TE pin asserted at V-Blank.
@@ -575,6 +611,21 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 		       ctx->regs + TRIGCON);
 	}
 
+	/*
+	 * If vblank is disabled, no frame is pending, and no waiter is active,
+	 * gate the 60Hz TE GPIO interrupt on static screen (matching 3.10 DECON LPD).
+	 */
+	spin_lock_irqsave(&ctx->te_lock, flags);
+	if (ctx->te_irq_enabled &&
+	    (READ_ONCE(ctx->suspended) ||
+	     (!test_bit(0, &ctx->irq_flags) &&
+	      !atomic_read(&ctx->frame_pending) &&
+	      !atomic_read(&ctx->wait_vsync_event)))) {
+		disable_irq_nosync(ctx->te_irq);
+		ctx->te_irq_enabled = false;
+	}
+	spin_unlock_irqrestore(&ctx->te_lock, flags);
+
 	return IRQ_HANDLED;
 }
 
@@ -601,6 +652,7 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	if (ctx->i80_if) {
 		if (ctx->te_irq > 0) {
 			atomic_set(&ctx->frame_pending, 1);
+			decon_enable_te_irq(ctx);
 		} else {
 			u32 val = readl(ctx->regs + TRIGCON);
 
@@ -688,7 +740,7 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	decon_init(ctx);
 
 	/* Must clear suspended before re-enabling vblank and committing hardware state */
-	ctx->suspended = false;
+	WRITE_ONCE(ctx->suspended, false);
 
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
@@ -712,6 +764,7 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 				dev_info(ctx->dev, "m86-panel: display unblanked on DPMS enable\n");
 			put_device(&bd->dev);
 		}
+		m86_fts_set_blank(false);
 	}
 }
 
@@ -734,6 +787,7 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	if (ctx->i80_if) {
 		struct backlight_device *bd = backlight_device_get_by_name("m86-panel");
 
+		m86_fts_set_blank(true);
 		if (bd) {
 			int ret_bl = backlight_disable(bd);
 
@@ -745,14 +799,18 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 		}
 	}
 
+	WRITE_ONCE(ctx->suspended, true);
+	atomic_set(&ctx->frame_pending, 0);
+	decon_disable_te_irq_nosync(ctx);
+	if (ctx->te_irq > 0)
+		synchronize_irq(ctx->te_irq);
+
 	pm_runtime_put_sync(ctx->dev);
 
 	if (ctx->bus_qos_active) {
 		dev_pm_qos_update_request(&ctx->bus_qos_req, 0);
 		ctx->cur_bus_qos = 0;
 	}
-
-	ctx->suspended = true;
 }
 
 static const struct exynos_drm_crtc_ops decon_crtc_ops = {
@@ -821,8 +879,10 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 
 		ret = exynos_plane_init(drm_dev, &ctx->planes[i], i,
 					&ctx->configs[i]);
-		if (ret)
+		if (ret) {
+			decon_ctx_remove(ctx);
 			return ret;
+		}
 	}
 
 	exynos_plane = &ctx->planes[DEFAULT_WIN];
@@ -928,6 +988,7 @@ static int decon_probe(struct platform_device *pdev)
 		goto err_iounmap;
 	}
 
+	spin_lock_init(&ctx->te_lock);
 	if (ctx->te_gpio) {
 		ctx->te_irq = gpiod_to_irq(ctx->te_gpio);
 		if (ctx->te_irq > 0) {
@@ -937,6 +998,8 @@ static int decon_probe(struct platform_device *pdev)
 				dev_err(dev, "failed to request te irq: %d\n", ret);
 				ctx->te_irq = 0;
 			} else {
+				ctx->te_irq_enabled = true;
+				decon_disable_te_irq_nosync(ctx);
 				dev_info(dev, "hardware TE interrupt registered (irq %d)\n",
 					 ctx->te_irq);
 			}
@@ -1011,6 +1074,8 @@ static int decon_remove(struct platform_device *pdev)
 {
 	struct decon_context *ctx = dev_get_drvdata(&pdev->dev);
 
+	component_del(&pdev->dev, &decon_component_ops);
+
 	pm_runtime_disable(&pdev->dev);
 
 	if (ctx && ctx->bus_qos_active) {
@@ -1019,8 +1084,6 @@ static int decon_remove(struct platform_device *pdev)
 	}
 
 	iounmap(ctx->regs);
-
-	component_del(&pdev->dev, &decon_component_ops);
 
 	return 0;
 }

@@ -50,6 +50,7 @@ struct m86_coord {
 	struct thermal_zone_device *zone;
 	struct delayed_work thermal_work;
 	bool faulted, registered;
+	struct mutex bus_lock;
 	unsigned int required_bus_qos;
 	struct device *bus_dev;
 	struct dev_pm_qos_request bus_qos_req;
@@ -175,7 +176,7 @@ static int fixed_bus_floor(struct m86_coord *d)
 	    !(sel & BIT(16)) || !(sel & BIT(20)) || clk_get_rate(d->fin) != 24000000)
 		return -EIO;
 	logical_khz = div_u64(24000000ULL * m, (p << s) * 2000);
-	return logical_khz >= d->required_bus_qos ? 0 : -ERANGE;
+	return logical_khz >= READ_ONCE(d->required_bus_qos) ? 0 : -ERANGE;
 }
 
 static int temperature(struct m86_coord *d, int *temp)
@@ -204,8 +205,12 @@ static void fail_closed(struct m86_coord *d, int error)
 	if (d->faulted)
 		return;
 	d->faulted = true;
+	mutex_lock(&d->bus_lock);
 	if (d->bus_qos_active)
 		dev_pm_qos_update_request(&d->bus_qos_req, 1552000);
+	d->cur_bus_qos = 1552000;
+	WRITE_ONCE(d->required_bus_qos, 1552000);
+	mutex_unlock(&d->bus_lock);
 	for (i = 0; i < 2; i++) {
 		int r;
 		mutex_lock(&d->cluster[i].lock);
@@ -258,6 +263,7 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 	unsigned long old_hz;
 	int old_uv;
 	int temp, ret;
+	bool do_fail_closed = false;
 	const char *phase = "fresh thermal/MIF guard";
 	ktime_t started = ktime_get();
 
@@ -271,14 +277,14 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 	}
 	old_hz = c->cur_khz ? (unsigned long)c->cur_khz * 1000UL : clk_get_rate(c->clk);
 	old_uv = c->cur_uv ? c->cur_uv : regulator_get_voltage(c->supply);
-	if (d->faulted) { ret = -EIO; goto out; }
+	if (READ_ONCE(d->faulted)) { ret = -EIO; goto out; }
 	if (!c->cooling_ready) {
 		ret = old_hz == target * 1000UL ? 0 : -EAGAIN;
 		goto out;
 	}
 	ret = temperature(d, &temp);
-	if (ret) { fail_closed(d, ret); goto out; }
-	if (temp >= 105000) { ret = -ERANGE; fail_closed(d, ret); goto out; }
+	if (ret) { do_fail_closed = true; goto out; }
+	if (temp >= 105000) { ret = -ERANGE; do_fail_closed = true; goto out; }
 	/* Check fresh temperature on every target, independent of governor/QoS lag. */
 	if (target > min(c->thermal_cap, cap_for_temp(c, temp))) {
 		ret = -EAGAIN;
@@ -309,8 +315,7 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		if (ret) goto fault;
 	}
 	unsigned int target_bus_qos = c->opp[index].bus_qos;
-	unsigned int other_bus_qos = d->cluster[1 - ci].cur_bus_qos;
-	unsigned int max_bus_qos = max(target_bus_qos, other_bus_qos);
+	unsigned int max_bus_qos;
 
 	if (target * 1000UL < old_hz) {
 		/* Lower clock/readback first; target low-voltage EMA then rail. */
@@ -320,20 +325,27 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		phase = "linear down voltage/EMA";
 		ret = set_voltage_ema(d, ci, c->opp[index].uv, target * 1000UL);
 		if (ret) goto fault;
+		mutex_lock(&d->bus_lock);
 		c->cur_bus_qos = target_bus_qos;
+		max_bus_qos = max(target_bus_qos, d->cluster[1 - ci].cur_bus_qos);
 		if (max_bus_qos < d->cur_bus_qos) {
 			if (d->bus_qos_active)
 				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
 			d->cur_bus_qos = max_bus_qos;
-			d->required_bus_qos = max_bus_qos;
+			WRITE_ONCE(d->required_bus_qos, max_bus_qos);
 		}
+		mutex_unlock(&d->bus_lock);
 	} else if (target * 1000UL > old_hz) {
+		mutex_lock(&d->bus_lock);
+		c->cur_bus_qos = target_bus_qos;
+		max_bus_qos = max(target_bus_qos, d->cluster[1 - ci].cur_bus_qos);
 		if (max_bus_qos > d->cur_bus_qos) {
 			if (d->bus_qos_active)
 				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
 			d->cur_bus_qos = max_bus_qos;
-			d->required_bus_qos = max_bus_qos;
+			WRITE_ONCE(d->required_bus_qos, max_bus_qos);
 		}
+		mutex_unlock(&d->bus_lock);
 		/* Raise rail/readback and EMA at old OPP before clock increase. */
 		phase = "linear up voltage/EMA";
 		ret = set_voltage_ema(d, ci, c->opp[index].uv, old_hz);
@@ -341,20 +353,26 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		phase = "linear up clock";
 		ret = set_rate_checked(c, target);
 		if (ret) goto fault;
-		c->cur_bus_qos = target_bus_qos;
 	} else {
 		ret = 0; /* Known exact clock/rail OPP, no hardware transaction. */
+		mutex_lock(&d->bus_lock);
 		c->cur_bus_qos = target_bus_qos;
+		mutex_unlock(&d->bus_lock);
 	}
 	c->cur_khz = target;
 	c->cur_uv = c->opp[index].uv;
 	goto out;
 fault:
 	dev_err(d->dev, "target fault cluster=%s phase=%s ret=%d\n", ci ? "apollo" : "atlas", phase, ret);
-	fail_closed(d, ret);
+	do_fail_closed = true;
 out:
 	trace_target(d, c, ci, old_hz, old_uv, target, c->opp[index].uv, ret, started);
 	mutex_unlock(&c->lock);
+	if (do_fail_closed) {
+		mutex_lock(&d->lock);
+		fail_closed(d, ret);
+		mutex_unlock(&d->lock);
+	}
 	return ret;
 }
 
@@ -648,6 +666,7 @@ static int m86_probe(struct platform_device *pdev)
 	d->dev = &pdev->dev;
 	d->required_bus_qos = bus_floor;
 	mutex_init(&d->lock);
+	mutex_init(&d->bus_lock);
 	for (i = 0; i < 2; i++)
 		mutex_init(&d->cluster[i].lock);
 	INIT_DELAYED_WORK(&d->thermal_work, monitor);

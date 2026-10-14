@@ -26,8 +26,10 @@ struct m86_g3d_domain_ops {
   * must be zero. void Panfrost power-off is not a success guarantee. */
  int (*check_idle)(void *data);
  int (*validate_mode)(void *data);
- /* Use m86_tmu_gpu_transition to wrap on+restore; no TMU change on off. */
+ /* Use m86_tmu_gpu_transition to wrap on+restore, and m86_tmu_gpu_power_off
+  * to disable TMU2 before cutting BLK_G3D power on off. */
  int (*run_on)(void *data, int (*transition)(void *), void *arg);
+ int (*run_off)(void *data, int (*transition)(void *), void *arg);
  /* Restore PLL/div/mux/gates and EMA, validate exact state, still serialized. */
  int (*restore)(void *data);
  void (*finish)(void *data, bool on);

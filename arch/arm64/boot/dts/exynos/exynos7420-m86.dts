@@ -16,7 +16,9 @@
 
 	aliases {
 		serial0 = &serial_2;
-		i2c8 = &i2c_usb;
+		i2c6 = &hsi2c_6;
+		i2c8 = &hsi2c_8;
+		i2c11 = &hsi2c_11;
 		i2c5 = &i2c_pmic;
 	};
 
@@ -54,66 +56,6 @@
 		vendor-reserved@f9800000 {
 			reg = <0x0 0xf9800000 0x0 0x06800000>;
 			no-map;
-		};
-	};
-
-	/*
-	 * Same pins as HS-I2C8, using GPIO to avoid the unverified HS-I2C
-	 * clock path. Both open-drain lines can be read for clock stretching.
-	 * /init checks chip IDs before touching FUSB302 / TSU6721 registers.
-	 */
-	i2c_usb: i2c-usb {
-		compatible = "i2c-gpio";
-		#address-cells = <1>;
-		#size-cells = <0>;
-		sda-gpios = <&gpd5 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpd5 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-		i2c-gpio,timeout-ms = <100>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&usb_i2c_pins>;
-
-		m86_fusb302: typec-portc@22 {
-			compatible = "fcs,fusb302";
-			reg = <0x22>;
-			interrupt-parent = <&gpa1>;
-			interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
-			pd-on-gpios = <&gpr3 4 GPIO_ACTIVE_HIGH>;
-			pinctrl-names = "default";
-			pinctrl-0 = <&ccd_int>;
-			vbus-supply = <&usb_otg_vbus>;
-
-			connector {
-				compatible = "usb-c-connector";
-				label = "USB-C";
-				power-role = "dual";
-				data-role = "dual";
-				try-power-role = "sink";
-				source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;
-				sink-pdos = <
-					PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
-					PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)
-					PDO_FIXED(12000, 2000, PDO_FIXED_USB_COMM)
-				>;
-				op-sink-microwatt = <24000000>;
-				usb-role-switch = <&m86_dwc3>;
-
-				ports {
-					#address-cells = <1>;
-					#size-cells = <0>;
-
-					port@0 {
-						reg = <0>;
-						usbc_hs: endpoint {
-							remote-endpoint = <&dwc3_ep>;
-						};
-					};
-				};
-			};
-		};
-		m86_muic: muic@25 {
-			compatible = "meizu,m86-tsu6721";
-			reg = <0x25>;
 		};
 	};
 
@@ -181,12 +123,51 @@
 		     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
 };
 
-&pinctrl_bus0 {
-	usb_i2c_pins: usb-i2c-pins {
-		samsung,pins = "gpd5-2", "gpd5-3";
-		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
-		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
-		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+&hsi2c_8 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	m86_fusb302: typec-portc@22 {
+		compatible = "fcs,fusb302";
+		reg = <0x22>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
+		pd-on-gpios = <&gpr3 4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ccd_int>;
+		vbus-supply = <&usb_otg_vbus>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "dual";
+			data-role = "dual";
+			try-power-role = "sink";
+			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;
+			sink-pdos = <
+				PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
+				PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)
+				PDO_FIXED(12000, 2000, PDO_FIXED_USB_COMM)
+			>;
+			op-sink-microwatt = <24000000>;
+			usb-role-switch = <&m86_dwc3>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usbc_hs: endpoint {
+						remote-endpoint = <&dwc3_ep>;
+					};
+				};
+			};
+		};
+	};
+	m86_muic: muic@25 {
+		compatible = "meizu,m86-tsu6721";
+		reg = <0x25>;
 	};
 };
 
@@ -326,36 +307,32 @@
 		clocks = <&clock_peris PCLK_TMU>, <&clock_peris SCLK_TMU>;
 		clock-names = "tmu_apbif", "tmu_sclk";
 	};
+};
 
-	/* HSI2C6 lines confirmed by fixed vendor SoC DTS; secondary charger child. */
-	i2c-gauge {
-		compatible = "i2c-gpio";
-		#address-cells = <1>;
-		#size-cells = <0>;
-		sda-gpios = <&gpj0 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpj0 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-		m86_gauge: gauge@55 {
-			compatible = "meizu,m86-bq27532-readonly";
-			reg = <0x55>;
-		};
-		m86_secondary_charger: charger@6b {
-			compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
-			reg = <0x6b>;
-			interrupt-parent = <&gpa0>;
-			interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
-			enable-gpios = <&gpr3 2 GPIO_ACTIVE_LOW>;
-			linux,skip-reset;
-			ti,charge-current = <2250000>;
-			ti,battery-regulation-voltage = <4352000>;
-			ti,termination-current = <64000>;
-			ti,precharge-current = <128000>;
-			ti,minimum-sys-voltage = <3500000>;
-			ti,boost-voltage = <5000000>;
-			ti,boost-max-current = <500000>;
-			ti,thermal-regulation-threshold = <80>;
-			meizu,secondary-charger;
-		};
+&hsi2c_6 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	m86_gauge: gauge@55 {
+		compatible = "meizu,m86-bq27532-readonly";
+		reg = <0x55>;
+	};
+	m86_secondary_charger: charger@6b {
+		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
+		reg = <0x6b>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+		enable-gpios = <&gpr3 2 GPIO_ACTIVE_LOW>;
+		linux,skip-reset;
+		ti,charge-current = <2250000>;
+		ti,battery-regulation-voltage = <4352000>;
+		ti,termination-current = <64000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5000000>;
+		ti,boost-max-current = <500000>;
+		ti,thermal-regulation-threshold = <80>;
+		meizu,secondary-charger;
 	};
 };
 
@@ -875,16 +852,9 @@
   meizu,max-validated-frequency = <700000000>;
   meizu,validated-buck6-normal-on;
   meizu,gpu-normal-on-takeover;
-  /* r63 explicit external-domain experiment; provider is registered by
-   * coordinator glue, not generic OF population or the inherited pd_g3d. */
-  meizu,experimental-g3d-domain;
-  meizu,g3d-domain = <&m86_g3d_experiment>;
+  /* Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
+   * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72). */
   meizu,thermal-monitor = <&m86_tmu_monitor>;
-  /* meizu,validated-buck6-voltage requires r39 true59/C0 and NEW52 sync capture.
-   * Active mode also needs real INT clock, thermal-monitor phandle and
-   * for>=420MHz an Apollo clock/cpufreq policy.
-   * Do not enable until voltage transport and thermal/bus dependencies reviewed.
-   */
   m86_g3d_experiment: g3d-domain {
    #power-domain-cells = <0>;
   };
@@ -906,8 +876,6 @@
  };
 };
 &gpu {
- power-domains = <&m86_g3d_experiment>;
- meizu,external-domain-manual-start;
  clocks = <&m86_gpu_dvfs>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
  clock-names = "core", "bus";
  mali-supply = <&m86_gpu_buck6_observed>;
@@ -952,39 +920,31 @@
 &cpu_apollo2 { next-level-cache = <&apollo_l2>; };
 &cpu_apollo3 { next-level-cache = <&apollo_l2>; };
 
-/* Same SDA/SCL order as the vendor HS-I2C11 pins (gpb0-3/gpb0-2). */
-/ {
-	i2c_charger: i2c-charger {
-		compatible = "i2c-gpio";
-		#address-cells = <1>;
-		#size-cells = <0>;
-		sda-gpios = <&gpb0 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpb0 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-		i2c-gpio,timeout-ms = <100>;
+&hsi2c_11 {
+	status = "okay";
+	clock-frequency = <100000>;
 
-		m86_primary_charger: charger@6b {
-			compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
-			reg = <0x6b>;
-			interrupt-parent = <&gpa0>;
-			interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
-			enable-gpios = <&gpr3 0 GPIO_ACTIVE_LOW>;
-			linux,skip-reset;
-			ti,charge-current = <2250000>;
-			ti,battery-regulation-voltage = <4352000>;
-			ti,termination-current = <64000>;
-			ti,precharge-current = <128000>;
-			ti,minimum-sys-voltage = <3500000>;
-			ti,boost-voltage = <5000000>;
-			ti,boost-max-current = <1500000>;
-			ti,thermal-regulation-threshold = <80>;
-			meizu,battery = <&m86_gauge>;
-			meizu,usb-source = <&m86_fusb302>;
-			linux,secondary-charger-name = "m86-charger-aux";
+	m86_primary_charger: charger@6b {
+		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
+		reg = <0x6b>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
+		enable-gpios = <&gpr3 0 GPIO_ACTIVE_LOW>;
+		linux,skip-reset;
+		ti,charge-current = <2250000>;
+		ti,battery-regulation-voltage = <4352000>;
+		ti,termination-current = <64000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5000000>;
+		ti,boost-max-current = <1500000>;
+		ti,thermal-regulation-threshold = <80>;
+		meizu,battery = <&m86_gauge>;
+		meizu,usb-source = <&m86_fusb302>;
+		linux,secondary-charger-name = "m86-charger-aux";
 
-			usb_otg_vbus: usb-otg-vbus {
-				regulator-name = "usb_otg_vbus";
-			};
+		usb_otg_vbus: usb-otg-vbus {
+			regulator-name = "usb_otg_vbus";
 		};
 	};
 };
