@@ -9,6 +9,7 @@
 #include "exynos7.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/ti-drv260x.h>
+#include <dt-bindings/leds/common.h>
 #include <dt-bindings/usb/pd.h>
 
 / {
@@ -1194,6 +1195,20 @@
 		samsung,pin-pud = <3>;
 		samsung,pin-drv = <0>;
 	};
+
+	lm3644_i2c_pins: lm3644-i2c-pins {
+		samsung,pins = "gpc2-4", "gpc2-5";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	lm3644_ctrl_pins: lm3644-ctrl-pins {
+		samsung,pins = "gpc0-0", "gpc0-3", "gpc0-4";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
 };
 
 / {
@@ -1217,6 +1232,57 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&vl6180_en_pin &vl6180_irq_pin>;
 			st,disable-als;
+		};
+	};
+
+	i2c-lp5562 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpf1 6 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpf1 7 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lp5562_i2c_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led-controller@30 {
+			compatible = "ti,lp5562";
+			reg = <0x30>;
+			clock-mode = /bits/ 8 <1>;
+			enable-gpios = <&gpf5 4 GPIO_ACTIVE_HIGH>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&lp5562_en_pin>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@0 {
+				reg = <0>;
+				chan-name = "m86:white:breath";
+				color = <LED_COLOR_ID_WHITE>;
+				led-cur = /bits/ 8 <80>;
+				max-cur = /bits/ 8 <80>;
+				linux,default-trigger = "heartbeat";
+			};
+		};
+	};
+
+	i2c-lm3644 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpc2 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpc2 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lm3644_i2c_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		flash-led-controller@63 {
+			compatible = "ti,leds-lm3644", "ti,lm3644";
+			reg = <0x63>;
+			hwen-gpios = <&gpc0 4 GPIO_ACTIVE_HIGH>;
+			strobe-gpios = <&gpc0 0 GPIO_ACTIVE_HIGH>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&lm3644_ctrl_pins>;
 		};
 	};
 };
@@ -1247,6 +1313,20 @@
 
 	motor_en_pin: motor-en-pin {
 		samsung,pins = "gpf1-1";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	lp5562_i2c_pins: lp5562-i2c-pins {
+		samsung,pins = "gpf1-6", "gpf1-7";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	lp5562_en_pin: lp5562-en-pin {
+		samsung,pins = "gpf5-4";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
 		samsung,pin-drv = <0>;
