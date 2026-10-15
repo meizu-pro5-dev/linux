@@ -490,7 +490,7 @@ static const struct of_device_id pro5_match[] = {
 	{ .compatible = "samsung,exynos7420-pro5-pcie-enumeration" },
 	{ }
 };
-/* No MODULE_DEVICE_TABLE alias: load this diagnostic driver only by insmod. */
+MODULE_DEVICE_TABLE(of, pro5_match);
 static struct platform_driver pro5_driver = {
 	.probe = pro5_probe,
 	.remove = pro5_remove,
