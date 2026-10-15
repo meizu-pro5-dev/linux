@@ -78,6 +78,7 @@ struct lm3644_chip {
 	struct mutex lock;
 	struct gpio_desc *hwen_gpio;
 	struct gpio_desc *strobe_gpio;
+	bool hw_enabled;
 	u8 torch_en_mask;
 	u8 flash_en_mask;
 	struct lm3644_led leds[LM3644_ID_MAX];
@@ -88,6 +89,67 @@ static const struct regmap_config lm3644_regmap_cfg = {
 	.val_bits = 8,
 	.max_register = 0x0F,
 };
+
+static int lm3644_hw_init(struct lm3644_chip *chip)
+{
+	int ret;
+
+	/* Enable UVLO (under-voltage lockout) */
+	ret = regmap_update_bits(chip->regmap, LM3644_REG_IVFM,
+				 LM3644_UVLO_EN, LM3644_UVLO_EN);
+	if (ret)
+		return ret;
+
+	/* Set flash timeout to maximum */
+	ret = regmap_update_bits(chip->regmap, LM3644_REG_FLASH_TOUT,
+				 0x0F, LM3644_FLASH_TOUT_MAX);
+	if (ret)
+		return ret;
+
+	/* Enable TORCH_NTC and STROBE pins, disable TX pin, standby mode */
+	ret = regmap_write(chip->regmap, LM3644_REG_ENABLE,
+			   LM3644_TORCH_NTC_EN | LM3644_STROBE_EN | LM3644_MODE_STANDBY);
+	if (ret)
+		return ret;
+
+	/* Initialize brightness registers to safe baseline */
+	regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR, 0x20);
+	regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR, 0x20);
+	regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR, 0x40);
+	regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR, 0x40);
+
+	return 0;
+}
+
+static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
+{
+	int ret;
+
+	if (on) {
+		if (chip->hw_enabled)
+			return 0;
+		if (chip->hwen_gpio) {
+			gpiod_set_value_cansleep(chip->hwen_gpio, 1);
+			usleep_range(1500, 2500);
+		}
+		ret = lm3644_hw_init(chip);
+		if (ret) {
+			if (chip->hwen_gpio)
+				gpiod_set_value_cansleep(chip->hwen_gpio, 0);
+			return ret;
+		}
+		chip->hw_enabled = true;
+	} else {
+		if (!chip->hw_enabled)
+			return 0;
+		if (chip->hwen_gpio) {
+			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
+			chip->hw_enabled = false;
+		}
+	}
+
+	return 0;
+}
 
 static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 					  enum led_brightness brightness)
@@ -100,6 +162,16 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 	mutex_lock(&chip->lock);
 
 	led_bit = (led->led_index == 0) ? LM3644_LED0_EN : LM3644_LED1_EN;
+
+	if (brightness > 0) {
+		ret = lm3644_set_hw_power(chip, true);
+		if (ret)
+			goto out;
+	} else if (!chip->hw_enabled) {
+		chip->flash_en_mask &= ~led_bit;
+		chip->torch_en_mask &= ~led_bit;
+		goto out;
+	}
 
 	if (led->is_flash) {
 		reg_br = (led->led_index == 0) ?
@@ -127,6 +199,7 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 					ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 								 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
 								 LM3644_MODE_STANDBY);
+					lm3644_set_hw_power(chip, false);
 				}
 			} else {
 				ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
@@ -160,6 +233,7 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 					ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 								 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
 								 LM3644_MODE_STANDBY);
+					lm3644_set_hw_power(chip, false);
 				}
 			} else {
 				ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
@@ -178,12 +252,14 @@ static ssize_t flags_show(struct device *dev, struct device_attribute *attr, cha
 {
 	struct lm3644_chip *chip = dev_get_drvdata(dev);
 	unsigned int flag0 = 0, flag1 = 0;
-	int ret;
+	int ret = 0;
 
 	mutex_lock(&chip->lock);
-	ret = regmap_read(chip->regmap, LM3644_REG_FLAG0, &flag0);
-	if (!ret)
-		ret = regmap_read(chip->regmap, LM3644_REG_FLAG1, &flag1);
+	if (chip->hw_enabled) {
+		ret = regmap_read(chip->regmap, LM3644_REG_FLAG0, &flag0);
+		if (!ret)
+			ret = regmap_read(chip->regmap, LM3644_REG_FLAG1, &flag1);
+	}
 	mutex_unlock(&chip->lock);
 
 	if (ret)
@@ -198,37 +274,6 @@ static struct attribute *lm3644_attrs[] = {
 	NULL
 };
 ATTRIBUTE_GROUPS(lm3644);
-
-static int lm3644_hw_init(struct lm3644_chip *chip)
-{
-	int ret;
-
-	/* Enable UVLO (under-voltage lockout) */
-	ret = regmap_update_bits(chip->regmap, LM3644_REG_IVFM,
-				 LM3644_UVLO_EN, LM3644_UVLO_EN);
-	if (ret)
-		return ret;
-
-	/* Set flash timeout to maximum */
-	ret = regmap_update_bits(chip->regmap, LM3644_REG_FLASH_TOUT,
-				 0x0F, LM3644_FLASH_TOUT_MAX);
-	if (ret)
-		return ret;
-
-	/* Enable TORCH_NTC and STROBE pins, disable TX pin, standby mode */
-	ret = regmap_write(chip->regmap, LM3644_REG_ENABLE,
-			   LM3644_TORCH_NTC_EN | LM3644_STROBE_EN | LM3644_MODE_STANDBY);
-	if (ret)
-		return ret;
-
-	/* Initialize brightness registers to safe baseline */
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR, 0x20);
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR, 0x20);
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR, 0x40);
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR, 0x40);
-
-	return 0;
-}
 
 static const struct {
 	const char *name;
@@ -310,13 +355,25 @@ static int lm3644_probe(struct i2c_client *client)
 	ret = regmap_read(chip->regmap, LM3644_REG_DEV_ID, &dev_id);
 	if (ret) {
 		dev_err(dev, "Failed to read LM3644 device ID: %d\n", ret);
+		if (chip->hwen_gpio)
+			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
 		return ret;
 	}
 
 	ret = lm3644_hw_init(chip);
 	if (ret) {
 		dev_err(dev, "Failed to initialize LM3644 hardware: %d\n", ret);
+		if (chip->hwen_gpio)
+			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
 		return ret;
+	}
+
+	/* Keep hardware disabled when all LEDs are off (matching 3.10 vendor driver) */
+	if (chip->hwen_gpio) {
+		gpiod_set_value_cansleep(chip->hwen_gpio, 0);
+		chip->hw_enabled = false;
+	} else {
+		chip->hw_enabled = true;
 	}
 
 	dev_info(dev, "TI LM3644 Flash/Torch driver probed (dev_id=0x%02x)\n", dev_id);
@@ -352,11 +409,11 @@ static void lm3644_remove(struct i2c_client *client)
 	struct lm3644_chip *chip = i2c_get_clientdata(client);
 
 	mutex_lock(&chip->lock);
-	regmap_write(chip->regmap, LM3644_REG_ENABLE, LM3644_MODE_STANDBY);
+	if (chip->hw_enabled) {
+		regmap_write(chip->regmap, LM3644_REG_ENABLE, LM3644_MODE_STANDBY);
+		lm3644_set_hw_power(chip, false);
+	}
 	mutex_unlock(&chip->lock);
-
-	if (chip->hwen_gpio)
-		gpiod_set_value_cansleep(chip->hwen_gpio, 0);
 }
 
 static const struct of_device_id lm3644_of_match[] = {

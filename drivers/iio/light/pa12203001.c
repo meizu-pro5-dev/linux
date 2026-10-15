@@ -169,6 +169,7 @@ static inline int pa12203001_als_enable(struct pa12203001_data *data, u8 enable)
 
 static inline int pa12203001_px_enable(struct pa12203001_data *data, u8 enable)
 {
+	bool was_enabled = data->px_enabled;
 	int ret;
 
 	ret = regmap_update_bits(data->map, PA12203001_REG_CFG0,
@@ -177,6 +178,9 @@ static inline int pa12203001_px_enable(struct pa12203001_data *data, u8 enable)
 		return ret;
 
 	data->px_enabled = !!enable;
+	if (!was_enabled && data->px_enabled &&
+	    device_is_compatible(&data->client->dev, "txc,pa224"))
+		msleep(50);
 
 	return 0;
 }
@@ -187,30 +191,32 @@ static int pa12203001_set_power_state(struct pa12203001_data *data, bool on,
 #ifdef CONFIG_PM
 	int ret;
 
-	if (device_is_compatible(&data->client->dev, "txc,pa224"))
-		return 0;
-
 	if (on && (mask & PA12203001_ALS_EN_MASK)) {
 		mutex_lock(&data->lock);
-		if (data->px_enabled) {
-			ret = pa12203001_als_enable(data,
-						    PA12203001_ALS_EN_MASK);
-			if (ret < 0)
-				goto err;
-		} else {
-			data->als_needs_enable = true;
+		if (!data->als_enabled) {
+			if (data->px_enabled) {
+				ret = pa12203001_als_enable(data,
+							    PA12203001_ALS_EN_MASK);
+				if (ret < 0)
+					goto err;
+			} else {
+				data->als_needs_enable = true;
+			}
 		}
 		mutex_unlock(&data->lock);
 	}
 
 	if (on && (mask & PA12203001_PX_EN_MASK)) {
 		mutex_lock(&data->lock);
-		if (data->als_enabled) {
-			ret = pa12203001_px_enable(data, PA12203001_PX_EN_MASK);
-			if (ret < 0)
-				goto err;
-		} else {
-			data->px_needs_enable = true;
+		if (!data->px_enabled) {
+			if (data->als_enabled) {
+				ret = pa12203001_px_enable(data,
+							   PA12203001_PX_EN_MASK);
+				if (ret < 0)
+					goto err;
+			} else {
+				data->px_needs_enable = true;
+			}
 		}
 		mutex_unlock(&data->lock);
 	}
@@ -373,7 +379,11 @@ static int pa12203001_init(struct iio_dev *indio_dev)
 				pofs = min_t(unsigned int, xtalk - 30, 0xf0);
 			regmap_write(data->map, PA12203001_REG_POFS, pofs);
 		}
-		data->px_enabled = true;
+		/* Turn off proximity sensor after crosstalk calibration */
+		ret = regmap_write(data->map, PA12203001_REG_CFG0, 0x00);
+		if (ret < 0)
+			return ret;
+		data->px_enabled = false;
 		return 0;
 	}
 
@@ -391,15 +401,14 @@ static int pa12203001_power_chip(struct iio_dev *indio_dev, u8 state)
 	struct pa12203001_data *data = iio_priv(indio_dev);
 	int ret;
 
-	if (device_is_compatible(&data->client->dev, "txc,pa224"))
-		return 0;
-
 	mutex_lock(&data->lock);
-	ret = pa12203001_als_enable(data, state);
-	if (ret < 0)
-		goto out;
+	if (!device_is_compatible(&data->client->dev, "txc,pa224")) {
+		ret = pa12203001_als_enable(data, state);
+		if (ret < 0)
+			goto out;
+	}
 
-	ret = pa12203001_px_enable(data, state);
+	ret = pa12203001_px_enable(data, state & PA12203001_PX_EN_MASK);
 
 out:
 	mutex_unlock(&data->lock);
@@ -455,11 +464,13 @@ static int pa12203001_probe(struct i2c_client *client)
 		ret = pa12203001_power_chip(indio_dev, PA12203001_CHIP_ENABLE);
 		if (ret < 0)
 			return ret;
-	}
 
-	ret = pm_runtime_set_active(&client->dev);
-	if (ret < 0)
-		goto out_err;
+		ret = pm_runtime_set_active(&client->dev);
+		if (ret < 0)
+			goto out_err;
+	} else {
+		pm_runtime_set_suspended(&client->dev);
+	}
 
 	pm_runtime_enable(&client->dev);
 	pm_runtime_set_autosuspend_delay(&client->dev,
@@ -498,9 +509,6 @@ static int pa12203001_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
 
-	if (device_is_compatible(dev, "txc,pa224"))
-		return 0;
-
 	return pa12203001_power_chip(indio_dev, PA12203001_CHIP_DISABLE);
 }
 #endif
@@ -509,6 +517,9 @@ static int pa12203001_suspend(struct device *dev)
 static int pa12203001_resume(struct device *dev)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
+
+	if (pm_runtime_status_suspended(dev))
+		return 0;
 
 	return pa12203001_power_chip(indio_dev, PA12203001_CHIP_ENABLE);
 }
