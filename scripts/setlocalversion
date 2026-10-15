@@ -54,6 +54,15 @@ scm_version()
 	fi
 
 	if ! head=$(git rev-parse --verify HEAD 2>/dev/null); then
+		if [ -n "${M86_SCMVERSION:-}" ]; then
+			if $short; then
+				echo "+"
+			elif $no_dirty; then
+				printf '%s' "${M86_SCMVERSION%-dirty}"
+			else
+				printf '%s' "${M86_SCMVERSION}"
+			fi
+		fi
 		return
 	fi
 
