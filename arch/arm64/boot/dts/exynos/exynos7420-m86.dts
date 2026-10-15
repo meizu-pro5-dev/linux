@@ -8,6 +8,7 @@
 
 #include "exynos7.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/ti-drv260x.h>
 #include <dt-bindings/usb/pd.h>
 
 / {
@@ -17,6 +18,7 @@
 	aliases {
 		serial0 = &serial_2;
 		serial4 = &serial_4;
+		i2c2 = &hsi2c_2;
 		i2c6 = &hsi2c_6;
 		i2c8 = &hsi2c_8;
 		i2c10 = &hsi2c_10;
@@ -59,6 +61,14 @@
 			reg = <0x0 0xf9800000 0x0 0x06800000>;
 			no-map;
 		};
+	};
+
+	reg_vsys: regulator-vsys {
+		compatible = "regulator-fixed";
+		regulator-name = "vsys";
+		regulator-min-microvolt = <3800000>;
+		regulator-max-microvolt = <3800000>;
+		regulator-always-on;
 	};
 
 	/*
@@ -1234,6 +1244,13 @@
 		samsung,pin-pud = <1>;
 		samsung,pin-drv = <0>;
 	};
+
+	motor_en_pin: motor-en-pin {
+		samsung,pins = "gpf1-1";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
 };
 
 &pinctrl_fsys1 {
@@ -1266,5 +1283,23 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&cwmcu_irq_pin &cwmcu_wkup_pin &cwmcu_in_pins &cwmcu_ctrl_pins>;
 		wakeup-source;
+	};
+};
+
+&hsi2c_2 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	haptics@5a {
+		compatible = "ti,drv2605";
+		reg = <0x5a>;
+		vbat-supply = <&reg_vsys>;
+		enable-gpios = <&gpf1 1 GPIO_ACTIVE_HIGH>;
+		mode = <DRV260X_LRA_NO_CAL_MODE>;
+		library-sel = <DRV260X_LIB_LRA>;
+		vib-rated-mv = <1757>;
+		vib-overdrive-mv = <2900>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&motor_en_pin>;
 	};
 };
