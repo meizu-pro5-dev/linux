@@ -14,10 +14,13 @@
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 
 #define PA12203001_DRIVER_NAME	"pa12203001"
 
@@ -31,6 +34,9 @@
 
 #define PA12203001_REG_POFS		0x10
 #define PA12203001_REG_PSET		0x11
+#define PA224_REG_CFG4			0x12
+#define PA224_REG_CHIP_ID		0x7f
+#define PA224_CHIP_ID_VAL		0x11
 
 #define PA12203001_ALS_EN_MASK		BIT(0)
 #define PA12203001_PX_EN_MASK		BIT(1)
@@ -84,6 +90,19 @@ static const struct {
 	{PA12203001_REG_PSET, PA12203001_PSCAN},
 };
 
+static const struct {
+	u8 reg;
+	u8 val;
+} pa224_regvals[] = {
+	{PA12203001_REG_CFG1, 0x6c},
+	{PA12203001_REG_CFG2, 0x04},
+	{PA12203001_REG_CFG3, 0x08},
+	{PA12203001_REG_POFS, 0x00},
+	{PA12203001_REG_PSET, 0x82},
+	{PA224_REG_CFG4,      0x0c},
+	{PA12203001_REG_CFG0, 0x02},
+};
+
 static IIO_CONST_ATTR(in_illuminance_scale_available,
 		      "0.007629 0.061036 0.106813 0.473029");
 
@@ -108,9 +127,17 @@ static const struct iio_chan_spec pa12203001_channels[] = {
 	}
 };
 
+static const struct iio_chan_spec pa224_channels[] = {
+	{
+		.type = IIO_PROXIMITY,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+	}
+};
+
 static const struct regmap_range pa12203001_volatile_regs_ranges[] = {
 	regmap_reg_range(PA12203001_REG_ADL, PA12203001_REG_ADL + 1),
 	regmap_reg_range(PA12203001_REG_PDH, PA12203001_REG_PDH),
+	regmap_reg_range(PA224_REG_CHIP_ID, PA224_REG_CHIP_ID),
 };
 
 static const struct regmap_access_table pa12203001_volatile_regs = {
@@ -121,7 +148,7 @@ static const struct regmap_access_table pa12203001_volatile_regs = {
 static const struct regmap_config pa12203001_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = PA12203001_REG_PSET,
+	.max_register = PA224_REG_CHIP_ID,
 	.cache_type = REGCACHE_RBTREE,
 	.volatile_table = &pa12203001_volatile_regs,
 };
@@ -159,6 +186,9 @@ static int pa12203001_set_power_state(struct pa12203001_data *data, bool on,
 {
 #ifdef CONFIG_PM
 	int ret;
+
+	if (device_is_compatible(&data->client->dev, "txc,pa224"))
+		return 0;
 
 	if (on && (mask & PA12203001_ALS_EN_MASK)) {
 		mutex_lock(&data->lock);
@@ -307,10 +337,45 @@ static const struct iio_info pa12203001_info = {
 	.attrs = &pa12203001_attr_group,
 };
 
+static const struct iio_info pa224_info = {
+	.read_raw = pa12203001_read_raw,
+	.write_raw = pa12203001_write_raw,
+};
+
 static int pa12203001_init(struct iio_dev *indio_dev)
 {
 	struct pa12203001_data *data = iio_priv(indio_dev);
+	struct i2c_client *client = data->client;
 	int i, ret;
+
+	if (device_is_compatible(&client->dev, "txc,pa224")) {
+		unsigned int chip_id = 0;
+
+		ret = regmap_read(data->map, PA224_REG_CHIP_ID, &chip_id);
+		if (ret < 0) {
+			dev_err(&client->dev, "failed to read chip ID: %d\n", ret);
+			return ret;
+		}
+		dev_info(&client->dev, "TXC PA224 chip ID: 0x%02x\n", chip_id);
+
+		for (i = 0; i < ARRAY_SIZE(pa224_regvals); i++) {
+			ret = regmap_write(data->map, pa224_regvals[i].reg,
+					   pa224_regvals[i].val);
+			if (ret < 0)
+				return ret;
+		}
+		msleep(50);
+		{
+			unsigned int xtalk = 0, pofs = 0x06;
+
+			if (regmap_read(data->map, PA12203001_REG_PDH, &xtalk) == 0 &&
+			    xtalk > 30)
+				pofs = min_t(unsigned int, xtalk - 30, 0xf0);
+			regmap_write(data->map, PA12203001_REG_POFS, pofs);
+		}
+		data->px_enabled = true;
+		return 0;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(regvals); i++) {
 		ret = regmap_write(data->map, regvals[i].reg, regvals[i].val);
@@ -325,6 +390,9 @@ static int pa12203001_power_chip(struct iio_dev *indio_dev, u8 state)
 {
 	struct pa12203001_data *data = iio_priv(indio_dev);
 	int ret;
+
+	if (device_is_compatible(&data->client->dev, "txc,pa224"))
+		return 0;
 
 	mutex_lock(&data->lock);
 	ret = pa12203001_als_enable(data, state);
@@ -357,21 +425,37 @@ static int pa12203001_probe(struct i2c_client *client)
 	if (IS_ERR(data->map))
 		return PTR_ERR(data->map);
 
+	ret = devm_regulator_get_enable_optional(&client->dev, "vdd");
+	if (ret && ret != -ENODEV)
+		return ret;
+
+	ret = devm_regulator_get_enable_optional(&client->dev, "vdd-led");
+	if (ret && ret != -ENODEV)
+		return ret;
+
 	mutex_init(&data->lock);
 
-	indio_dev->info = &pa12203001_info;
+	if (device_is_compatible(&client->dev, "txc,pa224")) {
+		indio_dev->info = &pa224_info;
+		indio_dev->channels = pa224_channels;
+		indio_dev->num_channels = ARRAY_SIZE(pa224_channels);
+	} else {
+		indio_dev->info = &pa12203001_info;
+		indio_dev->channels = pa12203001_channels;
+		indio_dev->num_channels = ARRAY_SIZE(pa12203001_channels);
+	}
 	indio_dev->name = PA12203001_DRIVER_NAME;
-	indio_dev->channels = pa12203001_channels;
-	indio_dev->num_channels = ARRAY_SIZE(pa12203001_channels);
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	ret = pa12203001_init(indio_dev);
 	if (ret < 0)
 		return ret;
 
-	ret = pa12203001_power_chip(indio_dev, PA12203001_CHIP_ENABLE);
-	if (ret < 0)
-		return ret;
+	if (!device_is_compatible(&client->dev, "txc,pa224")) {
+		ret = pa12203001_power_chip(indio_dev, PA12203001_CHIP_ENABLE);
+		if (ret < 0)
+			return ret;
+	}
 
 	ret = pm_runtime_set_active(&client->dev);
 	if (ret < 0)
@@ -414,6 +498,9 @@ static int pa12203001_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(to_i2c_client(dev));
 
+	if (device_is_compatible(dev, "txc,pa224"))
+		return 0;
+
 	return pa12203001_power_chip(indio_dev, PA12203001_CHIP_DISABLE);
 }
 #endif
@@ -454,6 +541,13 @@ static const struct dev_pm_ops pa12203001_pm_ops = {
 	SET_RUNTIME_PM_OPS(pa12203001_suspend, pa12203001_runtime_resume, NULL)
 };
 
+static const struct of_device_id pa12203001_of_match[] = {
+	{ .compatible = "txc,pa12203001" },
+	{ .compatible = "txc,pa224" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, pa12203001_of_match);
+
 static const struct acpi_device_id pa12203001_acpi_match[] = {
 	{ "TXCPA122", 0 },
 	{}
@@ -462,8 +556,9 @@ static const struct acpi_device_id pa12203001_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, pa12203001_acpi_match);
 
 static const struct i2c_device_id pa12203001_id[] = {
-		{ "txcpa122", 0 },
-		{}
+	{ "txcpa122", 0 },
+	{ "pa224", 0 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, pa12203001_id);
@@ -472,12 +567,12 @@ static struct i2c_driver pa12203001_driver = {
 	.driver = {
 		.name = PA12203001_DRIVER_NAME,
 		.pm = &pa12203001_pm_ops,
+		.of_match_table = pa12203001_of_match,
 		.acpi_match_table = ACPI_PTR(pa12203001_acpi_match),
 	},
 	.probe = pa12203001_probe,
 	.remove = pa12203001_remove,
 	.id_table = pa12203001_id,
-
 };
 module_i2c_driver(pa12203001_driver);
 

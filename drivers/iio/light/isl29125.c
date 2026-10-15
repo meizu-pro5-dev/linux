@@ -14,6 +14,8 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
+#include <linux/mod_devicetable.h>
+#include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -29,6 +31,7 @@
 #define ISL29125_CONF3 0x03
 #define ISL29125_STATUS 0x08
 #define ISL29125_GREEN_DATA 0x09
+#define ISL29125_GREEN_DATA_REG ISL29125_GREEN_DATA
 #define ISL29125_RED_DATA 0x0b
 #define ISL29125_BLUE_DATA 0x0d
 
@@ -51,6 +54,7 @@
 struct isl29125_data {
 	struct i2c_client *client;
 	u8 conf1;
+	u32 lux_coef;
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		u16 chans[3];
@@ -77,6 +81,13 @@ static const struct iio_chan_spec isl29125_channels[] = {
 	ISL29125_CHANNEL(GREEN, 0),
 	ISL29125_CHANNEL(RED, 1),
 	ISL29125_CHANNEL(BLUE, 2),
+	{
+		.type = IIO_LIGHT,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
+				      BIT(IIO_CHAN_INFO_PROCESSED) |
+				      BIT(IIO_CHAN_INFO_SCALE),
+		.scan_index = -1,
+	},
 	IIO_CHAN_SOFT_TIMESTAMP(3),
 };
 
@@ -131,16 +142,35 @@ static int isl29125_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
+	case IIO_CHAN_INFO_PROCESSED:
 		ret = iio_device_claim_direct_mode(indio_dev);
 		if (ret)
 			return ret;
-		ret = isl29125_read_data(data, chan->scan_index);
+		if (chan->type == IIO_LIGHT)
+			ret = isl29125_read_data(data, 0);
+		else
+			ret = isl29125_read_data(data, chan->scan_index);
 		iio_device_release_direct_mode(indio_dev);
 		if (ret < 0)
 			return ret;
-		*val = ret;
+		if (mask == IIO_CHAN_INFO_PROCESSED) {
+			u32 coef = (data->conf1 & ISL29125_MODE_RANGE) ?
+				data->lux_coef :
+				((u64)data->lux_coef * 615) / 16399;
+			*val = ((u64)ret * coef) / 2560;
+		} else {
+			*val = ret;
+		}
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
+		if (chan->type == IIO_LIGHT) {
+			u32 coef = (data->conf1 & ISL29125_MODE_RANGE) ?
+				data->lux_coef :
+				((u64)data->lux_coef * 615) / 16399;
+			*val = coef / 2560;
+			*val2 = ((u64)(coef % 2560) * 1000000) / 2560;
+			return IIO_VAL_INT_PLUS_MICRO;
+		}
 		*val = 0;
 		if (data->conf1 & ISL29125_MODE_RANGE)
 			*val2 = ISL29125_SENSING_RANGE_1; /*10k lux full range*/
@@ -261,6 +291,13 @@ static int isl29125_probe(struct i2c_client *client)
 	indio_dev->num_channels = ARRAY_SIZE(isl29125_channels);
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
+	if (device_property_read_u32(&client->dev, "meizu,lux-coef", &data->lux_coef))
+		data->lux_coef = 16399; /* PRO 5 default (BLACK_HIGH_LUX_COEF) */
+
+	ret = devm_regulator_get_enable_optional(&client->dev, "vdd");
+	if (ret && ret != -ENODEV)
+		return ret;
+
 	ret = i2c_smbus_read_byte_data(data->client, ISL29125_DEVICE_ID);
 	if (ret < 0)
 		return ret;
@@ -326,6 +363,12 @@ static int isl29125_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(isl29125_pm_ops, isl29125_suspend,
 				isl29125_resume);
 
+static const struct of_device_id isl29125_of_match[] = {
+	{ .compatible = "intersil,isl29125" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, isl29125_of_match);
+
 static const struct i2c_device_id isl29125_id[] = {
 	{ "isl29125", 0 },
 	{ }
@@ -335,6 +378,7 @@ MODULE_DEVICE_TABLE(i2c, isl29125_id);
 static struct i2c_driver isl29125_driver = {
 	.driver = {
 		.name	= ISL29125_DRV_NAME,
+		.of_match_table = isl29125_of_match,
 		.pm	= pm_sleep_ptr(&isl29125_pm_ops),
 	},
 	.probe		= isl29125_probe,

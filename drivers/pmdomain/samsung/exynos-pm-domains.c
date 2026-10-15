@@ -756,8 +756,8 @@ static void __init exynos7420_disable_unused_plls(void)
 }
 
 static const struct exynos7420_reg_bits exynos7420_unused_periph_clks[] __initconst = {
-	/* CMU_PERIC0 (0x13610000): unused hsi2c0/9/10, uart0, adcif, pwm */
-	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) | BIT(13) | BIT(12) | BIT(8) },
+	/* CMU_PERIC0 (0x13610000): unused hsi2c9, uart0, adcif, pwm (hsi2c0/10 active) */
+	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) | BIT(12) },
 	{ 0x13610a00, BIT(21) | BIT(16) },
 	/* CMU_PERIC1 (0x14c80000): unused hsi2c2/3, uart1/3, spi0/1/2/4, pcm1, spdif */
 	{ 0x14c80900, BIT(19) | BIT(18) | BIT(16) | BIT(14) | BIT(13) | BIT(12) |
