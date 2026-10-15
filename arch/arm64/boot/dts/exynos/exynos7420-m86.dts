@@ -19,6 +19,7 @@
 		serial4 = &serial_4;
 		i2c6 = &hsi2c_6;
 		i2c8 = &hsi2c_8;
+		i2c10 = &hsi2c_10;
 		i2c11 = &hsi2c_11;
 		i2c5 = &i2c_pmic;
 	};
@@ -259,6 +260,14 @@
 			debounce-interval = <10>;
 			wakeup-source;
 		};
+		hall {
+			label = "gpio-keys: hall";
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			gpios = <&gpa3 7 GPIO_ACTIVE_LOW>;
+			debounce-interval = <100>;
+			wakeup-source;
+		};
 	};
 };
 
@@ -274,9 +283,21 @@
 		samsung,pin-pud = <0>;
 	};
 	m86_keys_pins: m86-keys-pins {
-		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2";
+		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2", "gpa3-7";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <0>;
+	};
+	als_irq_pins: als-irq-pins {
+		samsung,pins = "gpa2-5";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+	ps_irq_pins: ps-irq-pins {
+		samsung,pins = "gpa3-4";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
 	};
 };
 
@@ -358,6 +379,13 @@
 			regulator-boot-on;
 			regulator-always-on;
 		};
+		ldo17_reg: LDO17 {
+			regulator-name = "vdd28_sen";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-boot-on;
+			regulator-always-on;
+		};
 		m86_lcd_1v8: LDO18 {
 			regulator-name = "vdd18_lcd";
 			regulator-min-microvolt = <1800000>;
@@ -390,6 +418,12 @@
 			regulator-max-microvolt = <1800000>;
 			regulator-boot-on;
 			regulator-always-on;
+		};
+		ldo25_reg: LDO25 {
+			regulator-name = "vdd28_ps";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-boot-on;
 		};
 	};
   };
@@ -1102,5 +1136,135 @@
 	};
 };
 
+&hsi2c_10 {
+	status = "okay";
+	clock-frequency = <400000>;
 
+	light-sensor@44 {
+		compatible = "intersil,isl29125";
+		reg = <0x44>;
+		interrupt-parent = <&gpa2>;
+		interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&als_irq_pins>;
+		vdd-supply = <&ldo17_reg>;
+		meizu,lux-coef = <16399>;
+	};
 
+	proximity-sensor@1e {
+		compatible = "txc,pa224";
+		reg = <0x1e>;
+		interrupt-parent = <&gpa3>;
+		interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ps_irq_pins>;
+		vdd-supply = <&ldo17_reg>;
+		vdd-led-supply = <&ldo25_reg>;
+	};
+};
+
+&pinctrl_bus0 {
+	vl6180_i2c_pins: vl6180-i2c-pins {
+		samsung,pins = "gpc2-2", "gpc2-3";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	vl6180_en_pin: vl6180-en-pin {
+		samsung,pins = "gpd7-2";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	vl6180_irq_pin: vl6180-irq-pin {
+		samsung,pins = "gpc3-6";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+/ {
+	i2c-vl6180 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpc2 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpc2 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vl6180_i2c_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		tof@29 {
+			compatible = "st,vl6180";
+			reg = <0x29>;
+			vdd-supply = <&ldo25_reg>;
+			enable-gpios = <&gpd7 2 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&gpc3>;
+			interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&vl6180_en_pin &vl6180_irq_pin>;
+			st,disable-als;
+		};
+	};
+};
+
+&pinctrl_alive {
+	cwmcu_irq_pin: cwmcu-irq-pin {
+		samsung,pins = "gpa1-7";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&pinctrl_bus1 {
+	cwmcu_wkup_pin: cwmcu-wkup-pin {
+		samsung,pins = "gpf3-3";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <1>;
+		samsung,pin-drv = <0>;
+	};
+
+	cwmcu_in_pins: cwmcu-in-pins {
+		samsung,pins = "gpf0-2", "gpf4-5";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <1>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&pinctrl_fsys1 {
+	cwmcu_ctrl_pins: cwmcu-ctrl-pins {
+		samsung,pins = "gpr0-0", "gpr0-2";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <1>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&hsi2c_0 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	sensor-hub@3a {
+		compatible = "meizu,m86-cwmcu", "st,sensor_hub";
+		reg = <0x3a>;
+		vdd-supply = <&ldo17_reg>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+		wakeup-gpios = <&gpf3 3 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&gpf0 2 GPIO_ACTIVE_HIGH>;
+		busy-gpios = <&gpf4 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpr0 0 GPIO_ACTIVE_HIGH>;
+		boot0-gpios = <&gpr0 2 GPIO_ACTIVE_HIGH>;
+		mount-matrix = "-1", "0", "0",
+			       "0", "-1", "0",
+			       "0", "0", "1";
+		pinctrl-names = "default";
+		pinctrl-0 = <&cwmcu_irq_pin &cwmcu_wkup_pin &cwmcu_in_pins &cwmcu_ctrl_pins>;
+		wakeup-source;
+	};
+};

@@ -25,6 +25,7 @@ obj-y += inv_icm42600/
 obj-y += inv_mpu6050/
 
 obj-$(CONFIG_KMX61) += kmx61.o
+obj-$(CONFIG_M86_CWMCU) += m86-cwmcu.o
 
 obj-y += st_lsm6dsx/
 obj-y += st_lsm9ds0/

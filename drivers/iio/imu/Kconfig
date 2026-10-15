@@ -98,6 +98,16 @@ source "drivers/iio/imu/inv_mpu6050/Kconfig"
 source "drivers/iio/imu/st_lsm6dsx/Kconfig"
 source "drivers/iio/imu/st_lsm9ds0/Kconfig"
 
+config M86_CWMCU
+	tristate "Meizu PRO 5 STM32 CyWee SensorHub IIO driver"
+	depends on I2C && GPIOLIB
+	help
+	  Say Y here to enable support for the STM32 / CyWee CWMCU SensorHub
+	  connected over High-Speed I2C (hsi2c_0 @ 0x3a) on the Meizu PRO 5 (m86).
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called m86-cwmcu.
+
 endmenu
 
 config IIO_ADIS_LIB

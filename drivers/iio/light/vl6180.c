@@ -23,6 +23,8 @@
 #include <linux/of.h>
 #include <linux/delay.h>
 #include <linux/util_macros.h>
+#include <linux/gpio/consumer.h>
+#include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -87,6 +89,8 @@ struct vl6180_data {
 	struct mutex lock;
 	unsigned int als_gain_milli;
 	unsigned int als_it_ms;
+	struct gpio_desc *enable_gpio;
+	bool disable_als;
 };
 
 enum { VL6180_ALS, VL6180_RANGE, VL6180_PROX };
@@ -275,6 +279,19 @@ static const struct iio_chan_spec vl6180_channels[] = {
 	}
 };
 
+static const struct iio_chan_spec vl6180_range_channels[] = {
+	{
+		.type = IIO_DISTANCE,
+		.address = VL6180_RANGE,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
+			BIT(IIO_CHAN_INFO_SCALE),
+	}, {
+		.type = IIO_PROXIMITY,
+		.address = VL6180_PROX,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+	}
+};
+
 /*
  * Available Ambient Light Sensor gain settings, 1/1000th, and
  * corresponding setting for the VL6180_ALS_GAIN register
@@ -439,9 +456,15 @@ static const struct iio_info vl6180_info = {
 	.attrs = &vl6180_attribute_group,
 };
 
+static const struct iio_info vl6180_range_info = {
+	.read_raw = vl6180_read_raw,
+	.write_raw = vl6180_write_raw,
+};
+
 static int vl6180_init(struct vl6180_data *data)
 {
 	struct i2c_client *client = data->client;
+	u8 intr_cfg = VL6180_RANGE_READY;
 	int ret;
 
 	ret = vl6180_read_byte(client, VL6180_MODEL_ID);
@@ -468,23 +491,27 @@ static int vl6180_init(struct vl6180_data *data)
 	if (ret != 0x01)
 		dev_info(&client->dev, "device is not fresh out of reset\n");
 
-	/* Enable ALS and Range ready interrupts */
-	ret = vl6180_write_byte(client, VL6180_INTR_CONFIG,
-				VL6180_ALS_READY | VL6180_RANGE_READY);
+	if (!data->disable_als)
+		intr_cfg |= VL6180_ALS_READY;
+
+	/* Enable configured ready interrupts */
+	ret = vl6180_write_byte(client, VL6180_INTR_CONFIG, intr_cfg);
 	if (ret < 0)
 		return ret;
 
-	/* ALS integration time: 100ms */
-	data->als_it_ms = 100;
-	ret = vl6180_write_word(client, VL6180_ALS_IT, VL6180_ALS_IT_100);
-	if (ret < 0)
-		return ret;
+	if (!data->disable_als) {
+		/* ALS integration time: 100ms */
+		data->als_it_ms = 100;
+		ret = vl6180_write_word(client, VL6180_ALS_IT, VL6180_ALS_IT_100);
+		if (ret < 0)
+			return ret;
 
-	/* ALS gain: 1 */
-	data->als_gain_milli = 1000;
-	ret = vl6180_write_byte(client, VL6180_ALS_GAIN, VL6180_ALS_GAIN_1);
-	if (ret < 0)
-		return ret;
+		/* ALS gain: 1 */
+		data->als_gain_milli = 1000;
+		ret = vl6180_write_byte(client, VL6180_ALS_GAIN, VL6180_ALS_GAIN_1);
+		if (ret < 0)
+			return ret;
+	}
 
 	ret = vl6180_write_byte(client, VL6180_OUT_OF_RESET, 0x00);
 	if (ret < 0)
@@ -508,11 +535,35 @@ static int vl6180_probe(struct i2c_client *client)
 	data->client = client;
 	mutex_init(&data->lock);
 
-	indio_dev->info = &vl6180_info;
-	indio_dev->channels = vl6180_channels;
-	indio_dev->num_channels = ARRAY_SIZE(vl6180_channels);
+	data->disable_als = device_property_read_bool(&client->dev, "st,disable-als");
+
+	if (data->disable_als) {
+		indio_dev->info = &vl6180_range_info;
+		indio_dev->channels = vl6180_range_channels;
+		indio_dev->num_channels = ARRAY_SIZE(vl6180_range_channels);
+	} else {
+		indio_dev->info = &vl6180_info;
+		indio_dev->channels = vl6180_channels;
+		indio_dev->num_channels = ARRAY_SIZE(vl6180_channels);
+	}
 	indio_dev->name = VL6180_DRV_NAME;
 	indio_dev->modes = INDIO_DIRECT_MODE;
+
+	ret = devm_regulator_get_enable_optional(&client->dev, "vdd");
+	if (ret < 0 && ret != -ENODEV)
+		return ret;
+
+	data->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable",
+						    GPIOD_OUT_HIGH);
+	if (IS_ERR(data->enable_gpio))
+		return PTR_ERR(data->enable_gpio);
+
+	if (data->enable_gpio) {
+		gpiod_set_value_cansleep(data->enable_gpio, 0);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(data->enable_gpio, 1);
+		usleep_range(2000, 3000);
+	}
 
 	ret = vl6180_init(data);
 	if (ret < 0)

@@ -749,9 +749,9 @@ static const struct regulator_ops s2mps15_reg_buck_ops = {
 	.linear_ranges	= range,			\
 	.n_linear_ranges = ARRAY_SIZE(range),		\
 	.n_voltages	= S2MPS15_LDO_N_VOLTAGES,	\
-	.vsel_reg	= S2MPS15_REG_L1CTRL + num - 1,	\
+	.vsel_reg	= S2MPS15_REG_L##num##CTRL,	\
 	.vsel_mask	= S2MPS15_LDO_VSEL_MASK,	\
-	.enable_reg	= S2MPS15_REG_L1CTRL + num - 1,	\
+	.enable_reg	= S2MPS15_REG_L##num##CTRL,	\
 	.enable_mask	= S2MPS15_ENABLE_MASK		\
 }
 
