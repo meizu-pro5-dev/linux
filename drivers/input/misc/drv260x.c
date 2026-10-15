@@ -212,21 +212,31 @@ static void drv260x_worker(struct work_struct *work)
 	struct drv260x_data *haptics = container_of(work, struct drv260x_data, work);
 	int error;
 
-	gpiod_set_value(haptics->enable_gpio, 1);
-	/* Data sheet says to wait 250us before trying to communicate */
-	udelay(250);
+	if (haptics->magnitude) {
+		gpiod_set_value(haptics->enable_gpio, 1);
+		/* Data sheet says to wait 250us before trying to communicate */
+		udelay(250);
 
-	error = regmap_write(haptics->regmap,
-			     DRV260X_MODE, DRV260X_RT_PLAYBACK);
-	if (error) {
-		dev_err(&haptics->client->dev,
-			"Failed to write set mode: %d\n", error);
+		error = regmap_write(haptics->regmap,
+				     DRV260X_MODE, DRV260X_RT_PLAYBACK);
+		if (error) {
+			dev_err(&haptics->client->dev,
+				"Failed to write set mode: %d\n", error);
+		} else {
+			error = regmap_write(haptics->regmap,
+					     DRV260X_RT_PB_IN, haptics->magnitude);
+			if (error)
+				dev_err(&haptics->client->dev,
+					"Failed to set magnitude: %d\n", error);
+		}
 	} else {
 		error = regmap_write(haptics->regmap,
-				     DRV260X_RT_PB_IN, haptics->magnitude);
+				     DRV260X_MODE, DRV260X_STANDBY);
 		if (error)
 			dev_err(&haptics->client->dev,
-				"Failed to set magnitude: %d\n", error);
+				"Failed to enter standby mode: %d\n", error);
+
+		gpiod_set_value(haptics->enable_gpio, 0);
 	}
 }
 
@@ -530,6 +540,10 @@ static int drv260x_probe(struct i2c_client *client)
 		dev_err(dev, "couldn't register input device: %d\n", error);
 		return error;
 	}
+
+	/* Place chip in standby until an effect is played */
+	regmap_write(haptics->regmap, DRV260X_MODE, DRV260X_STANDBY);
+	gpiod_set_value(haptics->enable_gpio, 0);
 
 	return 0;
 }

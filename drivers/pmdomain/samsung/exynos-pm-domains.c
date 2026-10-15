@@ -759,9 +759,9 @@ static const struct exynos7420_reg_bits exynos7420_unused_periph_clks[] __initco
 	/* CMU_PERIC0 (0x13610000): unused hsi2c9, uart0, adcif, pwm (hsi2c0/10 active) */
 	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) | BIT(12) },
 	{ 0x13610a00, BIT(21) | BIT(16) },
-	/* CMU_PERIC1 (0x14c80000): unused hsi2c2/3, uart1/3, spi0/1/2/4, pcm1, spdif */
+	/* CMU_PERIC1 (0x14c80000): unused hsi2c3, uart1/3, spi0/1/2/4, pcm1, spdif (hsi2c2 active) */
 	{ 0x14c80900, BIT(19) | BIT(18) | BIT(16) | BIT(14) | BIT(13) | BIT(12) |
-		      BIT(11) | BIT(9) | BIT(5) | BIT(4) },
+		      BIT(11) | BIT(9) | BIT(5) },
 	{ 0x14c80a00, BIT(19) | BIT(18) | BIT(16) | BIT(14) | BIT(13) | BIT(12) |
 		      BIT(11) | BIT(9) },
 	/* CMU_FSYS0 (0x10e90000) & CMU_FSYS1 (0x156e0000): unused mmc0/1/2 */
