@@ -89,8 +89,10 @@ struct vl6180_data {
 	struct mutex lock;
 	unsigned int als_gain_milli;
 	unsigned int als_it_ms;
+	struct regulator *vdd;
 	struct gpio_desc *enable_gpio;
 	bool disable_als;
+	bool powered;
 };
 
 enum { VL6180_ALS, VL6180_RANGE, VL6180_PROX };
@@ -209,6 +211,54 @@ static int vl6180_write_word(struct i2c_client *client, u16 cmd, u16 val)
 	return 0;
 }
 
+static int vl6180_init(struct vl6180_data *data);
+
+static int vl6180_set_power(struct vl6180_data *data, bool on)
+{
+	int ret;
+
+	if (on) {
+		if (data->powered)
+			return 0;
+
+		if (data->vdd) {
+			ret = regulator_enable(data->vdd);
+			if (ret < 0)
+				return ret;
+		}
+
+		if (data->enable_gpio) {
+			gpiod_set_value_cansleep(data->enable_gpio, 0);
+			usleep_range(1000, 1500);
+			gpiod_set_value_cansleep(data->enable_gpio, 1);
+			usleep_range(2000, 3000);
+		}
+
+		ret = vl6180_init(data);
+		if (ret < 0) {
+			if (data->enable_gpio)
+				gpiod_set_value_cansleep(data->enable_gpio, 0);
+			if (data->vdd)
+				regulator_disable(data->vdd);
+			return ret;
+		}
+
+		data->powered = true;
+	} else {
+		if (!data->powered)
+			return 0;
+
+		if (data->enable_gpio)
+			gpiod_set_value_cansleep(data->enable_gpio, 0);
+		if (data->vdd)
+			regulator_disable(data->vdd);
+
+		data->powered = false;
+	}
+
+	return 0;
+}
+
 static int vl6180_measure(struct vl6180_data *data, int addr)
 {
 	struct i2c_client *client = data->client;
@@ -216,6 +266,13 @@ static int vl6180_measure(struct vl6180_data *data, int addr)
 	u16 value;
 
 	mutex_lock(&data->lock);
+
+	ret = vl6180_set_power(data, true);
+	if (ret < 0) {
+		mutex_unlock(&data->lock);
+		return ret;
+	}
+
 	/* Start single shot measurement */
 	ret = vl6180_write_byte(client,
 		vl6180_chan_regs_table[addr].start_reg, VL6180_STARTSTOP);
@@ -254,6 +311,7 @@ static int vl6180_measure(struct vl6180_data *data, int addr)
 	ret = value;
 
 fail:
+	vl6180_set_power(data, false);
 	mutex_unlock(&data->lock);
 
 	return ret;
@@ -376,7 +434,7 @@ static int vl6180_hold(struct vl6180_data *data, bool hold)
 
 static int vl6180_set_als_gain(struct vl6180_data *data, int val, int val2)
 {
-	int i, ret, gain;
+	int i, ret = 0, gain;
 
 	if (val < 1 || val > 40)
 		return -EINVAL;
@@ -389,6 +447,12 @@ static int vl6180_set_als_gain(struct vl6180_data *data, int val, int val2)
 			 ARRAY_SIZE(vl6180_als_gain_tab));
 
 	mutex_lock(&data->lock);
+	if (!data->powered) {
+		data->als_gain_milli = vl6180_als_gain_tab[i];
+		mutex_unlock(&data->lock);
+		return 0;
+	}
+
 	ret = vl6180_hold(data, true);
 	if (ret < 0)
 		goto fail;
@@ -407,13 +471,19 @@ fail:
 
 static int vl6180_set_it(struct vl6180_data *data, int val, int val2)
 {
-	int ret, it_ms;
+	int ret = 0, it_ms;
 
 	it_ms = DIV_ROUND_CLOSEST(val2, 1000); /* round to ms */
 	if (val != 0 || it_ms < 1 || it_ms > 512)
 		return -EINVAL;
 
 	mutex_lock(&data->lock);
+	if (!data->powered) {
+		data->als_it_ms = it_ms;
+		mutex_unlock(&data->lock);
+		return 0;
+	}
+
 	ret = vl6180_hold(data, true);
 	if (ret < 0)
 		goto fail;
@@ -489,7 +559,7 @@ static int vl6180_init(struct vl6180_data *data)
 	 * system comes out of reset.
 	 */
 	if (ret != 0x01)
-		dev_info(&client->dev, "device is not fresh out of reset\n");
+		dev_dbg(&client->dev, "device is not fresh out of reset\n");
 
 	if (!data->disable_als)
 		intr_cfg |= VL6180_ALS_READY;
@@ -500,15 +570,17 @@ static int vl6180_init(struct vl6180_data *data)
 		return ret;
 
 	if (!data->disable_als) {
-		/* ALS integration time: 100ms */
-		data->als_it_ms = 100;
-		ret = vl6180_write_word(client, VL6180_ALS_IT, VL6180_ALS_IT_100);
+		int gain_idx = find_closest(data->als_gain_milli,
+					    vl6180_als_gain_tab,
+					    ARRAY_SIZE(vl6180_als_gain_tab));
+
+		ret = vl6180_write_word(client, VL6180_ALS_IT,
+					data->als_it_ms - 1);
 		if (ret < 0)
 			return ret;
 
-		/* ALS gain: 1 */
-		data->als_gain_milli = 1000;
-		ret = vl6180_write_byte(client, VL6180_ALS_GAIN, VL6180_ALS_GAIN_1);
+		ret = vl6180_write_byte(client, VL6180_ALS_GAIN,
+					vl6180_als_gain_tab_bits[gain_idx]);
 		if (ret < 0)
 			return ret;
 	}
@@ -533,6 +605,8 @@ static int vl6180_probe(struct i2c_client *client)
 	data = iio_priv(indio_dev);
 	i2c_set_clientdata(client, indio_dev);
 	data->client = client;
+	data->als_it_ms = 100;
+	data->als_gain_milli = 1000;
 	mutex_init(&data->lock);
 
 	data->disable_als = device_property_read_bool(&client->dev, "st,disable-als");
@@ -549,25 +623,23 @@ static int vl6180_probe(struct i2c_client *client)
 	indio_dev->name = VL6180_DRV_NAME;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
-	ret = devm_regulator_get_enable_optional(&client->dev, "vdd");
-	if (ret < 0 && ret != -ENODEV)
-		return ret;
+	data->vdd = devm_regulator_get_optional(&client->dev, "vdd");
+	if (IS_ERR(data->vdd)) {
+		if (PTR_ERR(data->vdd) != -ENODEV)
+			return PTR_ERR(data->vdd);
+		data->vdd = NULL;
+	}
 
 	data->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable",
-						    GPIOD_OUT_HIGH);
+						    GPIOD_OUT_LOW);
 	if (IS_ERR(data->enable_gpio))
 		return PTR_ERR(data->enable_gpio);
 
-	if (data->enable_gpio) {
-		gpiod_set_value_cansleep(data->enable_gpio, 0);
-		usleep_range(1000, 1500);
-		gpiod_set_value_cansleep(data->enable_gpio, 1);
-		usleep_range(2000, 3000);
-	}
-
-	ret = vl6180_init(data);
+	/* Power up briefly to verify VL6180 model ID, then power down when idle */
+	ret = vl6180_set_power(data, true);
 	if (ret < 0)
 		return ret;
+	vl6180_set_power(data, false);
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }

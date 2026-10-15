@@ -24,6 +24,7 @@
 #include <linux/pm.h>
 #include <linux/regulator/consumer.h>
 #include <linux/sysfs.h>
+#include <linux/workqueue.h>
 #include <asm/unaligned.h>
 
 #include <linux/iio/buffer.h>
@@ -69,6 +70,14 @@
 #define CWMCU_ID_STEP_COUNTER		15
 #define CWMCU_MAX_SENSORS		32
 
+/* Vendor 3.10 mx-hub.c active_set() defaults to 200ms (5 Hz) report period */
+#define CWMCU_DEFAULT_RATE_MS		200
+#define CWMCU_IDLE_DISABLE_MS		5000
+#define CWMCU_CACHE_FRESH_MS		500
+#define CWMCU_STREAM_SENSORS_MASK	(BIT(CWMCU_ID_ACCEL) | \
+					 BIT(CWMCU_ID_MAG) | \
+					 BIT(CWMCU_ID_GYRO))
+
 struct m86_cwmcu_data {
 	struct i2c_client *client;
 	struct gpio_desc *wakeup_gpiod;
@@ -78,11 +87,13 @@ struct m86_cwmcu_data {
 	struct gpio_desc *boot0_gpiod;
 
 	struct mutex lock;
+	struct delayed_work idle_work;
 	u32 enabled_mask;
 	u32 valid_mask;
 	int last_error;
 	u32 reset_count;
 	u32 sample_seq[CWMCU_MAX_SENSORS];
+	unsigned long last_sample_jiffies[CWMCU_MAX_SENSORS];
 	u32 mcu_error;
 	bool suspended;
 	bool stopping;
@@ -95,15 +106,19 @@ struct m86_cwmcu_data {
 };
 
 /* All wire access, wakeup and MCU state transitions share data->lock.
- * A transport ACK does not mean a SET_ENABLE command has completed.
+ * Handshake timing matches vendor 3.10 power_pin_sw() (200us wake, 100us sleep).
  */
 static int m86_cwmcu_wake_mcu(struct m86_cwmcu_data *data)
 {
 	int attempt, awake;
 
+	if (gpiod_get_value_cansleep(data->wakeup_gpiod) > 0 &&
+	    (!data->sleep_gpiod || gpiod_get_value_cansleep(data->sleep_gpiod) > 0))
+		return 0;
+
 	for (attempt = 0; attempt < 3; attempt++) {
 		gpiod_set_value_cansleep(data->wakeup_gpiod, 1);
-		usleep_range(300, 500);
+		usleep_range(200, 250);
 		awake = data->sleep_gpiod ?
 			gpiod_get_value_cansleep(data->sleep_gpiod) : 1;
 		if (awake > 0)
@@ -111,7 +126,7 @@ static int m86_cwmcu_wake_mcu(struct m86_cwmcu_data *data)
 		gpiod_set_value_cansleep(data->wakeup_gpiod, 0);
 		if (awake < 0)
 			return awake;
-		usleep_range(100, 200);
+		usleep_range(100, 150);
 	}
 	return -ETIMEDOUT;
 }
@@ -119,7 +134,7 @@ static int m86_cwmcu_wake_mcu(struct m86_cwmcu_data *data)
 static void m86_cwmcu_sleep_mcu(struct m86_cwmcu_data *data)
 {
 	gpiod_set_value_cansleep(data->wakeup_gpiod, 0);
-	usleep_range(500, 800);
+	usleep_range(100, 150);
 }
 
 /* Caller holds lock and keeps the MCU awake for the whole transaction. */
@@ -167,6 +182,7 @@ static void m86_cwmcu_invalidate(struct m86_cwmcu_data *data)
 	data->enabled_mask = 0;
 	data->valid_mask = 0;
 	memset(data->sample_seq, 0, sizeof(data->sample_seq));
+	memset(data->last_sample_jiffies, 0, sizeof(data->last_sample_jiffies));
 }
 
 static int m86_cwmcu_begin(struct m86_cwmcu_data *data)
@@ -189,7 +205,7 @@ static int m86_cwmcu_end(struct m86_cwmcu_data *data, int ret)
 
 static int m86_cwmcu_enable(struct m86_cwmcu_data *data, u8 id)
 {
-	u8 cmd[5] = { 0, id, 20, 0, 0 };
+	u8 cmd[5] = { 0, id, CWMCU_DEFAULT_RATE_MS, 0, 0 };
 	u8 list[8];
 	int attempt, poll, ret;
 
@@ -224,6 +240,35 @@ static int m86_cwmcu_enable(struct m86_cwmcu_data *data, u8 id)
 		}
 	}
 	return -EIO;
+}
+
+static int m86_cwmcu_disable(struct m86_cwmcu_data *data, u8 id)
+{
+	u8 cmd[5] = { 0, id, 0, 0, 0 };
+	int ret;
+
+	ret = m86_cwmcu_write(data, CWMCU_REG_SET_DISABLE, cmd, sizeof(cmd));
+	if (ret)
+		return ret;
+	usleep_range(5000, 6000);
+	data->enabled_mask &= ~BIT(id);
+	data->valid_mask &= ~BIT(id);
+	return 0;
+}
+
+static int m86_cwmcu_disable_stream_sensors(struct m86_cwmcu_data *data)
+{
+	u32 mask = data->enabled_mask & CWMCU_STREAM_SENSORS_MASK;
+	int id, ret = 0;
+
+	for (id = 0; id < CWMCU_MAX_SENSORS; id++) {
+		if (!(mask & BIT(id)))
+			continue;
+		ret = m86_cwmcu_disable(data, id);
+		if (ret)
+			break;
+	}
+	return ret;
 }
 
 static int m86_cwmcu_status(struct m86_cwmcu_data *data)
@@ -300,8 +345,28 @@ static int m86_cwmcu_drain(struct m86_cwmcu_data *data)
 		data->sample[id][2] = get_unaligned_le16(buf + 5);
 		data->valid_mask |= BIT(id);
 		data->sample_seq[id]++;
+		data->last_sample_jiffies[id] = jiffies;
 	}
 	return 0;
+}
+
+static void m86_cwmcu_idle_work(struct work_struct *work)
+{
+	struct m86_cwmcu_data *data =
+		container_of(work, struct m86_cwmcu_data, idle_work.work);
+	int ret;
+
+	mutex_lock(&data->lock);
+	if (!data->stopping && !data->suspended &&
+	    (data->enabled_mask & CWMCU_STREAM_SENSORS_MASK)) {
+		ret = m86_cwmcu_begin(data);
+		if (!ret) {
+			ret = m86_cwmcu_disable_stream_sensors(data);
+			m86_cwmcu_drain(data);
+		}
+		m86_cwmcu_end(data, ret);
+	}
+	mutex_unlock(&data->lock);
 }
 
 static int m86_cwmcu_hw_reset(struct m86_cwmcu_data *data)
@@ -407,6 +472,25 @@ static int m86_cwmcu_read_raw(struct iio_dev *indio_dev,
 		}
 
 		mutex_lock(&data->lock);
+		if (BIT(sensor_id) & CWMCU_STREAM_SENSORS_MASK)
+			mod_delayed_work(system_wq, &data->idle_work,
+					 msecs_to_jiffies(CWMCU_IDLE_DISABLE_MS));
+
+		/* Fast path: matching vendor 3.10 cw_read_raw(), if the sensor
+		 * is already enabled and a fresh sample was cached within
+		 * CWMCU_CACHE_FRESH_MS (e.g. by the IRQ thread or the preceding
+		 * X/Y axis read), return the cached value without waking the MCU.
+		 */
+		if ((data->enabled_mask & BIT(sensor_id)) &&
+		    (data->valid_mask & BIT(sensor_id)) &&
+		    sensor_id != CWMCU_ID_STEP_COUNTER &&
+		    time_before(jiffies, data->last_sample_jiffies[sensor_id] +
+				msecs_to_jiffies(CWMCU_CACHE_FRESH_MS))) {
+			ret = m86_cwmcu_half_to_micro(data->sample[sensor_id][axis], val);
+			mutex_unlock(&data->lock);
+			return ret ? ret : IIO_VAL_INT;
+		}
+
 		ret = m86_cwmcu_begin(data);
 		if (ret)
 			goto out;
@@ -638,6 +722,7 @@ static int m86_cwmcu_probe(struct i2c_client *client)
 	data = iio_priv(indio_dev);
 	data->client = client;
 	mutex_init(&data->lock);
+	INIT_DELAYED_WORK(&data->idle_work, m86_cwmcu_idle_work);
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
 		return -EOPNOTSUPP;
@@ -740,10 +825,13 @@ static void m86_cwmcu_remove(struct i2c_client *client)
 {
 	struct m86_cwmcu_data *data = iio_priv(i2c_get_clientdata(client));
 
+	cancel_delayed_work_sync(&data->idle_work);
 	mutex_lock(&data->lock);
 	data->stopping = true;
-	if (!m86_cwmcu_wake_mcu(data))
+	if (!m86_cwmcu_wake_mcu(data)) {
+		m86_cwmcu_disable_stream_sensors(data);
 		m86_cwmcu_host_status(data, CWMCU_HOST_STATUS_SHUTDOWN);
+	}
 	m86_cwmcu_sleep_mcu(data);
 	mutex_unlock(&data->lock);
 }
@@ -753,8 +841,13 @@ static int m86_cwmcu_pm_status(struct device *dev, bool suspend)
 	struct m86_cwmcu_data *data = iio_priv(dev_get_drvdata(dev));
 	int ret;
 
+	if (suspend)
+		cancel_delayed_work_sync(&data->idle_work);
+
 	mutex_lock(&data->lock);
 	ret = m86_cwmcu_wake_mcu(data);
+	if (!ret && suspend && (data->enabled_mask & CWMCU_STREAM_SENSORS_MASK))
+		m86_cwmcu_disable_stream_sensors(data);
 	if (!ret)
 		ret = m86_cwmcu_status(data);
 	if (!ret)
