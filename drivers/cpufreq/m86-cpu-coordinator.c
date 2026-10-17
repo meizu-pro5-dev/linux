@@ -167,16 +167,27 @@ static int set_rate_checked(struct m86_cluster *c, unsigned int khz)
  */
 static int fixed_bus_floor(struct m86_coord *d)
 {
-	u32 con = readl(d->topc + 0x150), sel = readl(d->topc + 0x214);
-	u32 m = (con >> 16) & 0x3ff, p = (con >> 8) & 0x3f, s = con & 7;
+	u32 con, sel, con2, sel2;
+	u32 m, p, s, req_khz;
 	u64 logical_khz;
 
-	if (con != readl(d->topc + 0x150) || sel != readl(d->topc + 0x214) ||
+	exynos7420_bus_dvfs_read_lock();
+	con = readl(d->topc + 0x150);
+	sel = readl(d->topc + 0x214);
+	con2 = readl(d->topc + 0x150);
+	sel2 = readl(d->topc + 0x214);
+	req_khz = exynos7420_mif_effective_floor_khz(READ_ONCE(d->required_bus_qos));
+	exynos7420_bus_dvfs_read_unlock();
+
+	m = (con >> 16) & 0x3ff;
+	p = (con >> 8) & 0x3f;
+	s = con & 7;
+	if (con != con2 || sel != sel2 ||
 	    !(con & BIT(31)) || !(con & BIT(29)) || !m || !p ||
 	    !(sel & BIT(16)) || !(sel & BIT(20)) || clk_get_rate(d->fin) != 24000000)
 		return -EIO;
 	logical_khz = div_u64(24000000ULL * m, (p << s) * 2000);
-	return logical_khz >= READ_ONCE(d->required_bus_qos) ? 0 : -ERANGE;
+	return logical_khz >= req_khz ? 0 : -ERANGE;
 }
 
 static int temperature(struct m86_coord *d, int *temp)
@@ -329,13 +340,16 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		c->cur_bus_qos = target_bus_qos;
 		max_bus_qos = max(target_bus_qos, d->cluster[1 - ci].cur_bus_qos);
 		if (max_bus_qos < d->cur_bus_qos) {
-			if (d->bus_qos_active)
-				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
 			d->cur_bus_qos = max_bus_qos;
 			WRITE_ONCE(d->required_bus_qos, max_bus_qos);
+			if (d->bus_qos_active)
+				dev_pm_qos_update_request(&d->bus_qos_req, max_bus_qos);
 		}
 		mutex_unlock(&d->bus_lock);
 	} else if (target * 1000UL > old_hz) {
+		unsigned int old_c_bus_qos = c->cur_bus_qos;
+		unsigned int old_d_bus_qos = d->cur_bus_qos;
+
 		mutex_lock(&d->bus_lock);
 		c->cur_bus_qos = target_bus_qos;
 		max_bus_qos = max(target_bus_qos, d->cluster[1 - ci].cur_bus_qos);
@@ -346,6 +360,23 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 			WRITE_ONCE(d->required_bus_qos, max_bus_qos);
 		}
 		mutex_unlock(&d->bus_lock);
+
+		/* Verify MIF hardware has achieved the requested floor before raising CPU clock */
+		ret = fixed_bus_floor(d);
+		if (ret) {
+			mutex_lock(&d->bus_lock);
+			c->cur_bus_qos = old_c_bus_qos;
+			if (d->cur_bus_qos != old_d_bus_qos) {
+				d->cur_bus_qos = old_d_bus_qos;
+				WRITE_ONCE(d->required_bus_qos, old_d_bus_qos);
+				if (d->bus_qos_active)
+					dev_pm_qos_update_request(&d->bus_qos_req, old_d_bus_qos);
+			}
+			mutex_unlock(&d->bus_lock);
+			ret = -EAGAIN;
+			goto out;
+		}
+
 		/* Raise rail/readback and EMA at old OPP before clock increase. */
 		phase = "linear up voltage/EMA";
 		ret = set_voltage_ema(d, ci, c->opp[index].uv, old_hz);

@@ -93,7 +93,13 @@
 			reg = <0x66>;
 			/* No PMIC IRQ: RTC read/write only, no alarm or wakeup. */
 			regulators {
-				/* Dynamic CPU rails: BUCK2 (Atlas) and BUCK3 (Apollo) */
+				/* Dynamic MIF, CPU, and INT rails: BUCK1, BUCK2, BUCK3, BUCK4 */
+				m86_buck1_mif: BUCK1 {
+					regulator-name = "vdd_mif";
+					regulator-min-microvolt = <500000>;
+					regulator-max-microvolt = <1100000>;
+					regulator-always-on;
+				};
 				m86_buck2_cpu: BUCK2 {
 					regulator-name = "vdd_atlas";
 					regulator-min-microvolt = <500000>;
@@ -107,6 +113,12 @@
 					regulator-max-microvolt = <1200000>;
 					regulator-always-on;
 					meizu,cpu-dvfs-active;
+				};
+				m86_buck4_int: BUCK4 {
+					regulator-name = "vdd_int";
+					regulator-min-microvolt = <500000>;
+					regulator-max-microvolt = <1000000>;
+					regulator-always-on;
 				};
 			};
 		};
@@ -752,95 +764,135 @@
 
 		opp-100000000 {
 			opp-hz = /bits/ 64 <100000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_100>;
 		};
 		opp-133000000 {
 			opp-hz = /bits/ 64 <133000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-167000000 {
 			opp-hz = /bits/ 64 <167000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-276000000 {
 			opp-hz = /bits/ 64 <276000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-348000000 {
 			opp-hz = /bits/ 64 <348000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-416000000 {
 			opp-hz = /bits/ 64 <416000000>;
+			opp-microvolt = <600000>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-543000000 {
 			opp-hz = /bits/ 64 <543000000>;
+			opp-microvolt = <668750>;
+			required-opps = <&int_opp_200>;
 		};
 		opp-632000000 {
 			opp-hz = /bits/ 64 <632000000>;
+			opp-microvolt = <681250>;
+			required-opps = <&int_opp_266>;
 		};
 		opp-828000000 {
 			opp-hz = /bits/ 64 <828000000>;
+			opp-microvolt = <725000>;
+			required-opps = <&int_opp_334>;
 		};
 		opp-1026000000 {
 			opp-hz = /bits/ 64 <1026000000>;
+			opp-microvolt = <743750>;
+			required-opps = <&int_opp_500>;
 		};
 		opp-1264000000 {
 			opp-hz = /bits/ 64 <1264000000>;
+			opp-microvolt = <768750>;
+			required-opps = <&int_opp_520>;
 		};
 		opp-1456000000 {
 			opp-hz = /bits/ 64 <1456000000>;
+			opp-microvolt = <800000>;
+			required-opps = <&int_opp_540>;
 		};
 		opp-1552000000 {
 			opp-hz = /bits/ 64 <1552000000>;
+			opp-microvolt = <837500>;
+			required-opps = <&int_opp_560>;
 		};
 	};
 
 	bus_int_opp_table: bus-int-opp-table {
 		compatible = "operating-points-v2";
 
-		opp-100000000 {
+		int_opp_100: opp-100000000 {
 			opp-hz = /bits/ 64 <100000000>;
+			opp-microvolt = <700000>;
 		};
-		opp-200000000 {
+		int_opp_200: opp-200000000 {
 			opp-hz = /bits/ 64 <200000000>;
+			opp-microvolt = <700000>;
 		};
-		opp-266000000 {
+		int_opp_266: opp-266000000 {
 			opp-hz = /bits/ 64 <266000000>;
+			opp-microvolt = <700000>;
 		};
-		opp-334000000 {
+		int_opp_334: opp-334000000 {
 			opp-hz = /bits/ 64 <334000000>;
+			opp-microvolt = <700000>;
 		};
-		opp-400000000 {
+		int_opp_400: opp-400000000 {
 			opp-hz = /bits/ 64 <400000000>;
+			opp-microvolt = <725000>;
 		};
-		opp-500000000 {
+		int_opp_500: opp-500000000 {
 			opp-hz = /bits/ 64 <500000000>;
+			opp-microvolt = <750000>;
 		};
-		opp-510000000 {
+		int_opp_510: opp-510000000 {
 			opp-hz = /bits/ 64 <510000000>;
+			opp-microvolt = <750000>;
 		};
-		opp-520000000 {
+		int_opp_520: opp-520000000 {
 			opp-hz = /bits/ 64 <520000000>;
+			opp-microvolt = <750000>;
 		};
-		opp-530000000 {
+		int_opp_530: opp-530000000 {
 			opp-hz = /bits/ 64 <530000000>;
+			opp-microvolt = <750000>;
 		};
-		opp-540000000 {
+		int_opp_540: opp-540000000 {
 			opp-hz = /bits/ 64 <540000000>;
+			opp-microvolt = <750000>;
 		};
-		opp-550000000 {
+		int_opp_550: opp-550000000 {
 			opp-hz = /bits/ 64 <550000000>;
+			opp-microvolt = <806250>;
 		};
-		opp-560000000 {
+		int_opp_560: opp-560000000 {
 			opp-hz = /bits/ 64 <560000000>;
+			opp-microvolt = <806250>;
 		};
 	};
 
 	bus_mif: bus-mif {
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_mif_opp_table>;
+		vdd-supply = <&m86_buck1_mif>;
 		status = "okay";
 	};
 
 	bus_int: bus-int {
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_int_opp_table>;
+		vdd-supply = <&m86_buck4_int>;
 		devfreq = <&bus_mif>;
 		status = "okay";
 	};

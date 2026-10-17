@@ -22,6 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/syscore_ops.h>
 #include <linux/workqueue.h>
+#include <linux/m86-bus-qos.h>
 
 #define NUM_DREX_CHANNELS		4
 #define DREX_MAP_SIZE			0x1000
@@ -121,7 +122,9 @@ static void exynos7420_dmc_thermal_work_fn(struct work_struct *work)
 	unsigned long delay_ms;
 
 	mutex_lock(&dmc_lock);
+	exynos7420_bus_dvfs_read_lock();
 	max_level = exynos7420_dmc_update_mr4_locked();
+	exynos7420_bus_dvfs_read_unlock();
 	mutex_unlock(&dmc_lock);
 
 	delay_ms = (max_level >= 4) ? 300 : 2000;
@@ -134,6 +137,7 @@ static void exynos7420_dmc_apply_power_saving(void)
 	u32 val;
 
 	mutex_lock(&dmc_lock);
+	exynos7420_bus_dvfs_read_lock();
 	for (i = 0; i < NUM_DREX_CHANNELS; i++) {
 		void __iomem *base = drex_bases[i];
 
@@ -156,6 +160,7 @@ static void exynos7420_dmc_apply_power_saving(void)
 		writel_relaxed(val, base + DREX_MEMCONTROL);
 	}
 	exynos7420_dmc_update_mr4_locked();
+	exynos7420_bus_dvfs_read_unlock();
 	mutex_unlock(&dmc_lock);
 }
 
@@ -213,6 +218,7 @@ static ssize_t dmc_status_show(struct device *dev,
 	int i;
 
 	mutex_lock(&dmc_lock);
+	exynos7420_bus_dvfs_read_lock();
 	exynos7420_dmc_update_mr4_locked();
 
 	len += scnprintf(buf + len, PAGE_SIZE - len,
@@ -242,6 +248,7 @@ static ssize_t dmc_status_show(struct device *dev,
 				 pwrdn, (pwrdn >> 16) & 0xFFFF,
 				 cgctrl, aref, dmc_mr4_cs0[i], dmc_mr4_cs1[i]);
 	}
+	exynos7420_bus_dvfs_read_unlock();
 	mutex_unlock(&dmc_lock);
 
 	return len;
