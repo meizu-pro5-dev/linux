@@ -29,6 +29,9 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
+#include <linux/atomic.h>
+#include <linux/pm_qos.h>
+#include <linux/m86-bus-qos.h>
 #include "i2s.h"
 #include <linux/mfd/arizona/registers.h>
 #include "../codecs/wm8998.h"
@@ -79,6 +82,14 @@ struct m86_machine_priv {
 	struct device_node *cpu_np;
 	struct device_node *codec_np;
 	struct device_node *amp_np;
+	/* PM QoS protection for active audio streaming */
+	struct pm_qos_request cpu_latency_req;
+	bool cpu_latency_active;
+	struct device *bus_dev;
+	struct dev_pm_qos_request bus_qos_req;
+	bool bus_qos_active;
+	atomic_t active_streams;
+	struct mutex qos_lock;
 };
 
 static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
@@ -563,6 +574,81 @@ static int m86_set_bias_level(struct snd_soc_card *card,
 	return 0;
 }
 
+static void m86_audio_pm_qos_start(struct m86_machine_priv *priv)
+{
+	int active = atomic_inc_return(&priv->active_streams);
+
+	if (active == 1) {
+		mutex_lock(&priv->qos_lock);
+		/*
+		 * 1. CPU Latency QoS:
+		 * Request max 50us DMA wakeup latency to prevent CPU cores
+		 * from entering C2 (Core Power Gating, exit latency 100us),
+		 * keeping cores in WFI (exit latency 1us) to guarantee
+		 * instant ALSA/I2S DMA interrupt processing.
+		 */
+		if (!priv->cpu_latency_active) {
+			cpu_latency_qos_add_request(&priv->cpu_latency_req, 50);
+			priv->cpu_latency_active = true;
+		}
+
+		/*
+		 * 2. Bus-MIF QoS:
+		 * Floor memory bus frequency to >= 416MHz to prevent DRAM
+		 * latency starvation during multi-master DMA traffic.
+		 */
+		if (!priv->bus_dev)
+			priv->bus_dev = exynos_bus_get_dev("bus-mif");
+		if (priv->bus_dev && !priv->bus_qos_active) {
+			int ret = exynos_bus_qos_add_request(priv->bus_dev,
+							    &priv->bus_qos_req,
+							    416000);
+			if (ret >= 0)
+				priv->bus_qos_active = true;
+		}
+		mutex_unlock(&priv->qos_lock);
+		pr_info("m86-audio: locked PM QoS (CPU latency 50us, bus-mif 416MHz)\n");
+	}
+}
+
+static void m86_audio_pm_qos_stop(struct m86_machine_priv *priv)
+{
+	int active = atomic_dec_return(&priv->active_streams);
+
+	if (active == 0) {
+		mutex_lock(&priv->qos_lock);
+		if (priv->bus_qos_active) {
+			exynos_bus_qos_remove_request(&priv->bus_qos_req);
+			priv->bus_qos_active = false;
+		}
+		if (priv->cpu_latency_active) {
+			cpu_latency_qos_remove_request(&priv->cpu_latency_req);
+			priv->cpu_latency_active = false;
+		}
+		mutex_unlock(&priv->qos_lock);
+		pr_info("m86-audio: released PM QoS\n");
+	} else if (active < 0) {
+		atomic_set(&priv->active_streams, 0);
+	}
+}
+
+static int m86_aif1_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(rtd->card);
+
+	m86_audio_pm_qos_start(priv);
+	return 0;
+}
+
+static void m86_aif1_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(rtd->card);
+
+	m86_audio_pm_qos_stop(priv);
+}
+
 static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 			      struct snd_pcm_hw_params *params)
 {
@@ -669,6 +755,8 @@ static int m86_aif1_prepare(struct snd_pcm_substream *substream)
 }
 
 static const struct snd_soc_ops m86_aif1_ops = {
+	.startup   = m86_aif1_startup,
+	.shutdown  = m86_aif1_shutdown,
 	.hw_params = m86_aif1_hw_params,
 	.prepare   = m86_aif1_prepare,
 };
@@ -885,6 +973,16 @@ static void m86_cleanup_resources(void *data)
 		clk_put(priv->rtc_clk);
 		priv->rtc_clk = NULL;
 	}
+	mutex_lock(&priv->qos_lock);
+	if (priv->bus_qos_active) {
+		exynos_bus_qos_remove_request(&priv->bus_qos_req);
+		priv->bus_qos_active = false;
+	}
+	if (priv->cpu_latency_active) {
+		cpu_latency_qos_remove_request(&priv->cpu_latency_req);
+		priv->cpu_latency_active = false;
+	}
+	mutex_unlock(&priv->qos_lock);
 	m86_card.dai_link[0].cpus->of_node = NULL;
 	m86_card.dai_link[0].platforms->of_node = NULL;
 	m86_card.dai_link[0].codecs->of_node = NULL;
@@ -907,6 +1005,11 @@ static int m86_audio_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	mutex_init(&priv->es705_lock);
+	mutex_init(&priv->qos_lock);
+	atomic_set(&priv->active_streams, 0);
+	priv->bus_dev = exynos_bus_get_dev("bus-mif");
+	if (!priv->bus_dev)
+		priv->bus_dev = exynos_bus_get_dev(NULL);
 
 	snd_soc_card_set_drvdata(card, priv);
 	card->dev = dev;
