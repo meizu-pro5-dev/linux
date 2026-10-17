@@ -484,16 +484,16 @@ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
 
 static void __sysmmu_enable_clocks(struct sysmmu_drvdata *data)
 {
-	pr_emerg("IOMMU: enable_clocks %s master=%s\n", dev_name(data->sysmmu),
+	pr_debug("IOMMU: enable_clocks %s master=%s\n", dev_name(data->sysmmu),
 		 data->clk_master ? "yes" : "NULL");
 	BUG_ON(clk_prepare_enable(data->clk_master));
-	pr_emerg("IOMMU: enable_clocks %s clk\n", dev_name(data->sysmmu));
+	pr_debug("IOMMU: enable_clocks %s clk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->clk));
-	pr_emerg("IOMMU: enable_clocks %s pclk\n", dev_name(data->sysmmu));
+	pr_debug("IOMMU: enable_clocks %s pclk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->pclk));
-	pr_emerg("IOMMU: enable_clocks %s aclk\n", dev_name(data->sysmmu));
+	pr_debug("IOMMU: enable_clocks %s aclk\n", dev_name(data->sysmmu));
 	BUG_ON(clk_prepare_enable(data->aclk));
-	pr_emerg("IOMMU: enable_clocks %s all on\n", dev_name(data->sysmmu));
+	pr_debug("IOMMU: enable_clocks %s all on\n", dev_name(data->sysmmu));
 }
 
 static void __sysmmu_disable_clocks(struct sysmmu_drvdata *data)
@@ -660,7 +660,7 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 {
 	unsigned long flags;
 
-	pr_emerg("IOMMU: __sysmmu_enable %s enter\n", dev_name(data->sysmmu));
+	pr_debug("IOMMU: __sysmmu_enable %s enter\n", dev_name(data->sysmmu));
 	__sysmmu_enable_clocks(data);
 
 	spin_lock_irqsave(&data->lock, flags);
@@ -672,9 +672,9 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 	data->active = true;
 	spin_unlock_irqrestore(&data->lock, flags);
 
-	pr_emerg("IOMMU: __sysmmu_enable %s wrote ctrl\n",
+	pr_debug("IOMMU: __sysmmu_enable %s wrote ctrl\n",
 		 dev_name(data->sysmmu));
-	pr_emerg("IOMMU: __sysmmu_enable %s ctrl=%#x status=%#x\n",
+	pr_debug("IOMMU: __sysmmu_enable %s ctrl=%#x status=%#x\n",
 		 dev_name(data->sysmmu),
 		 readl(data->sfrbase + REG_MMU_CTRL),
 		 readl(data->sfrbase + REG_MMU_STATUS));
@@ -846,10 +846,10 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
-	pr_emerg("IOMMU: probe %s before iommu_device_register\n",
+	pr_debug("IOMMU: probe %s before iommu_device_register\n",
 		 dev_name(dev));
 	ret = iommu_device_register(&data->iommu, &exynos_iommu_ops, dev);
-	pr_emerg("IOMMU: probe %s iommu_device_register ret=%d\n",
+	pr_debug("IOMMU: probe %s iommu_device_register ret=%d\n",
 		 dev_name(dev), ret);
 	if (ret)
 		goto err_dma_set_mask;
@@ -873,7 +873,7 @@ static int __maybe_unused exynos_sysmmu_suspend(struct device *dev)
 		struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
 
 		mutex_lock(&owner->rpm_lock);
-		pr_emerg("IOMMU: sysmmu_suspend %s domain=%d active=%d\n",
+		pr_debug("IOMMU: sysmmu_suspend %s domain=%d active=%d\n",
 			 dev_name(dev), !!data->domain, data->active);
 		if (data->domain && data->active) {
 			dev_dbg(data->sysmmu, "saving state\n");
@@ -893,7 +893,7 @@ static int __maybe_unused exynos_sysmmu_resume(struct device *dev)
 		struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
 
 		mutex_lock(&owner->rpm_lock);
-		pr_emerg("IOMMU: sysmmu_resume %s domain=%d active=%d ready=%d\n",
+		pr_debug("IOMMU: sysmmu_resume %s domain=%d active=%d ready=%d\n",
 			 dev_name(dev), !!data->domain, data->active,
 			 owner->ready);
 		/*
@@ -907,7 +907,7 @@ static int __maybe_unused exynos_sysmmu_resume(struct device *dev)
 			dev_dbg(data->sysmmu, "restoring state\n");
 			__sysmmu_enable(data);
 		}
-		pr_emerg("IOMMU: sysmmu_resume %s done active=%d\n",
+		pr_debug("IOMMU: sysmmu_resume %s done active=%d\n",
 			 dev_name(dev), data->active);
 		mutex_unlock(&owner->rpm_lock);
 	}
@@ -1104,16 +1104,16 @@ static int exynos_iommu_attach_device(struct iommu_domain *iommu_domain,
 	owner->domain = iommu_domain;
 	spin_unlock_irqrestore(&domain->lock, flags);
 
-	pr_emerg("IOMMU: attach master=%s\n", dev_name(dev));
+	pr_debug("IOMMU: attach master=%s\n", dev_name(dev));
 
 	list_for_each_entry(data, &owner->controllers, owner_node) {
-		pr_emerg("IOMMU: attach sysmmu=%s active=%d domain=%d\n",
+		pr_debug("IOMMU: attach sysmmu=%s active=%d domain=%d\n",
 			 dev_name(data->sysmmu),
 			 pm_runtime_active(data->sysmmu),
 			 !!data->domain);
 		pm_runtime_get_noresume(data->sysmmu);
 		if (pm_runtime_active(data->sysmmu)) {
-			pr_emerg("IOMMU: attach enabling %s now\n",
+			pr_debug("IOMMU: attach enabling %s now\n",
 				 dev_name(data->sysmmu));
 			__sysmmu_enable(data);
 		}
@@ -1150,7 +1150,7 @@ void exynos_iommu_master_ready(struct device *master)
 		owner->ready = true;
 		list_for_each_entry(data, &owner->controllers, owner_node) {
 			if (data->domain && !data->active) {
-				pr_emerg("IOMMU: master_ready enabling %s\n",
+				pr_debug("IOMMU: master_ready enabling %s\n",
 					 dev_name(data->sysmmu));
 				__sysmmu_enable(data);
 			}
@@ -1184,7 +1184,7 @@ int exynos_iommu_map_identity(struct device *master, phys_addr_t phys,
 
 	ret = iommu_map(owner->domain, start, start, end - start,
 			IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
-	pr_emerg("IOMMU: map_identity %s phys=%pa start=%pa size=%#zx ret=%d\n",
+	pr_debug("IOMMU: map_identity %s phys=%pa start=%pa size=%#zx ret=%d\n",
 		 dev_name(master), &phys, &start, (size_t)(end - start), ret);
 	return ret;
 }
@@ -1527,7 +1527,7 @@ static struct iommu_device *exynos_iommu_probe_device(struct device *dev)
 		data->link = device_link_add(dev, data->sysmmu,
 					     DL_FLAG_STATELESS |
 					     DL_FLAG_PM_RUNTIME);
-		pr_emerg("IOMMU: probe_device %s link=%s to %s\n",
+		pr_debug("IOMMU: probe_device %s link=%s to %s\n",
 			 dev_name(dev), data->link ? "ok" : "NULL",
 			 dev_name(data->sysmmu));
 	}
@@ -1579,7 +1579,7 @@ static int exynos_iommu_of_xlate(struct device *dev,
 		put_device(&sysmmu->dev);
 		return -EPROBE_DEFER;
 	}
-	pr_emerg("IOMMU: of_xlate master=%s sysmmu=%s\n", dev_name(dev),
+	pr_debug("IOMMU: of_xlate master=%s sysmmu=%s\n", dev_name(dev),
 		 dev_name(&sysmmu->dev));
 
 	if (!owner) {
@@ -1667,9 +1667,9 @@ static int __init exynos_iommu_init(void)
 		goto err_zero_lv2;
 	}
 
-	pr_emerg("IOMMU: init enter\n");
+	pr_debug("IOMMU: init enter\n");
 	ret = platform_driver_register(&exynos_sysmmu_driver);
-	pr_emerg("IOMMU: platform_driver_register ret=%d\n", ret);
+	pr_debug("IOMMU: platform_driver_register ret=%d\n", ret);
 	if (ret) {
 		pr_err("%s: Failed to register driver\n", __func__);
 		goto err_reg_driver;

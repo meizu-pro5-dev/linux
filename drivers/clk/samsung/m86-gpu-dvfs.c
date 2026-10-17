@@ -536,7 +536,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
   if(ret)goto fault;
   if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
-  dev_info(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
+  dev_dbg(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
   if(r->hz>old) {
    if(d->bus_qos_active && r->mif > d->cur_mif_qos) {
     dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
@@ -562,7 +562,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    stage="normal-pair-after";
    ret=check_normal_on_state(d,r->hz);if(ret)goto fault;
   }
-  dev_info(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),r->uv);
+  dev_dbg(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),r->uv);
  finish:
   ret=0;goto put;
  fault:

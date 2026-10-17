@@ -29,7 +29,7 @@
 
 	chosen {
 		stdout-path = "serial0:115200n8";
-		bootargs = "earlycon=exynos4210,0x14c30000 console=ttySAC0,115200n8 rdinit=/init maxcpus=8 clk_ignore_unused pd_ignore_unused ignore_loglevel loglevel=8 initcall_debug nokaslr no_console_suspend panic=0";
+		bootargs = "earlycon=exynos4210,0x14c30000 console=ttySAC0,115200n8 rdinit=/init maxcpus=8 clk_ignore_unused pd_ignore_unused loglevel=4 nokaslr no_console_suspend panic=0";
 	};
 
 	/* Built-in FDT: use the common 3 GiB map; ignore extra RAM on 4 GiB SKUs. */
