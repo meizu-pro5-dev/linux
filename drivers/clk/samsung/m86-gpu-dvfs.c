@@ -464,11 +464,16 @@ static int set_clock(struct gpu_dvfs *d,unsigned long rate)
 }
 static int bus_floor(struct gpu_dvfs *d,u32 floor)
 {
- u32 con=readl(d->topc+0x150),sel=readl(d->topc+0x214),p=(con>>8)&63;
- u32 m=(con>>16)&1023,s=con&7;
+ u32 con,sel,con2,sel2,p,m,s,eff_floor;
+ exynos7420_bus_dvfs_read_lock();
+ con=readl(d->topc+0x150);sel=readl(d->topc+0x214);
+ con2=readl(d->topc+0x150);sel2=readl(d->topc+0x214);
+ eff_floor=exynos7420_mif_effective_floor_khz(floor);
+ exynos7420_bus_dvfs_read_unlock();
+ p=(con>>8)&63;m=(con>>16)&1023;s=con&7;
  if(!p || !m || (con&(BIT(31)|BIT(29)))!=(BIT(31)|BIT(29)) ||
-    !(sel&BIT(16)) || !(sel&BIT(20)) || con!=readl(d->topc+0x150) || sel!=readl(d->topc+0x214))return -EIO;
- return div_u64(24000000ULL*m,(p<<s)*2000)>=floor ? 0 : -ERANGE;
+    !(sel&BIT(16)) || !(sel&BIT(20)) || con!=con2 || sel!=sel2)return -EIO;
+ return div_u64(24000000ULL*m,(p<<s)*2000)>=eff_floor ? 0 : -ERANGE;
 }
 int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
 {
@@ -510,19 +515,34 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    * retains its independent 95C critical shutdown. */
   if(temp>=75000 && r->hz>266000000) {r=&rates[0];*freq=r->hz;}
   if(old==r->hz){ret=0;goto finish;} /* Fast-path unchanged rate without GPIO-I2C storm. */
+  if(r->hz>old && d->bus_qos_active && r->mif > d->cur_mif_qos) {
+   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
+   d->cur_mif_qos = r->mif;
+  }
   stage="MIF-floor";
-  ret=bus_floor(d,r->mif);if(ret)goto fault;
+  ret=bus_floor(d,r->mif);
+  if(ret) {
+   dev_warn_ratelimited(d->dev, "GPU MIF floor not met (%u kHz), deferring up-switch\n", r->mif);
+   *freq = old;
+   ret = -EAGAIN;
+   goto put;
+  }
   {
    struct pro5_int_always_on_rates int_rates;
+   u32 eff_int_qos;
    stage="INT-read";
-   ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);if(ret)goto fault;
+   exynos7420_bus_dvfs_read_lock();
+   ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);
+   eff_int_qos=exynos7420_int_effective_floor_khz(r->int_qos);
+   exynos7420_bus_dvfs_read_unlock();
+   if(ret)goto fault;
    stage="INT-floor";
-   ret=pro5_topc_int_always_on_floor(&int_rates,r->int_qos);
+   ret=pro5_topc_int_always_on_floor(&int_rates,eff_int_qos);
    if(ret) {
-    dev_err(d->dev,"GPU INT floor failure logical_request=%u leaf_Hz bus0/bus1/bus1_low/pclk/imem/imem_low=%llu/%llu/%llu/%llu/%llu/%llu ret=%d\n",
-            r->int_qos,int_rates.bus0,int_rates.bus1,int_rates.bus1_low,
-            int_rates.pclk,int_rates.imem,int_rates.imem_low,ret);
-    goto fault;
+    dev_warn_ratelimited(d->dev,"GPU INT floor not met (%u kHz), deferring up-switch\n", eff_int_qos);
+    *freq = old;
+    ret = -EAGAIN;
+    goto put;
    }
   }
   if(d->normal_on_voltage) {
@@ -538,10 +558,6 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
   dev_dbg(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
   if(r->hz>old) {
-   if(d->bus_qos_active && r->mif > d->cur_mif_qos) {
-    dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
-    d->cur_mif_qos = r->mif;
-   }
    stage="up-voltage";
    ret=set_voltage(d,r->uv);if(ret)goto fault;
    if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
@@ -570,6 +586,10 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
           stage,ret,requested,r ? r->hz : 0,old,temp,selector,mcs);
   if(!d->failed && clk_get_rate(d->clock)>266000000)
    if(set_clock(d,266000000))dev_err(d->dev,"emergency GPU clock throttle failed\n");
+  if(d->bus_qos_active && d->cur_mif_qos > rates[0].mif) {
+   dev_pm_qos_update_request(&d->bus_qos_req, rates[0].mif);
+   d->cur_mif_qos = rates[0].mif;
+  }
   /* Throughput vote has no electrical safety role, including after failure. */
   mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
   dev_err(d->dev,"GPU transaction failed%d; no voltage rollback; all switching frozen\n",ret);
@@ -902,6 +922,8 @@ static int gpu_probe(struct platform_device *pdev)
   struct device_node *node;
   struct platform_device *supplier;
   int temp;
+  if(!exynos_bus_get_dev("bus-mif") || !exynos_bus_get_dev("bus-int"))
+   return -EPROBE_DEFER;
   /* GPU consumes these six always-on INT leaves. Logical INT QoS is not
    * one leaf'sMHz: compare vendor level's minimum vector without INT writes. */
   struct pro5_int_always_on_rates int_rates;

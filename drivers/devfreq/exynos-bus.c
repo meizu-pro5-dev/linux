@@ -23,6 +23,8 @@
 #include <linux/regulator/consumer.h>
 #include <linux/m86-bus-qos.h>
 
+#include <linux/workqueue.h>
+
 #define DEFAULT_SATURATION_RATIO	40
 
 struct exynos_bus {
@@ -39,8 +41,16 @@ struct exynos_bus {
 	int opp_token;
 	struct clk *clk;
 	unsigned int ratio;
+	bool is_exynos7420_mif;
+	bool is_exynos7420_int;
+	struct regulator *reg_vdd;
+	struct dev_pm_qos_request baseline_qos_req;
+	struct delayed_work boot_handoff_work;
+	u32 baseline_floor_khz;
 	struct list_head node;
 };
+
+#include "exynos7420-int-mif.h"
 
 static LIST_HEAD(exynos_bus_list);
 static DEFINE_MUTEX(exynos_bus_list_lock);
@@ -132,10 +142,20 @@ static int exynos_bus_target(struct device *dev, unsigned long *freq, u32 flags)
 
 	/* Change voltage and frequency according to new OPP level */
 	mutex_lock(&bus->lock);
-	if (bus->clk)
-		ret = dev_pm_opp_set_rate(dev, *freq);
-	if (!ret)
-		bus->curr_freq = *freq;
+	if (bus->is_exynos7420_mif) {
+		mutex_lock(&exynos7420_hw.lock);
+		ret = exynos7420_mif_target_locked(bus, *freq);
+		mutex_unlock(&exynos7420_hw.lock);
+	} else if (bus->is_exynos7420_int) {
+		mutex_lock(&exynos7420_hw.lock);
+		ret = exynos7420_int_target_locked(bus, *freq);
+		mutex_unlock(&exynos7420_hw.lock);
+	} else {
+		if (bus->clk)
+			ret = dev_pm_opp_set_rate(dev, *freq);
+		if (!ret)
+			bus->curr_freq = *freq;
+	}
 
 	mutex_unlock(&bus->lock);
 
@@ -180,10 +200,69 @@ err:
 	return ret;
 }
 
+static void exynos_bus_boot_handoff_fn(struct work_struct *work)
+{
+	struct exynos_bus *bus = container_of(to_delayed_work(work),
+					      struct exynos_bus,
+					      boot_handoff_work);
+
+	if (dev_pm_qos_request_active(&bus->baseline_qos_req) &&
+	    bus->baseline_floor_khz == 1552000) {
+		bus->baseline_floor_khz = 416000;
+		dev_pm_qos_update_request(&bus->baseline_qos_req, 416000);
+		dev_info(bus->dev, "boot handoff complete: baseline floor -> 416000 kHz\n");
+	}
+}
+
+static ssize_t baseline_floor_khz_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct exynos_bus *bus = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", bus->baseline_floor_khz);
+}
+
+static ssize_t baseline_floor_khz_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct exynos_bus *bus = dev_get_drvdata(dev);
+	u32 val;
+	int ret;
+
+	ret = kstrtou32(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	cancel_delayed_work_sync(&bus->boot_handoff_work);
+	bus->baseline_floor_khz = val;
+	if (dev_pm_qos_request_active(&bus->baseline_qos_req))
+		dev_pm_qos_update_request(&bus->baseline_qos_req, val);
+
+	return count;
+}
+static DEVICE_ATTR_RW(baseline_floor_khz);
+
 static void exynos_bus_exit(struct device *dev)
 {
 	struct exynos_bus *bus = dev_get_drvdata(dev);
 	int ret;
+
+	if (bus->is_exynos7420_mif) {
+		cancel_delayed_work_sync(&bus->boot_handoff_work);
+		if (dev_pm_qos_request_active(&bus->baseline_qos_req))
+			dev_pm_qos_remove_request(&bus->baseline_qos_req);
+	}
+
+	mutex_lock(&exynos7420_hw.lock);
+	if (bus->is_exynos7420_mif && exynos7420_hw.mif_bus == bus) {
+		exynos7420_hw.mif_bus = NULL;
+		exynos7420_hw.vdd_mif = NULL;
+	} else if (bus->is_exynos7420_int && exynos7420_hw.int_bus == bus) {
+		exynos7420_hw.int_bus = NULL;
+		exynos7420_hw.vdd_int = NULL;
+	}
+	mutex_unlock(&exynos7420_hw.lock);
 
 	mutex_lock(&exynos_bus_list_lock);
 	list_del(&bus->node);
@@ -208,6 +287,13 @@ static void exynos_bus_passive_exit(struct device *dev)
 {
 	struct exynos_bus *bus = dev_get_drvdata(dev);
 
+	mutex_lock(&exynos7420_hw.lock);
+	if (bus->is_exynos7420_int && exynos7420_hw.int_bus == bus) {
+		exynos7420_hw.int_bus = NULL;
+		exynos7420_hw.vdd_int = NULL;
+	}
+	mutex_unlock(&exynos7420_hw.lock);
+
 	mutex_lock(&exynos_bus_list_lock);
 	list_del(&bus->node);
 	mutex_unlock(&exynos_bus_list_lock);
@@ -226,7 +312,8 @@ static int exynos_bus_parent_parse_of(struct device_node *np,
 	const char *supplies[] = { "vdd", NULL };
 	int i, ret, count, size;
 
-	if (of_property_present(np, "vdd-supply")) {
+	if (of_property_present(np, "vdd-supply") &&
+	    !of_machine_is_compatible("samsung,exynos7420")) {
 		ret = dev_pm_opp_set_regulators(dev, supplies);
 		if (ret < 0) {
 			dev_err(dev, "failed to set regulators %d\n", ret);
@@ -307,6 +394,33 @@ static int exynos_bus_parse_of(struct device_node *np,
 		rate = clk_get_rate(bus->clk);
 	}
 
+	if (of_machine_is_compatible("samsung,exynos7420")) {
+		struct regulator *vdd;
+
+		ret = exynos7420_hw_bus_init_once(dev);
+		if (ret)
+			goto err_clk;
+
+		vdd = devm_regulator_get_optional(dev, "vdd");
+		if (IS_ERR(vdd)) {
+			if (PTR_ERR(vdd) == -EPROBE_DEFER) {
+				ret = -EPROBE_DEFER;
+				goto err_clk;
+			}
+			vdd = NULL;
+		}
+
+		if (of_node_name_eq(np, "bus-mif")) {
+			bus->is_exynos7420_mif = true;
+			bus->reg_vdd = vdd;
+			rate = 1552000000UL;
+		} else if (of_node_name_eq(np, "bus-int")) {
+			bus->is_exynos7420_int = true;
+			bus->reg_vdd = vdd;
+			rate = 400000000UL;
+		}
+	}
+
 	/* Get the freq and voltage from OPP table to scale the bus freq */
 	ret = dev_pm_opp_of_add_table(dev);
 	if (ret < 0) {
@@ -343,6 +457,7 @@ static int exynos_bus_profile_init(struct exynos_bus *bus,
 	int ret;
 
 	/* Initialize the struct profile and governor data for parent device */
+	profile->initial_freq = bus->curr_freq;
 	profile->polling_ms = 50;
 	profile->target = exynos_bus_target;
 	profile->get_dev_status = exynos_bus_get_dev_status;
@@ -362,12 +477,26 @@ static int exynos_bus_profile_init(struct exynos_bus *bus,
 		gov_name = DEVFREQ_GOV_POWERSAVE;
 	}
 
+	if (bus->is_exynos7420_mif) {
+		INIT_DELAYED_WORK(&bus->boot_handoff_work, exynos_bus_boot_handoff_fn);
+		bus->baseline_floor_khz = 1552000;
+		dev_pm_qos_add_request(dev, &bus->baseline_qos_req,
+				       DEV_PM_QOS_MIN_FREQUENCY,
+				       bus->baseline_floor_khz);
+	}
+
 	/* Add devfreq device to monitor and handle the exynos bus */
 	bus->devfreq = devm_devfreq_add_device(dev, profile, gov_name, ondemand_data);
 	if (IS_ERR(bus->devfreq)) {
 		dev_err(dev, "failed to add devfreq device (%ld)\n", PTR_ERR(bus->devfreq));
+		if (bus->is_exynos7420_mif &&
+		    dev_pm_qos_request_active(&bus->baseline_qos_req))
+			dev_pm_qos_remove_request(&bus->baseline_qos_req);
 		return PTR_ERR(bus->devfreq);
 	}
+
+	if (bus->is_exynos7420_mif)
+		schedule_delayed_work(&bus->boot_handoff_work, 15 * HZ);
 
 	/* Register opp_notifier to catch the change of OPP  */
 	ret = devm_devfreq_register_opp_notifier(dev, bus->devfreq);
@@ -408,6 +537,7 @@ static int exynos_bus_profile_init_passive(struct exynos_bus *bus,
 	struct devfreq *parent_devfreq;
 
 	/* Initialize the struct profile and governor data for passive device */
+	profile->initial_freq = bus->curr_freq;
 	profile->target = exynos_bus_target;
 	profile->exit = exynos_bus_passive_exit;
 
@@ -500,15 +630,41 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	list_add_tail(&bus->node, &exynos_bus_list);
 	mutex_unlock(&exynos_bus_list_lock);
 
+	if (bus->is_exynos7420_mif || bus->is_exynos7420_int)
+		device_create_file(dev, &dev_attr_hw_status);
+	if (bus->is_exynos7420_mif)
+		device_create_file(dev, &dev_attr_baseline_floor_khz);
+
 	max_state = bus->devfreq->max_state;
 	min_freq = min(bus->devfreq->freq_table[0], bus->devfreq->freq_table[max_state - 1]) / 1000;
 	max_freq = max(bus->devfreq->freq_table[0], bus->devfreq->freq_table[max_state - 1]) / 1000;
 	pr_info("exynos-bus: new bus device registered: %s (%6ld KHz ~ %6ld KHz)\n",
-			dev_name(dev), min_freq, max_freq);
+		dev_name(dev), min_freq, max_freq);
+
+	mutex_lock(&exynos7420_hw.lock);
+	if (bus->is_exynos7420_mif) {
+		exynos7420_hw.mif_bus = bus;
+		exynos7420_hw.vdd_mif = bus->reg_vdd;
+	} else if (bus->is_exynos7420_int) {
+		exynos7420_hw.int_bus = bus;
+		exynos7420_hw.vdd_int = bus->reg_vdd;
+		exynos7420_int_set_clocks(exynos7420_hw.cur_int_idx);
+	}
+	mutex_unlock(&exynos7420_hw.lock);
 
 	return 0;
 
 err:
+	mutex_lock(&exynos7420_hw.lock);
+	if (bus->is_exynos7420_mif && exynos7420_hw.mif_bus == bus) {
+		exynos7420_hw.mif_bus = NULL;
+		exynos7420_hw.vdd_mif = NULL;
+	} else if (bus->is_exynos7420_int && exynos7420_hw.int_bus == bus) {
+		exynos7420_hw.int_bus = NULL;
+		exynos7420_hw.vdd_int = NULL;
+	}
+	mutex_unlock(&exynos7420_hw.lock);
+
 	dev_pm_opp_of_remove_table(dev);
 	if (bus->clk)
 		clk_disable_unprepare(bus->clk);
@@ -532,6 +688,26 @@ static int exynos_bus_resume(struct device *dev)
 	struct exynos_bus *bus = dev_get_drvdata(dev);
 	int ret;
 
+	if (bus->is_exynos7420_mif) {
+		mutex_lock(&bus->lock);
+		mutex_lock(&exynos7420_hw.lock);
+		if (exynos7420_hw.vdd_mif)
+			exynos7420_hw.cur_mif_volt_uv = regulator_get_voltage(exynos7420_hw.vdd_mif);
+		exynos7420_hw.cur_mif_idx = 0;
+		bus->curr_freq = 1552000000UL;
+		mutex_unlock(&exynos7420_hw.lock);
+		mutex_unlock(&bus->lock);
+	} else if (bus->is_exynos7420_int) {
+		mutex_lock(&bus->lock);
+		mutex_lock(&exynos7420_hw.lock);
+		if (exynos7420_hw.vdd_int)
+			exynos7420_hw.cur_int_volt_uv = regulator_get_voltage(exynos7420_hw.vdd_int);
+		exynos7420_hw.cur_int_idx = 0;
+		bus->curr_freq = 560000000UL;
+		mutex_unlock(&exynos7420_hw.lock);
+		mutex_unlock(&bus->lock);
+	}
+
 	if (bus->edev_count > 0) {
 		ret = exynos_bus_enable_edev(bus);
 		if (ret < 0) {
@@ -554,6 +730,39 @@ static int exynos_bus_suspend(struct device *dev)
 			dev_err(dev, "failed to disable the devfreq-event devices\n");
 			return ret;
 		}
+	}
+
+	if (bus->is_exynos7420_mif) {
+		mutex_lock(&bus->lock);
+		mutex_lock(&exynos7420_hw.lock);
+		ret = exynos7420_mif_target_locked(bus, 1552000000UL);
+		mutex_unlock(&exynos7420_hw.lock);
+		mutex_unlock(&bus->lock);
+		if (ret)
+			return ret;
+	} else if (bus->is_exynos7420_int) {
+		/* Vendor exynos7_bus_int: INT 560 MHz strictly requires MIF >= 632 MHz */
+		if (exynos7420_hw.mif_bus) {
+			mutex_lock(&exynos7420_hw.mif_bus->lock);
+			mutex_lock(&exynos7420_hw.lock);
+			if (exynos7420_hw.mif_bus->curr_freq < 1552000000UL) {
+				ret = exynos7420_mif_target_locked(exynos7420_hw.mif_bus, 1552000000UL);
+				if (ret) {
+					mutex_unlock(&exynos7420_hw.lock);
+					mutex_unlock(&exynos7420_hw.mif_bus->lock);
+					return ret;
+				}
+			}
+			mutex_unlock(&exynos7420_hw.lock);
+			mutex_unlock(&exynos7420_hw.mif_bus->lock);
+		}
+		mutex_lock(&bus->lock);
+		mutex_lock(&exynos7420_hw.lock);
+		ret = exynos7420_int_target_locked(bus, 560000000UL);
+		mutex_unlock(&exynos7420_hw.lock);
+		mutex_unlock(&bus->lock);
+		if (ret)
+			return ret;
 	}
 
 	return 0;
