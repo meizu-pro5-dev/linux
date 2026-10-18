@@ -13,9 +13,79 @@
 #include <asm/m86-initrd.h>
 #include <asm/page.h>
 
-/* The conservative 3 GiB map in the project's first-boot DTS. */
-#define M86_DRAM_START 0x40000000ULL
-#define M86_DRAM_END   0x100000000ULL
+/* The conservative 3 GiB low map and 1 GiB high bank on 4 GiB SKUs. */
+#define M86_DRAM_START      0x40000000ULL
+#define M86_DRAM_END        0x100000000ULL
+#define M86_HIGH_DRAM_START 0x100000000ULL
+#define M86_HIGH_DRAM_MAX   0x40000000ULL
+
+static void __init m86_import_firmware_memory(void *builtin, const void *firmware)
+{
+	const fdt64_t *fw_reg;
+	fdt64_t *bi_reg;
+	int node, bi_mem, fw_len, bi_len, i, count;
+	u64 high_end = M86_HIGH_DRAM_START;
+	u64 high_size = 0;
+
+	/*
+	 * U-Boot fdt_fixup_memory_banks() writes 16 banks of (be64 start, be64 size)
+	 * to /memory reg (256 bytes total). On 4 GiB units, banks 12..15 cover
+	 * [0x1_0000_0000, 0x1_4000_0000) in four 256 MiB chunks.
+	 * Scan all root memory subnodes (/memory and /memory@40000000).
+	 */
+	fdt_for_each_subnode(node, firmware, 0) {
+		const char *name = fdt_get_name(firmware, node, NULL);
+
+		if (!name || (strcmp(name, "memory") != 0 &&
+			      strncmp(name, "memory@", 7) != 0))
+			continue;
+
+		fw_reg = fdt_getprop(firmware, node, "reg", &fw_len);
+		if (!fw_reg || fw_len < 16 || (fw_len % 16) != 0)
+			continue;
+
+		high_end = M86_HIGH_DRAM_START;
+		count = fw_len / 16;
+		for (i = 0; i < count; i++) {
+			u64 base = fdt64_ld(&fw_reg[i * 2]);
+			u64 size = fdt64_ld(&fw_reg[i * 2 + 1]);
+
+			if (!size || base < M86_HIGH_DRAM_START)
+				continue;
+			if (base != high_end ||
+			    size > (M86_HIGH_DRAM_START + M86_HIGH_DRAM_MAX) - high_end)
+				break;
+			high_end += size;
+		}
+		if (high_end > M86_HIGH_DRAM_START) {
+			high_size = high_end - M86_HIGH_DRAM_START;
+			break;
+		}
+	}
+
+	if (!high_size) {
+		pr_notice("firmware FDT reports 3 GiB SKU (no high DRAM banks)\n");
+		return;
+	}
+
+	bi_mem = fdt_path_offset(builtin, "/memory@40000000");
+	if (bi_mem < 0)
+		bi_mem = fdt_path_offset(builtin, "/memory");
+	if (bi_mem < 0)
+		return;
+
+	bi_reg = fdt_getprop_w(builtin, bi_mem, "reg", &bi_len);
+	if (!bi_reg || bi_len < 32) {
+		pr_warn("builtin FDT /memory reg too small (%d) for high DRAM bank\n",
+			bi_len);
+		return;
+	}
+
+	bi_reg[2] = cpu_to_fdt64(M86_HIGH_DRAM_START);
+	bi_reg[3] = cpu_to_fdt64(high_size);
+	pr_notice("accepted high DRAM=[%#llx,%#llx) size=%#llx (%llu MiB) from firmware FDT\n",
+		  M86_HIGH_DRAM_START, high_end, high_size, high_size >> 20);
+}
 
 static bool __init m86_dram_range(u64 start, u64 size)
 {
@@ -183,6 +253,7 @@ int __init m86_import_firmware_initrd(void *builtin, phys_addr_t builtin_pa,
 		goto reject;
 	pr_notice("firmware initrd=[%#llx,%#llx) expected_size=%#llx\n",
 		  start, end, expected_size);
+	m86_import_firmware_memory(builtin, firmware);
 	early_memunmap((void *)firmware, total);
 	firmware = NULL;
 	reason = "initrd range/length outside build contract";
