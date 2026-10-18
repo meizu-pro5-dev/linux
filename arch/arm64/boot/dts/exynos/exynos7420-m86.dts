@@ -32,10 +32,14 @@
 		bootargs = "earlycon=exynos4210,0x14c30000 console=ttySAC0,115200n8 rdinit=/init maxcpus=8 clk_ignore_unused pd_ignore_unused loglevel=4 nokaslr no_console_suspend panic=0";
 	};
 
-	/* Built-in FDT: use the common 3 GiB map; ignore extra RAM on 4 GiB SKUs. */
+	/*
+	 * Built-in FDT: 3 GiB base map + placeholder for 4 GiB high bank
+	 * [0x1_0000_0000, 0x1_4000_0000), populated at boot from firmware FDT.
+	 */
 	memory@40000000 {
 		device_type = "memory";
-		reg = <0x0 0x40000000 0x0 0xc0000000>;
+		reg = <0x0 0x40000000 0x0 0xc0000000>,
+		      <0x1 0x00000000 0x0 0x00000000>;
 	};
 
 	reserved-memory {
