@@ -276,6 +276,12 @@ static int m86_fts_probe(struct i2c_client *client)
 	fts->client = client;
 	mutex_init(&fts->lock);
 	ret = m86_fts_read(fts, id_cmd, sizeof(id_cmd), id, sizeof(id));
+	if (ret || id[1] != 0x39 || id[2] != 0x80) {
+		/* Controller may be active from previous session/TWRP; issue soft reset and retry */
+		m86_fts_write(fts, reset, sizeof(reset));
+		usleep_range(10000, 15000);
+		ret = m86_fts_read(fts, id_cmd, sizeof(id_cmd), id, sizeof(id));
+	}
 	if (ret)
 		return dev_err_probe(&client->dev, ret, "cannot read FTS ID\n");
 	if (id[1] != 0x39 || id[2] != 0x80)

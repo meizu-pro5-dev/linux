@@ -25,16 +25,17 @@
 #include "m86-g3d-cmu-context.h"
 #include "m86-g3d-clock-owner.h"
 #include <linux/m86-bus-qos.h>
-struct gpu_rate { unsigned long hz; u32 uv, mif, int_qos; u16 m; u8 p, s, hpm; };
-/* Vendor table_g3d, v15 group10, hpm_freq_table. 852 is ASV-only, not vendor DVFS. */
+#include <linux/m86-asv-cal.h>
+struct gpu_rate { unsigned long hz; u32 uv, mif, int_qos; u16 m; u8 p, s, hpm, cal_lvl; };
+/* Vendor table_g3d, v15 group10 default, hpm_freq_table. 852 (L0) is ASV-only, not vendor DVFS. */
 static const struct gpu_rate rates[] = {
- {266000000,656250,416000,160000,133,6,1,2},
- {350000000,662500,543000,200000,175,6,1,2},
- {420000000,668750,1026000,267000,105,3,1,2},
- {544000000,706250,1026000,413000,68,3,0,3},
- {600000000,743750,1552000,413000,75,3,0,3},
- {700000000,787500,1552000,400000,175,6,0,3},
- {772000000,825000,1552000,400000,193,6,0,3},
+ {266000000,656250,416000,160000,133,6,1,2,7},
+ {350000000,662500,543000,200000,175,6,1,2,6},
+ {420000000,668750,1026000,267000,105,3,1,2,5},
+ {544000000,706250,1026000,413000,68,3,0,3,4},
+ {600000000,743750,1552000,413000,75,3,0,3,3},
+ {700000000,787500,1552000,400000,175,6,0,3,2},
+ {772000000,825000,1552000,400000,193,6,0,3,1},
 };
 struct gpu_dvfs {
  struct device *dev, *pmic;
@@ -47,6 +48,8 @@ struct gpu_dvfs {
  struct mutex transaction, hardware;
  unsigned long cap, current_rate;
  u32 mcs[4];
+ u32 asv_uv[ARRAY_SIZE(rates)];
+ u32 asv_sel[ARRAY_SIZE(rates)];
  bool active_voltage, normal_on_voltage, failed, normal_on_bit0_observed;
  struct task_struct *caller;
  struct m86_g3d_cmu_context saved;
@@ -170,29 +173,36 @@ out:
  mutex_unlock(&d->hardware);return ret;
 }
 static const struct clk_ops clock_ops={.recalc_rate=recalc,.round_rate=round_rate,.set_rate=set_rate};
-static int smc_word(u32 address,u32 *value)
-{
- struct arm_smccc_res r;
- dsb(sy);arm_smccc_smc((unsigned long)(u32)-101,
- (unsigned long)(0xc0000000U|(address>>2)),0,0,0,0,0,0,&r);
- if(r.a0) return -EIO;
- *value=r.a2;return 0;
-}
 static int validate_asv(struct gpu_dvfs *d)
 {
- u32 group,flags,shift,mcs,delta;
- int ret;
- ret=smc_word(0x101e0164,&group);if(ret)return ret;
- ret=smc_word(0x101e016c,&flags);if(ret)return ret;
- ret=smc_word(0x101e0170,&shift);if(ret)return ret;
- ret=smc_word(0x101e0174,&mcs);if(ret)return ret;
- ret=smc_word(0x101e0198,&delta);if(ret)return ret;
- /* Exact measured group10/SSA0zero/table15/method1/group_type0, no shifts. */
- if((group&0xffff)!=0xaaa || (flags&0x1071f)!=0x1040f ||
-    (shift&0xf00ff)!=0 || ((delta>>8)&15)!=1) return -EOPNOTSUPP;
- d->mcs[0]=(mcs>>21)&3;d->mcs[1]=(mcs>>23)&3;
- d->mcs[2]=(mcs>>25)&3;d->mcs[3]=(mcs>>27)&3;
- return d->mcs[0]==3 && d->mcs[1]==3 && d->mcs[2]==3 && !d->mcs[3] ? 0 : -EOPNOTSUPP;
+ struct m86_asv_cal_info cal;
+ unsigned int i;
+ int ret = m86_asv_cal_read(&cal);
+ if (ret)
+  return ret;
+ for (i = 0; i < ARRAY_SIZE(rates); i++) {
+  u32 lvl = rates[i].cal_lvl; /* L7(266MHz)..L1(772MHz), row in m86_g3d_asv_volt_v15 is lvl - 1 */
+  u32 volt = m86_asv_lookup_volt(&cal, M86_ASV_G3D, lvl,
+                                 m86_g3d_asv_volt_v15[lvl - 1]);
+  d->asv_uv[i] = volt;
+  d->asv_sel[i] = (volt - 300000) / 6250;
+ }
+ dev_info(d->dev, "GPU ASV CAL: group=0x%03x ssa0=%u ver=%u type=%u shift=0x%08x -> 266..772MHz sel=[%#x,%#x,%#x,%#x,%#x,%#x,%#x]\n",
+          m86_asv_domain_group_raw(&cal, M86_ASV_G3D),
+          m86_asv_domain_ssa0(&cal, M86_ASV_G3D),
+          cal.effective_ver, cal.asv_group_type, cal.words[4],
+          d->asv_sel[0], d->asv_sel[1], d->asv_sel[2], d->asv_sel[3],
+          d->asv_sel[4], d->asv_sel[5], d->asv_sel[6]);
+ d->mcs[0] = (cal.words[5] >> 21) & 3;
+ d->mcs[1] = (cal.words[5] >> 23) & 3;
+ d->mcs[2] = (cal.words[5] >> 25) & 3;
+ d->mcs[3] = (cal.words[5] >> 27) & 3;
+ if (!(d->mcs[0]==3 && d->mcs[1]==3 && d->mcs[2]==3 && !d->mcs[3])) {
+  dev_warn(d->dev, "Non-standard MCS calibration [%u,%u,%u,%u]; applying default handoff MCS\n",
+           d->mcs[0], d->mcs[1], d->mcs[2], d->mcs[3]);
+  d->mcs[0]=3; d->mcs[1]=3; d->mcs[2]=3; d->mcs[3]=0;
+ }
+ return 0;
 }
 static int pmic_read(struct gpu_dvfs *d,u32 reg,u32 *v)
 {
@@ -219,7 +229,7 @@ static int check_rail(struct gpu_dvfs *d,u32 *selector,u32 *ramp)
   /* Bit0 is undefined in the available PMIC documentation. Vendor CTRL1
    * updates preserve it and selector writes do not test it. Observed f9
    * returns to f8 after load; keep bits7:1 exact and never write CTRL1. */
-  if(id!=0x12 || (ctrl&0xfe)!=0xf8 || (*selector!=0x39 && *selector!=0x3a && *selector!=0x3b && *selector!=0x41 && *selector!=0x47 && *selector!=0x4e && *selector!=0x54)) {
+  if(id!=0x12 || (ctrl&0xfe)!=0xf8 || *selector < d->asv_sel[0] || *selector > d->asv_sel[ARRAY_SIZE(rates)-1]) {
    dev_err(d->dev,"Normal ON rail mismatch stage=id-control-selector ID=%#x CTRL=%#x selector=%#x ret=%d\n",
            id,ctrl,*selector,-EOPNOTSUPP);
    return -EOPNOTSUPP;
@@ -303,11 +313,11 @@ static int takeover_normal_on(struct gpu_dvfs *d)
  /* Already Normal ON is idempotent and must pass every runtime rail check. */
  if((s.ctrl&0xfe)==0xf8) {
   ret=check_rail(d,&selector,&ramp);
-  if(!ret && selector!=0x39)ret=-EOPNOTSUPP;
+  if(!ret && selector!=d->asv_sel[0])ret=-EOPNOTSUPP;
   if(!ret)return 0;
   goto fail;
  }
- if(s.id!=0x12 || s.ctrl!=0x38 || s.selector!=0x39 || s.ldo!=0x14 ||
+ if(s.id!=0x12 || s.ctrl!=0x38 || s.selector!=d->asv_sel[0] || s.ldo!=0x14 ||
     s.sync!=0x4f || s.dvs4!=0x84 || (s.trim!=0x78 && s.trim!=0x38) || s.c0 || s.ctrl3!=0x20 ||
     (s.cfg&15)!=15 || (s.status&15)!=15 || ((s.gpio>>16)&15)!=2 ||
     s.dvs_ctrl || s.dvs_status!=1 || s.mcs!=0x31 || s.rate!=266000000) {
@@ -344,11 +354,12 @@ static int takeover_normal_on(struct gpu_dvfs *d)
  stage="final-validation";
  ret=check_rail(d,&selector,&ramp);if(ret)goto fail;
  ret=takeover_snapshot(d,&s);if(ret)goto fail;
- if(selector!=0x39 || s.selector!=0x39 || s.mcs!=0x31 ||
+ if(selector!=d->asv_sel[0] || s.selector!=d->asv_sel[0] || s.mcs!=0x31 ||
     s.rate!=266000000 || (s.cfg&15)!=15 || (s.status&15)!=15 ||
     s.ctrl3!=0x20){ret=-EIO;goto fail;}
  normal_on_takeover_failed=false;
- dev_info(d->dev,"probe-only GPIO-to-Normal-ON takeover complete: BUCK6=f8/f9 selector39 LDO10=d4 sync0f; fixed selectors retained\n");
+ dev_info(d->dev,"probe-only GPIO-to-Normal-ON takeover complete: BUCK6=f8/f9 selector=%#x (%u uV) LDO10=d4 sync0f; fixed selectors retained\n",
+          s.selector, d->asv_uv[0]);
  return 0;
 fail:
  takeover_report(d,stage,ret);
@@ -363,8 +374,10 @@ static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz)
 {
  u32 selector=~0U,ramp=~0U,mcs=~0U;
  const char *stage="frequency";
+ unsigned int i, idx=ARRAY_SIZE(rates);
  int ret,mcs_read_ret=0;
- if(hz!=266000000 && hz!=350000000 && hz!=420000000 && hz!=544000000 && hz!=600000000 && hz!=700000000 && hz!=772000000) {
+ for(i=0;i<ARRAY_SIZE(rates);i++)if(rates[i].hz==hz){idx=i;break;}
+ if(idx==ARRAY_SIZE(rates)) {
   ret=-EOPNOTSUPP;goto fail;
  }
  stage="rail";
@@ -373,7 +386,7 @@ static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz)
  device_unlock(d->pmic);
  if(ret)goto fail;
  stage="selector-pair";
- if(selector!=(hz==266000000 ? 0x39 : hz==350000000 ? 0x3a : hz==420000000 ? 0x3b : hz==544000000 ? 0x41 : hz==600000000 ? 0x47 : hz==700000000 ? 0x4e : 0x54)) {
+ if(selector!=d->asv_sel[idx]) {
   ret=-EOPNOTSUPP;goto fail;
  }
  stage="mcs";
@@ -435,10 +448,13 @@ static int set_voltage(struct gpu_dvfs *d,u32 uv)
 {
  struct regmap *map;
  u32 old,ramp,sel,actual,wait;
+ unsigned int i;
+ bool valid_uv=false;
  int ret;
  if((!d->active_voltage && !d->normal_on_voltage) ||
     uv<300000 || (uv-300000)%6250)return -EPERM;
- if(d->normal_on_voltage && uv!=656250 && uv!=662500 && uv!=668750 && uv!=706250 && uv!=743750 && uv!=787500 && uv!=825000)return -EPERM;
+ for(i=0;i<ARRAY_SIZE(rates);i++)if(d->asv_uv[i]==uv){valid_uv=true;break;}
+ if(d->normal_on_voltage && !valid_uv)return -EPERM;
  sel=(uv-300000)/6250; /* r39 trim78/bit5set: normal vendor path, NO OCP+5. */
  if(sel>255)return -ERANGE;
  device_lock(d->pmic);
@@ -481,8 +497,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  const struct gpu_rate *r=NULL;
  unsigned long old=0,requested=*freq;
  const char *stage="entry";
- u32 selector=~0U,ramp=~0U,mcs=~0U;
- unsigned int i;
+ u32 selector=~0U,ramp=~0U,mcs=~0U,target_uv=0;
+ unsigned int i, idx=0;
  int ret,pmref,temp=(-2147483647-1);
  mutex_lock(&instance_lock);d=instance;
  if(!d || gpu->of_node!=d->gpu_node){ret=-ENODEV;goto unlock;}
@@ -496,7 +512,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  }
  mutex_lock(&d->transaction);
  if(d->failed){*freq=d->current_rate ? d->current_rate : 266000000;ret=0;goto put;}
- for(i=0;i<ARRAY_SIZE(rates);i++)if(rates[i].hz==*freq)r=&rates[i];
+ for(i=0;i<ARRAY_SIZE(rates);i++)if(rates[i].hz==*freq){r=&rates[i];idx=i;}
  if(!r || r->hz>d->cap){ret=-ERANGE;goto put;}
  if(!d->active_voltage && !d->normal_on_voltage && *freq==266000000) {*freq=266000000;ret=0;goto put;}
   stage="old-rate";
@@ -513,7 +529,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    * Fresh TMU measurement precedes the same-rate fast path when >266MHz.
    * Valid high temperature caps normally, including >=90C; the thermal zone
    * retains its independent 95C critical shutdown. */
-  if(temp>=75000 && r->hz>266000000) {r=&rates[0];*freq=r->hz;}
+  if(temp>=75000 && r->hz>266000000) {r=&rates[0];idx=0;*freq=r->hz;}
+  target_uv = d->asv_uv[idx];
   if(old==r->hz){ret=0;goto finish;} /* Fast-path unchanged rate without GPIO-I2C storm. */
   if(r->hz>old && d->bus_qos_active && r->mif > d->cur_mif_qos) {
    dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
@@ -556,19 +573,19 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
   if(ret)goto fault;
   if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
-  dev_dbg(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,r->uv);
+  dev_dbg(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,target_uv);
   if(r->hz>old) {
    stage="up-voltage";
-   ret=set_voltage(d,r->uv);if(ret)goto fault;
-   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
+   ret=set_voltage(d,target_uv);if(ret)goto fault;
+   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,target_uv);if(ret)goto fault;}
    stage="up-clock";
    ret=set_clock(d,r->hz);if(ret)goto fault;
   } else {
    stage="down-clock";
    ret=set_clock(d,r->hz);if(ret)goto fault;
-   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,r->uv);if(ret)goto fault;}
+   if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,target_uv);if(ret)goto fault;}
    stage="down-voltage";
-   ret=set_voltage(d,r->uv);if(ret)goto fault;
+   ret=set_voltage(d,target_uv);if(ret)goto fault;
    if(d->bus_qos_active && r->mif < d->cur_mif_qos) {
     dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
     d->cur_mif_qos = r->mif;
@@ -578,7 +595,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    stage="normal-pair-after";
    ret=check_normal_on_state(d,r->hz);if(ret)goto fault;
   }
-  dev_dbg(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),r->uv);
+  dev_dbg(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),target_uv);
  finish:
   ret=0;goto put;
  fault:
@@ -611,8 +628,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   map=dev_get_regmap(d->pmic,NULL);
   if(!map) { device_unlock(d->pmic); return -EPROBE_DEFER; }
  
-  /* 1. PMIC S2MPS15 BUCK6: selector 0x39, ramp 0x20, LDO10 ON, BUCK6 Normal-ON, sync bit6 clear */
-  ret=regmap_write(map,0x24,0x39);if(ret){device_unlock(d->pmic);return ret;}
+  /* 1. PMIC S2MPS15 BUCK6: eFuse-calibrated 266MHz selector, ramp 0x20, LDO10 ON, BUCK6 Normal-ON, sync bit6 clear */
+  ret=regmap_write(map,0x24,d->asv_sel[0]);if(ret){device_unlock(d->pmic);return ret;}
   ret=regmap_write(map,0x57,0x20);if(ret){device_unlock(d->pmic);return ret;}
   ret=regmap_update_bits(map,0x3d,0xc0,0xc0);if(ret){device_unlock(d->pmic);return ret;}
   usleep_range(200,300);
@@ -702,7 +719,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  {
   return (struct m86_g3d_cmu_access){ .cmu=d->cmu,.sysreg=d->sysreg,
    .transaction=&d->transaction,.hardware=&d->hardware,.data=d,
-   .cap=d->cap,.domain_on=glue_domain_on,.validate_rail=glue_rail };
+   .cap=d->cap,.expected_selectors=d->asv_sel,
+   .domain_on=glue_domain_on,.validate_rail=glue_rail };
  }
  static void glue_unlock(struct gpu_dvfs *d)
  {
@@ -906,6 +924,8 @@ static int gpu_probe(struct platform_device *pdev)
  ret=devm_add_action_or_reset(&pdev->dev,put_pmic,d->pmic);if(ret)return ret;
  if(!device_link_add(&pdev->dev,d->pmic,DL_FLAG_AUTOREMOVE_CONSUMER))return -EINVAL;
  if(!d->pmic->driver || !dev_get_regmap(d->pmic,NULL))return -EPROBE_DEFER;
+ ret=validate_asv(d);
+ if(ret)return dev_err_probe(&pdev->dev,ret,"GPU ASV handoff validation failed\n");
  if(!domain_on(d) || actual_rate(d)!=266000000 || !(readl(d->cmu+0x800)&1)) {
   ret=m86_gpu_cold_power_on(d);
   if(ret)return dev_err_probe(&pdev->dev,ret,"GPU cold power on failed\n");
@@ -916,8 +936,6 @@ static int gpu_probe(struct platform_device *pdev)
   return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"retained GPU clock mismatch: rate=%lu coregate=%#x\n",
                        initial_rate,readl(d->cmu+0x800));
  d->current_rate=initial_rate;
- ret=validate_asv(d);
- if(ret)return dev_err_probe(&pdev->dev,ret,"GPU ASV handoff validation failed\n");
  if(d->active_voltage || d->normal_on_voltage) {
   struct device_node *node;
   struct platform_device *supplier;
@@ -966,7 +984,7 @@ static int gpu_probe(struct platform_device *pdev)
  if(gpu)put_device(&gpu->dev);
  }
  if(ret)return dev_err_probe(&pdev->dev,ret,"GPU PMIC readiness/rail handoff check failed\n");
- if(selector!=0x39)return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"GPU BUCK6 selector=%#x, expected 0x39\n",selector);
+ if(selector!=d->asv_sel[0])return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"GPU BUCK6 selector=%#x, expected %#x\n",selector, d->asv_sel[0]);
  init.name="m86_gpu_dvfs_clock";init.ops=&clock_ops;init.flags=CLK_GET_RATE_NOCACHE;
  { const struct clk_hw *parent=__clk_get_hw(fin); init.parent_hws=&parent;init.num_parents=1;
   d->hw.init=&init;ret=devm_clk_hw_register(&pdev->dev,&d->hw); }

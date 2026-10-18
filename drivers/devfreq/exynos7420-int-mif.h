@@ -21,6 +21,7 @@
 #include <linux/mutex.h>
 #include <linux/pm_qos.h>
 #include <linux/regulator/consumer.h>
+#include <linux/m86-asv-cal.h>
 
 #define EXYNOS7420_NUM_MIF_CH		4
 #define EXYNOS7420_MIF_LV_COUNT		13
@@ -468,7 +469,7 @@ struct exynos7420_mif_opp_info {
 	u8 ccore_133_div;
 };
 
-static const struct exynos7420_mif_opp_info exynos7420_mif_opp_table[EXYNOS7420_MIF_LV_COUNT] = {
+static struct exynos7420_mif_opp_info exynos7420_mif_opp_table[EXYNOS7420_MIF_LV_COUNT] = {
 	/* LV0: 1552 MHz (MIF_PLL 3104 MHz: P=3, M=388, S=0), ccore_532=532MHz (mux=2, div=0), ccore_133=80MHz (div=4) */
 	[MIF_LV0]  = { 1552000, 837500, 388, 3, 0, 2,  2, 0, 4 },
 	/* LV1: 1456 MHz (MIF_PLL 2912 MHz: P=3, M=364, S=0), ccore_532=532MHz (mux=2, div=0), ccore_133=80MHz (div=4) */
@@ -512,12 +513,10 @@ struct exynos7420_int_level {
 };
 
 /*
- * Vendor 3.10 INT table (exynos7420_bus.c int_clk_list and ASV table_version=15 group=8).
- * Note: On m86, mout_bus0_pll_cmuc (MUX_SEL_TOPC0[17:16]=2) is 400 MHz
- * (ffac_mout_bus0_pll_cmuc_div2=200 MHz, ffac_mout_bus0_pll_cmuc_div4=100 MHz),
- * while mout_bus0_pll_top0 is 800 MHz.
+ * Vendor 3.10 INT table (exynos7420_bus.c int_clk_list and ASV table_version=15).
+ * Voltages are dynamically populated at boot from ChipID eFuse ASV CAL.
  */
-static const struct exynos7420_int_level exynos7420_int_table[EXYNOS7420_INT_LV_COUNT] = {
+static struct exynos7420_int_level exynos7420_int_table[EXYNOS7420_INT_LV_COUNT] = {
 	[0]  = { 560000, 806250, 2, 0, 2, 0, 0, 1,  2, 2, 1, 1, 3, 3, 0, 2, 0, 0, 1 },
 	[1]  = { 550000, 806250, 2, 0, 2, 0, 0, 1,  2, 2, 1, 2, 3, 0, 0, 3, 0, 0, 1 },
 	[2]  = { 540000, 750000, 0, 0, 0, 0, 0, 1,  3, 0, 1, 2, 3, 1, 1, 0, 0, 0, 1 },
@@ -566,6 +565,7 @@ struct exynos7420_hw_bus {
 	void __iomem *vtmon[EXYNOS7420_NUM_MIF_CH];
 	u32 g_phy_cg_en;
 	u32 per_mrs_en;
+	u32 int_ema_reg;
 	int pll_safe_idx;
 	int cur_mif_idx;
 	int cur_int_idx;
@@ -583,6 +583,7 @@ struct exynos7420_hw_bus {
 
 static struct exynos7420_hw_bus exynos7420_hw = {
 	.lock = __MUTEX_INITIALIZER(exynos7420_hw.lock),
+	.int_ema_reg = 0x12,
 	.pll_safe_idx = MIF_LV7,
 	.cur_mif_idx = MIF_LV0,
 	.cur_int_idx = 7,
@@ -635,10 +636,40 @@ static int exynos7420_hw_bus_init_once(struct device *dev)
 	static const phys_addr_t vtmon_phys[EXYNOS7420_NUM_MIF_CH] = {
 		0x10890000, 0x10990000, 0x10a90000, 0x10b90000
 	};
-	int i;
+	struct m86_asv_cal_info cal;
+	int i, ret;
 
 	if (exynos7420_hw.initialized)
 		return 0;
+
+	ret = m86_asv_cal_read(&cal);
+	if (ret == 0) {
+		for (i = 0; i < EXYNOS7420_MIF_LV_COUNT; i++) {
+			exynos7420_mif_opp_table[i].volt_uv =
+				m86_asv_lookup_volt(&cal, M86_ASV_MIF, i,
+						    m86_mif_asv_volt_v15[i]);
+		}
+		for (i = 0; i < EXYNOS7420_INT_LV_COUNT; i++) {
+			u32 v = m86_asv_lookup_volt(&cal, M86_ASV_INT, i,
+						    m86_int_asv_volt_v15[i]);
+			/* Preserve 700mV display/INT floor on lower levels */
+			exynos7420_int_table[i].volt_uv = max(v, 700000U);
+		}
+		exynos7420_hw.cur_mif_volt_uv = exynos7420_mif_opp_table[MIF_LV0].volt_uv;
+		exynos7420_hw.cur_int_volt_uv = exynos7420_int_table[7].volt_uv;
+		exynos7420_hw.int_ema_reg = m86_asv_get_int_ema_reg(&cal);
+		dev_info(dev, "MIF/INT ASV CAL: ver=%u mif_grp=0x%03x (%u..%u uV) int_grp=0x%03x (%u..%u uV) int_ema=0x%02x\n",
+			 cal.effective_ver,
+			 m86_asv_domain_group_raw(&cal, M86_ASV_MIF),
+			 exynos7420_mif_opp_table[EXYNOS7420_MIF_LV_COUNT - 1].volt_uv,
+			 exynos7420_mif_opp_table[0].volt_uv,
+			 m86_asv_domain_group_raw(&cal, M86_ASV_INT),
+			 exynos7420_int_table[EXYNOS7420_INT_LV_COUNT - 1].volt_uv,
+			 exynos7420_int_table[0].volt_uv,
+			 exynos7420_hw.int_ema_reg);
+	} else {
+		dev_warn(dev, "MIF/INT ASV CAL read failed (%d), keeping default v15/group8 table\n", ret);
+	}
 
 	exynos7420_hw.topc = ioremap(0x10570000, SZ_64K);
 	exynos7420_hw.top0 = ioremap(0x105d0000, SZ_64K);
@@ -892,7 +923,7 @@ static int exynos7420_int_target_locked(struct exynos_bus *bus,
 				return ret;
 			exynos7420_hw.cur_int_volt_uv = target_uv;
 		}
-		writel(0x12, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
+		writel(exynos7420_hw.int_ema_reg, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
 		ret = exynos7420_int_set_clocks(target_idx);
 		if (ret)
 			return ret;
@@ -901,7 +932,7 @@ static int exynos7420_int_target_locked(struct exynos_bus *bus,
 		ret = exynos7420_int_set_clocks(target_idx);
 		if (ret)
 			return ret;
-		writel(0x12, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
+		writel(exynos7420_hw.int_ema_reg, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
 		if (exynos7420_hw.vdd_int && target_uv != old_uv) {
 			ret = regulator_set_voltage(exynos7420_hw.vdd_int,
 						    target_uv,

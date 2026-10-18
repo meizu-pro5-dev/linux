@@ -22,6 +22,7 @@
 #include <linux/thermal.h>
 #include <linux/workqueue.h>
 #include <linux/m86-bus-qos.h>
+#include <linux/m86-asv-cal.h>
 
 struct m86_opp { unsigned int khz, uv, bus_qos; };
 #include "m86-opp.h"
@@ -44,6 +45,7 @@ struct m86_coord {
 	struct device *dev;
 	struct mutex lock;
 	struct m86_cluster cluster[2]; /* 0 atlas, 1 apollo */
+	struct m86_asv_cal_info asv_cal;
 	struct regmap *ema; /* Existing shared SYSREG regmap. */
 	void __iomem *topc;
 	struct clk *fin;
@@ -75,12 +77,9 @@ static int cluster_index(unsigned int cpu)
 	return -ENODEV;
 }
 
-/* Vendor asv-exynos7420_cal.c:868-964; zero EMA fuses measured on this unit.
- * Preserve unrelated register bits. The default control bits must already match
- * measured boot handoff: L1 low nibble2, L2 non-EMA bits0x72,
- * APOLLO base0x010011. CAL writes L2 base0x30, but that does not
- * explain this unit's boot0x972. Only CAL-defined L2[11:8] is owned here;
- * low byte0x72 is preserved, not inferred to mirror L1[7:4].
+/* Vendor asv-exynos7420_cal.c:868-964; uses fused EMA values when non-zero,
+ * falling back to vendor default EMA values when fuse bits are zero.
+ * Preserve unrelated register bits.
  */
 static int set_ema(struct m86_coord *d, unsigned int index, unsigned int uv)
 {
@@ -90,12 +89,15 @@ static int set_ema(struct m86_coord *d, unsigned int index, unsigned int uv)
 	unsigned int first, n, i;
 
 	if (index) {
+		u32 apollo_ema = m86_asv_get_apollo_ema(&d->asv_cal, uv);
+
 		first = 0; n = 1;
 		masks[0] = (7U << 20) | (7U << 8);
-		values[0] = (2U << 20) | (2U << 8);
+		values[0] = (apollo_ema << 20) | (apollo_ema << 8);
 	} else {
-		unsigned int l1 = uv >= 900000 ? 6 : uv >= 800000 ? 8 : 7;
-		unsigned int l2 = uv >= 900000 ? 5 : uv >= 800000 ? 11 : 9;
+		u32 l1, l2;
+
+		m86_asv_get_atlas_ema(&d->asv_cal, uv, &l1, &l2);
 		first = 1; n = 2;
 		masks[0] = 15U << 4; values[0] = l1 << 4;
 		masks[1] = 15U << 8; values[1] = l2 << 8;
@@ -118,15 +120,22 @@ static int verify_ema(struct m86_coord *d, unsigned int index, unsigned int uv)
 	int ret;
 
 	if (index) {
+		u32 apollo_ema = m86_asv_get_apollo_ema(&d->asv_cal, uv);
+
 		ret = regmap_read(d->ema, 0x38, &a);
-		return ret ?: (a == 0x210211 ? 0 : -EIO);
+		return ret ?: (a == (0x010011U | (apollo_ema << 20) | (apollo_ema << 8)) ? 0 : -EIO);
 	}
-	ret = regmap_read(d->ema, 0x138, &a);
-	if (ret) return ret;
-	ret = regmap_read(d->ema, 0x2908, &b);
-	if (ret) return ret;
-	return a == (2U | ((uv >= 900000 ? 6U : uv >= 800000 ? 8U : 7U) << 4)) &&
-	       b == (0x72U | ((uv >= 900000 ? 5U : uv >= 800000 ? 11U : 9U) << 8)) ? 0 : -EIO;
+	{
+		u32 l1, l2;
+
+		m86_asv_get_atlas_ema(&d->asv_cal, uv, &l1, &l2);
+		ret = regmap_read(d->ema, 0x138, &a);
+		if (ret) return ret;
+		ret = regmap_read(d->ema, 0x2908, &b);
+		if (ret) return ret;
+		return a == (2U | (l1 << 4)) &&
+		       b == (0x72U | (l2 << 8)) ? 0 : -EIO;
+	}
 }
 
 static int set_voltage_ema(struct m86_coord *d, unsigned int index,
@@ -675,7 +684,7 @@ static int m86_probe(struct platform_device *pdev)
 	struct device_node *node;
 	struct platform_device *supplier;
 	unsigned int cpu, i, j;
-	u32 bus_floor, bin[2], ceilings[2];
+	u32 bus_floor, ceilings[2];
 	int temp, ret;
 
 	if (coordinator || !of_machine_is_compatible("meizu,m86") ||
@@ -687,15 +696,20 @@ static int m86_probe(struct platform_device *pdev)
 	bool has_fixed_floor = !of_property_read_u32(pdev->dev.of_node, "meizu,validated-fixed-bus-qos-floor", &bus_floor);
 	if (!has_fixed_floor)
 		bus_floor = 100000;
-	if (of_property_read_u32_array(pdev->dev.of_node, "meizu,validated-asv-bin", bin, 2) ||
-	    bin[0] != 15 || bin[1] != 8 ||
-	    !of_property_read_bool(pdev->dev.of_node, "meizu,validated-zero-cpu-ema") ||
-	    of_property_read_u32_array(pdev->dev.of_node, "meizu,max-validated-khz", ceilings, 2))
-		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap ASV/EMA/ceiling DT calibration at source line %u\n", __LINE__);
+	if (of_property_read_u32_array(pdev->dev.of_node, "meizu,max-validated-khz", ceilings, 2))
+		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap ceiling DT calibration at source line %u\n", __LINE__);
 	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
 	if (!d) return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap gate at source line %u\n", __LINE__);
 	d->dev = &pdev->dev;
 	d->required_bus_qos = bus_floor;
+	ret = m86_asv_cal_read(&d->asv_cal);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "bootstrap CPU ASV eFuse read/version at source line %u\n", __LINE__);
+	dev_info(d->dev, "CPU ASV CAL: ver=%u type=%u atlas_grp=0x%03x apollo_grp=0x%03x ssa0_en=%u ssa1_en=%u\n",
+		 d->asv_cal.effective_ver, d->asv_cal.asv_group_type,
+		 m86_asv_domain_group_raw(&d->asv_cal, M86_ASV_BIG),
+		 m86_asv_domain_group_raw(&d->asv_cal, M86_ASV_LIT),
+		 d->asv_cal.ssa0_enable, d->asv_cal.ssa1_enable);
 	mutex_init(&d->lock);
 	mutex_init(&d->bus_lock);
 	for (i = 0; i < 2; i++)
@@ -770,16 +784,44 @@ static int m86_probe(struct platform_device *pdev)
 	}
 	for (i = 0; i < 2; i++) {
 		struct m86_cluster *c = &d->cluster[i];
+		const struct m86_opp *tmpl = i ? apollo_opp : atlas_opp;
+		unsigned int total_nr = i ? ARRAY_SIZE(apollo_opp) : ARRAY_SIZE(atlas_opp);
+		struct m86_opp *dyn_opp;
 		const char *name = i ? "apollo" : "atlas";
 		int uv;
 		bool known = false;
 
 		if (cpumask_empty(&c->cpus)) return dev_err_probe(&pdev->dev, -ENODEV, "bootstrap empty cluster at source line %u\n", __LINE__);
-		c->opp = i ? apollo_opp : atlas_opp;
-		c->nr = i ? ARRAY_SIZE(apollo_opp) : ARRAY_SIZE(atlas_opp);
+		dyn_opp = devm_kcalloc(&pdev->dev, total_nr, sizeof(*dyn_opp), GFP_KERNEL);
+		if (!dyn_opp) return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap dynamic OPP alloc at source line %u\n", __LINE__);
+		for (j = 0; j < total_nr; j++) {
+			dyn_opp[j] = tmpl[j];
+			if (i == 0) {
+				/* Atlas: j=0 is 800MHz (vendor L17, row 13), j=13 is 2100MHz (vendor L4, row 0) */
+				u32 row = 13U - j;
+				u32 vendor_lv = 17U - j;
+
+				dyn_opp[j].uv = m86_asv_lookup_volt(&d->asv_cal, M86_ASV_BIG,
+								    vendor_lv,
+								    m86_big_asv_volt_v15[row]);
+			} else {
+				/* Apollo: j=0 is 400MHz (vendor L16, row 11), j=11 is 1500MHz (vendor L5, row 0) */
+				u32 row = 11U - j;
+				u32 vendor_lv = 16U - j;
+
+				dyn_opp[j].uv = m86_asv_lookup_volt(&d->asv_cal, M86_ASV_LIT,
+								    vendor_lv,
+								    m86_lit_asv_volt_v15[row]);
+			}
+		}
+		c->opp = dyn_opp;
+		c->nr = total_nr;
 		c->max_khz = ceilings[i];
 		while (c->nr && c->opp[c->nr - 1].khz > c->max_khz) c->nr--;
 		if (!c->nr || c->opp[c->nr - 1].khz != c->max_khz) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap validated ceiling absent from OPP table at source line %u\n", __LINE__);
+		dev_info(d->dev, "CPU ASV %s table: %u..%u kHz -> %u..%u uV (%u states)\n",
+			 name, c->opp[0].khz, c->opp[c->nr - 1].khz,
+			 c->opp[0].uv, c->opp[c->nr - 1].uv, c->nr);
 		if (!d->bus_dev) {
 			for (j = 0; j < c->nr; j++)
 				if (c->opp[j].bus_qos > bus_floor) return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap OPP bus vote exceeds fixed MIF floor at source line %u\n", __LINE__);
@@ -813,19 +855,20 @@ static int m86_probe(struct platform_device *pdev)
 			}
 		if (!known) dev_err(d->dev, "bootstrap cluster=%s unknown clock=%lu uv=%d\n", name, clk_get_rate(c->clk), uv);
 		if (!known) return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap unknown boot frequency/voltage OPP at source line %u\n", __LINE__);
-		/* Boot EMA must already match the measured zero-fuse vendor policy.
-		 * Probe refuses an unknown handoff rather than initializing it silently.
-		 */
+		/* Boot EMA must already match the fused/default vendor policy. */
 		{
 			u32 a, b;
 			if (i) {
+				u32 apollo_ema = m86_asv_get_apollo_ema(&d->asv_cal, uv);
+
 				ret = regmap_read(d->ema, 0x38, &a);
 				if (ret) return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
-				if ((a & ((7U << 20) | (7U << 8))) != ((2U << 20) | (2U << 8)))
+				if ((a & ((7U << 20) | (7U << 8))) != ((apollo_ema << 20) | (apollo_ema << 8)))
 					return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap APOLLO boot EMA band at source line %u\n", __LINE__);
 			} else {
-				unsigned int l1 = uv >= 900000 ? 6 : uv >= 800000 ? 8 : 7;
-				unsigned int l2 = uv >= 900000 ? 5 : uv >= 800000 ? 11 : 9;
+				u32 l1, l2;
+
+				m86_asv_get_atlas_ema(&d->asv_cal, uv, &l1, &l2);
 				ret = regmap_read(d->ema, 0x138, &a);
 				if (ret) return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
 				ret = regmap_read(d->ema, 0x2908, &b);

@@ -283,14 +283,6 @@
 			debounce-interval = <10>;
 			wakeup-source;
 		};
-		hall {
-			label = "gpio-keys: hall";
-			linux,input-type = <EV_SW>;
-			linux,code = <SW_LID>;
-			gpios = <&gpa3 7 GPIO_ACTIVE_LOW>;
-			debounce-interval = <100>;
-			wakeup-source;
-		};
 	};
 };
 
@@ -303,10 +295,10 @@
 	m86_touch_irq_pin: m86-touch-irq-pin {
 		samsung,pins = "gpa1-1";
 		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
+		samsung,pin-pud = <3>;
 	};
 	m86_keys_pins: m86-keys-pins {
-		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2", "gpa3-7";
+		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <0>;
 	};
@@ -918,8 +910,6 @@
 &m86_cpu_dvfs {
 	status = "okay";
 	meizu,cpu-dvfs-active;
-	meizu,validated-asv-bin = <15 8>;
-	meizu,validated-zero-cpu-ema;
 	samsung,bus = <&bus_mif>;
 	meizu,max-validated-khz = <2100000 1500000>;
 };

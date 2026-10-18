@@ -50,6 +50,11 @@
 
 #define SHADOWCON_WINx_PROTECT(_win)		(1 << (10 + (_win)))
 
+/* WINCHMAP0 (Exynos7420 window-to-DMA channel mapping) */
+#define WINCHMAP0				0x40
+#define WINCHMAP_MASK(_win)			(0x7 << ((_win) * 4))
+#define WINCHMAP_DMA(_v, _win)			(((_v) & 0x7) << ((_win) * 4))
+
 /* WINCONx */
 #define WINCON(_win)				(0x50 + ((_win) * 4))
 
@@ -58,6 +63,8 @@
 #define WINCONx_BUFSEL_SHIFT			28
 #define WINCONx_TRIPLE_BUF_MODE			(0x1 << 18)
 #define WINCONx_DOUBLE_BUF_MODE			(0x0 << 18)
+#define WINCONx_OUTSTAND_MAX_DEFAULT		(0x10 << 13)
+#define WINCONx_OUTSTAND_MAX_MASK		(0x1f << 13)
 #define WINCONx_BURSTLEN_16WORD			(0x0 << 11)
 #define WINCONx_BURSTLEN_8WORD			(0x1 << 11)
 #define WINCONx_BURSTLEN_MASK			(0x1 << 11)
