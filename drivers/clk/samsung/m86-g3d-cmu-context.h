@@ -20,6 +20,7 @@ struct m86_g3d_cmu_access {
 	struct mutex *transaction, *hardware;
 	void *data;
 	unsigned long cap;
+	const u32 *expected_selectors;
 	/* Both callbacks run with transaction AND hardware held. They must not
 	 * call clk_get_rate/set_rate, runtime PM, devfreq or thermal get_temp.
 	 * validate_rail checks the unchanged exact Normal ON fields/selector;

@@ -43,7 +43,17 @@
 
 #define MIN_FB_WIDTH_FOR_16WORD_BURST 128
 
-#define WINDOWS_NR	5
+/*
+ * Exynos7420 DECON-INT contains 2 internal DMA channels:
+ *   - Channel 0 (IDMA_G0, DISP1 / sysmmu_disp_rw)
+ *   - Channel 1 (IDMA_G1, DISP0 / sysmmu_disp_ro)
+ * Channels 2..5 (VG0, VG1, VGR0, VGR1) are external VPP OTF input ports
+ * driven by separate VPP hardware IP blocks (0x13970000..0x139a0000).
+ * Expose both internal DMA planes (WIN0 = PRIMARY on IDMA_G0, WIN1 = CURSOR
+ * on IDMA_G1) and program WINCHMAP0 / BLENDE / BLENDCON per decon_reg_7420.c.
+ */
+#define WINDOWS_NR	2
+#define HW_WINDOWS_MAX	5
 
 struct decon_context {
 	struct device			*dev;
@@ -96,9 +106,6 @@ static const uint32_t decon_formats[] = {
 
 static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
 	DRM_PLANE_TYPE_PRIMARY,
-	DRM_PLANE_TYPE_OVERLAY,
-	DRM_PLANE_TYPE_OVERLAY,
-	DRM_PLANE_TYPE_OVERLAY,
 	DRM_PLANE_TYPE_CURSOR,
 };
 
@@ -153,9 +160,10 @@ static void decon_wait_for_vblank(struct decon_context *ctx)
 static void decon_clear_channels(struct decon_context *ctx)
 {
 	unsigned int win, ch_enabled = 0;
+	u32 chmap = readl(ctx->regs + WINCHMAP0);
 
-	/* Check if any channel is enabled. */
-	for (win = 0; win < WINDOWS_NR; win++) {
+	/* Check if any hardware window is enabled and unmap unused channels. */
+	for (win = 0; win < HW_WINDOWS_MAX; win++) {
 		u32 val = readl(ctx->regs + WINCON(win));
 
 		if (val & WINCONx_ENWIN) {
@@ -163,7 +171,10 @@ static void decon_clear_channels(struct decon_context *ctx)
 			writel(val, ctx->regs + WINCON(win));
 			ch_enabled = 1;
 		}
+		chmap &= ~WINCHMAP_MASK(win);
+		chmap |= WINCHMAP_DMA(0x7, win);
 	}
+	writel(chmap, ctx->regs + WINCHMAP0);
 
 	/* Wait for vsync, as disable channel takes effect at next vsync */
 	if (ch_enabled)
@@ -534,12 +545,37 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 
 	decon_win_set_pixfmt(ctx, win, fb);
 
-	/* hardware window 0 doesn't support color key. */
-	if (win != 0)
+	/* hardware window 0 doesn't support color key or blender equation. */
+	if (win != 0) {
+		u32 blendeq;
+
 		decon_win_set_colkey(ctx, win);
+
+		if (fb->format->has_alpha) {
+			blendeq = BLENDE_A_FUNC(BLENDE_COEF_ONE) |
+				  BLENDE_B_FUNC(BLENDE_COEF_ONE_MINUS_ALPHA_A) |
+				  BLENDE_P_FUNC(BLENDE_COEF_ZERO) |
+				  BLENDE_Q_FUNC(BLENDE_COEF_ZERO);
+		} else {
+			blendeq = BLENDE_A_FUNC(BLENDE_COEF_ONE) |
+				  BLENDE_B_FUNC(BLENDE_COEF_ZERO) |
+				  BLENDE_P_FUNC(BLENDE_COEF_ZERO) |
+				  BLENDE_Q_FUNC(BLENDE_COEF_ZERO);
+		}
+		writel(blendeq, ctx->regs + BLENDE(win - 1));
+		writel(BLENDCON_NEW_8BIT_ALPHA_VALUE, ctx->regs + BLENDCON);
+	}
+
+	/* Map WIN0 -> IDMA_G0 (0), WIN1 -> IDMA_G1 (1) in WINCHMAP0 */
+	val = readl(ctx->regs + WINCHMAP0);
+	val &= ~WINCHMAP_MASK(win);
+	val |= WINCHMAP_DMA(win, win);
+	writel(val, ctx->regs + WINCHMAP0);
 
 	/* wincon */
 	val = readl(ctx->regs + WINCON(win));
+	val &= ~WINCONx_OUTSTAND_MAX_MASK;
+	val |= WINCONx_OUTSTAND_MAX_DEFAULT;
 	val |= WINCONx_TRIPLE_BUF_MODE;
 	val |= WINCONx_ENWIN;
 	writel(val, ctx->regs + WINCON(win));
@@ -562,6 +598,14 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	val = readl(ctx->regs + WINCON(win));
 	val &= ~WINCONx_ENWIN;
 	writel(val, ctx->regs + WINCON(win));
+
+	/* Unmap DMA channel for disabled window (0x7 = disabled in 3.10) */
+	val = readl(ctx->regs + WINCHMAP0);
+	val &= ~WINCHMAP_MASK(win);
+	val |= WINCHMAP_DMA(0x7, win);
+	writel(val, ctx->regs + WINCHMAP0);
+
+	decon_shadow_protect_win(ctx, win, false);
 
 	val = readl(ctx->regs + DECON_UPDATE);
 	val |= DECON_UPDATE_STANDALONE_F;

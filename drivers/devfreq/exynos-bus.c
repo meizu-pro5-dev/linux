@@ -428,6 +428,26 @@ static int exynos_bus_parse_of(struct device_node *np,
 		goto err_clk;
 	}
 
+	if (bus->is_exynos7420_mif) {
+		int i;
+
+		for (i = 0; i < EXYNOS7420_MIF_LV_COUNT; i++) {
+			unsigned long f = (unsigned long)exynos7420_mif_opp_table[i].freq_khz * 1000UL;
+			unsigned long u = exynos7420_mif_opp_table[i].volt_uv;
+
+			dev_pm_opp_adjust_voltage(dev, f, u, u, u);
+		}
+	} else if (bus->is_exynos7420_int) {
+		int i;
+
+		for (i = 0; i < EXYNOS7420_INT_LV_COUNT; i++) {
+			unsigned long f = (unsigned long)exynos7420_int_table[i].freq_khz * 1000UL;
+			unsigned long u = exynos7420_int_table[i].volt_uv;
+
+			dev_pm_opp_adjust_voltage(dev, f, u, u, u);
+		}
+	}
+
 	opp = devfreq_recommended_opp(dev, &rate, 0);
 	if (IS_ERR(opp)) {
 		dev_err(dev, "failed to find dev_pm_opp\n");

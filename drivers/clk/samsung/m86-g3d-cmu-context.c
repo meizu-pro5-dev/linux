@@ -30,7 +30,7 @@
 static int access_valid(const struct m86_g3d_cmu_access *a)
 {
 	if (!a || !a->cmu || !a->sysreg || !a->transaction || !a->hardware ||
-	    !a->domain_on || !a->validate_rail)
+	    !a->domain_on || !a->validate_rail || !a->expected_selectors)
 		return -EINVAL;
 	lockdep_assert_held(a->transaction);
 	lockdep_assert_held(a->hardware);
@@ -41,17 +41,19 @@ static int pair_valid(const struct m86_g3d_cmu_access *a,
 		      const struct m86_g3d_cmu_context *c)
 {
 	u32 m, p, s, expected_selector, expected_hpm, expected_pms;
+	unsigned int idx;
 
 	switch (c->hz) {
-	case 266000000: expected_selector = 0x39; expected_pms = (133U << 16) | (6U << 8) | 1; break;
-	case 350000000: expected_selector = 0x3a; expected_pms = (175U << 16) | (6U << 8) | 1; break;
-	case 420000000: expected_selector = 0x3b; expected_pms = (105U << 16) | (3U << 8) | 1; break;
-	case 544000000: expected_selector = 0x41; expected_pms = (68U << 16) | (3U << 8); break;
-	case 600000000: expected_selector = 0x47; expected_pms = (75U << 16) | (3U << 8); break;
-	case 700000000: expected_selector = 0x4e; expected_pms = (175U << 16) | (6U << 8); break;
-	case 772000000: expected_selector = 0x54; expected_pms = (193U << 16) | (6U << 8); break;
+	case 266000000: idx = 0; expected_pms = (133U << 16) | (6U << 8) | 1; break;
+	case 350000000: idx = 1; expected_pms = (175U << 16) | (6U << 8) | 1; break;
+	case 420000000: idx = 2; expected_pms = (105U << 16) | (3U << 8) | 1; break;
+	case 544000000: idx = 3; expected_pms = (68U << 16) | (3U << 8); break;
+	case 600000000: idx = 4; expected_pms = (75U << 16) | (3U << 8); break;
+	case 700000000: idx = 5; expected_pms = (175U << 16) | (6U << 8); break;
+	case 772000000: idx = 6; expected_pms = (193U << 16) | (6U << 8); break;
 	default: return -EOPNOTSUPP;
 	}
+	expected_selector = a->expected_selectors[idx];
 	if (c->hz > a->cap || c->selector != expected_selector || c->ema != 0x31)
 		return -EOPNOTSUPP;
 	m = (c->con0 >> 16) & 1023;
