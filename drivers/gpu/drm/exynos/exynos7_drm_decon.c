@@ -884,6 +884,10 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	if (!ctx->drm_dev)
 		goto out;
 
+	/* check if crtc and vblank have been initialized properly */
+	if (!drm_dev_has_vblank(ctx->drm_dev))
+		goto out;
+
 	/*
 	 * If TE IRQ is active, TE handler drives vblank at true 60Hz.
 	 * Only use frame-done (INT_I80) as fallback when TE IRQ is unavailable.
