@@ -175,7 +175,10 @@
 			label = "USB-C";
 			power-role = "dual";
 			data-role = "dual";
-			try-power-role = "sink";
+			/* FUSB302 is PD 2.0 silicon: a PD 3.0 Get_Source_Cap_Extended
+			 * from a PD 3.0 host ends in a Hard Reset loop every ~1.2 s.
+			 */
+			pd-revision = /bits/ 8 <0x2 0x0 0x1 0x3>;
 			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;
 			sink-pdos = <
 				PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
