@@ -1624,25 +1624,9 @@ static int exynos_iommu_of_xlate(struct device *dev,
 	return 0;
 }
 
-static void exynos_iommu_get_resv_regions(struct device *dev,
-					  struct list_head *list)
-{
-	struct iommu_resv_region *region;
-
-	if (dev->of_node && of_device_is_compatible(dev->of_node, "samsung,exynos7-decon")) {
-		region = iommu_alloc_resv_region(0xe0000000, 0x04200000,
-						 IOMMU_READ | IOMMU_WRITE,
-						 IOMMU_RESV_RESERVED, GFP_KERNEL);
-		if (region)
-			list_add_tail(&region->list, list);
-	}
-
-	iommu_dma_get_resv_regions(dev, list);
-}
-
 static const struct iommu_ops exynos_iommu_ops = {
 	.owner = THIS_MODULE,
-	.get_resv_regions = exynos_iommu_get_resv_regions,
+	.get_resv_regions = iommu_dma_get_resv_regions,
 	.domain_alloc = exynos_iommu_domain_alloc,
 	.device_group = generic_device_group,
 #ifdef CONFIG_ARM

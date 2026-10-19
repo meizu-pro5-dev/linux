@@ -66,6 +66,10 @@
 			reg = <0x0 0xf9800000 0x0 0x06800000>;
 			no-map;
 		};
+
+		decon_iova_resv: decon-iova-reserved {
+			iommu-addresses = <&decon 0xe0000000 0x04200000>;
+		};
 	};
 
 	reg_vsys: regulator-vsys {
@@ -460,6 +464,7 @@
 	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
 	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
 	samsung,bus = <&bus_mif>;
+	memory-region = <&decon_iova_resv>;
 	status = "okay";
  display-timings {
   native-mode = <&m86_handoff_timing>;
