@@ -30,7 +30,9 @@ static void panfrost_devfreq_update_utilization(struct panfrost_devfreq *pfdevfr
 static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
 				   u32 flags)
 {
+	struct panfrost_device *pfdev = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
+	int err;
 
 	opp = devfreq_recommended_opp(dev, freq, flags);
 	if (IS_ERR(opp))
@@ -39,12 +41,18 @@ static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
 
 	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
 #if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
-  return m86_gpu_devfreq_target(dev, freq);
+		err = m86_gpu_devfreq_target(dev, freq);
 #else
-  return -EOPNOTSUPP;
+		err = -EOPNOTSUPP;
 #endif
- }
- return dev_pm_opp_set_rate(dev, *freq);
+	} else {
+		err = dev_pm_opp_set_rate(dev, *freq);
+	}
+
+	if (!err)
+		pfdev->pfdevfreq.current_frequency = *freq;
+
+	return err;
 }
 
 static void panfrost_devfreq_reset(struct panfrost_devfreq *pfdevfreq)
@@ -66,7 +74,6 @@ static int panfrost_devfreq_get_dev_status(struct device *dev,
 	spin_lock_irqsave(&pfdevfreq->lock, irqflags);
 
 	panfrost_devfreq_update_utilization(pfdevfreq);
-	pfdevfreq->current_frequency = status->current_frequency;
 
 	status->total_time = ktime_to_ns(ktime_add(pfdevfreq->busy_time,
 						   pfdevfreq->idle_time));
@@ -178,16 +185,24 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	panfrost_devfreq_profile.initial_freq = cur_freq;
 
 	/*
+	 * We could wait until panfrost_devfreq_target() to set this value, but
+	 * since the simple_ondemand governor works asynchronously, there's a
+	 * chance by the time someone opens the device's fdinfo file, current
+	 * frequency hasn't been updated yet, so let's just do an early set.
+	 */
+	pfdevfreq->current_frequency = cur_freq;
+
+	/*
 	 * Set the recommend OPP this will enable and configure the regulator
 	 * if any and will avoid a switch off by regulator_late_cleanup()
 	 */
 	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
-  ret = cur_freq == clk_get_rate(pfdev->clock) ? 0 : -EOPNOTSUPP;
- else
-  ret = dev_pm_opp_set_opp(dev, opp);
+		ret = cur_freq == clk_get_rate(pfdev->clock) ? 0 : -EOPNOTSUPP;
+	else
+		ret = dev_pm_opp_set_opp(dev, opp);
+	dev_pm_opp_put(opp);
 	if (ret) {
 		DRM_DEV_ERROR(dev, "Couldn't set recommended OPP\n");
-		dev_pm_opp_put(opp);
 		return ret;
 	}
 
