@@ -141,6 +141,7 @@ static const struct samsung_mux_clock topc_mux_clks[] __initconst = {
 
 	MUX(0, "mout_aclk_ccore_133", mout_topc_group2,	MUX_SEL_TOPC2, 4, 2),
 
+	MUX(0, "mout_aclk_mfc_532", mout_topc_group2, MUX_SEL_TOPC3, 8, 2),
 	MUX(0, "mout_aclk_mscl_532", mout_topc_group2, MUX_SEL_TOPC3, 20, 2),
 	MUX(0, "mout_aclk_peris_66", mout_topc_group2, MUX_SEL_TOPC3, 24, 2),
 };
@@ -154,6 +155,8 @@ static const struct samsung_div_clock topc_div_clks[] __initconst = {
 	DIV(DOUT_ACLK_CCORE_133, "dout_aclk_ccore_133", "mout_aclk_ccore_133",
 		DIV_TOPC0, 4, 4),
 
+	DIV(DOUT_ACLK_MFC_532, "dout_aclk_mfc_532", "mout_aclk_mfc_532",
+		DIV_TOPC1, 8, 4),
 	DIV(DOUT_ACLK_MSCL_532, "dout_aclk_mscl_532", "mout_aclk_mscl_532",
 		DIV_TOPC1, 20, 4),
 	DIV(DOUT_ACLK_PERIS, "dout_aclk_peris_66", "mout_aclk_peris_66",
@@ -184,6 +187,8 @@ static const struct samsung_gate_clock topc_gate_clks[] __initconst = {
 	GATE(ACLK_CCORE_133, "aclk_ccore_133", "dout_aclk_ccore_133",
 		ENABLE_ACLK_TOPC0, 4, CLK_IS_CRITICAL, 0),
 
+	GATE(ACLK_MFC_532, "aclk_mfc_532", "dout_aclk_mfc_532",
+		ENABLE_ACLK_TOPC1, 8, 0, 0),
 	GATE(ACLK_MSCL_532, "aclk_mscl_532", "dout_aclk_mscl_532",
 		ENABLE_ACLK_TOPC1, 20, 0, 0),
 
@@ -1367,6 +1372,74 @@ static void __init exynos7_clk_mscl_init(struct device_node *np)
 
 CLK_OF_DECLARE(exynos7_clk_mscl, "samsung,exynos7-clock-mscl",
 		exynos7_clk_mscl_init);
+
+/* Register Offset definitions for CMU_MFC (0x15280000) */
+#define MUX_SEL_MFC		0x0200
+#define DIV_MFC			0x0600
+#define ENABLE_ACLK_MFC		0x0800
+#define ENABLE_ACLK_MFC_SMMU	0x0804
+#define ENABLE_PCLK_MFC		0x0900
+#define ENABLE_PCLK_MFC_SMMU	0x0904
+
+static const unsigned long mfc_clk_regs[] __initconst = {
+	MUX_SEL_MFC,
+	DIV_MFC,
+	ENABLE_ACLK_MFC,
+	ENABLE_ACLK_MFC_SMMU,
+	ENABLE_PCLK_MFC,
+	ENABLE_PCLK_MFC_SMMU,
+};
+
+PNAME(mout_aclk_mfc_532_user_p) = { "fin_pll", "aclk_mfc_532" };
+
+static const struct samsung_mux_clock mfc_mux_clks[] __initconst = {
+	MUX(MOUT_ACLK_MFC_532_USER, "mout_aclk_mfc_532_user", mout_aclk_mfc_532_user_p,
+		MUX_SEL_MFC, 0, 1),
+};
+
+static const struct samsung_div_clock mfc_div_clks[] __initconst = {
+	DIV(DOUT_PCLK_MFC, "dout_pclk_mfc", "mout_aclk_mfc_532_user",
+		DIV_MFC, 0, 2),
+};
+
+static const struct samsung_gate_clock mfc_gate_clks[] __initconst = {
+	GATE(CLK_ACLK_MFC, "aclk_mfc", "mout_aclk_mfc_532_user",
+		ENABLE_ACLK_MFC, 31, 0, 0),
+	GATE(CLK_ACLK_LH_MFC_0, "aclk_lh_mfc_0", "mout_aclk_mfc_532_user",
+		ENABLE_ACLK_MFC, 30, 0, 0),
+	GATE(CLK_ACLK_LH_MFC_1, "aclk_lh_mfc_1", "mout_aclk_mfc_532_user",
+		ENABLE_ACLK_MFC, 19, 0, 0),
+	GATE(CLK_PCLK_MFC, "pclk_mfc", "dout_pclk_mfc",
+		ENABLE_PCLK_MFC, 31, 0, 0),
+	GATE(CLK_ACLK_SMMU_MFC_0, "aclk_smmu_mfc_0", "mout_aclk_mfc_532_user",
+		ENABLE_ACLK_MFC_SMMU, 0, 0, 0),
+	GATE(CLK_ACLK_SMMU_MFC_1, "aclk_smmu_mfc_1", "mout_aclk_mfc_532_user",
+		ENABLE_ACLK_MFC_SMMU, 1, 0, 0),
+	GATE(CLK_PCLK_SMMU_MFC_0, "pclk_smmu_mfc_0", "dout_pclk_mfc",
+		ENABLE_PCLK_MFC_SMMU, 0, 0, 0),
+	GATE(CLK_PCLK_SMMU_MFC_1, "pclk_smmu_mfc_1", "dout_pclk_mfc",
+		ENABLE_PCLK_MFC_SMMU, 1, 0, 0),
+};
+
+static const struct samsung_cmu_info mfc_cmu_info __initconst = {
+	.mux_clks		= mfc_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(mfc_mux_clks),
+	.div_clks		= mfc_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(mfc_div_clks),
+	.gate_clks		= mfc_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(mfc_gate_clks),
+	.nr_clk_ids		= MFC_NR_CLK,
+	.clk_regs		= mfc_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(mfc_clk_regs),
+};
+
+static void __init exynos7_clk_mfc_init(struct device_node *np)
+{
+	samsung_cmu_register_one(np, &mfc_cmu_info);
+}
+
+CLK_OF_DECLARE(exynos7_clk_mfc, "samsung,exynos7-clock-mfc",
+		exynos7_clk_mfc_init);
 
 /* Register Offset definitions for CMU_AUD (0x114C0000) */
 #define	MUX_SEL_AUD			0x0200

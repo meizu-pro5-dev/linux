@@ -37,7 +37,9 @@
 #define CLK_MOUT_SCLK_BUS_PLL_G3D		27
 #define CLK_DOUT_SCLK_BUS_PLL_G3D		28
 #define CLK_TOP_SCLK_BUS_PLL_G3D		29
-#define TOPC_NR_CLK			30
+#define DOUT_ACLK_MFC_532		30
+#define ACLK_MFC_532			31
+#define TOPC_NR_CLK			32
 
 /* TOP0 */
 #define DOUT_ACLK_PERIC1		1
@@ -291,4 +293,17 @@
 #define CLK_ACLK_LH_DISP0		2
 #define CLK_ACLK_LH_DISP1		3
 #define BUS0_NR_CLK			4
+
+/* CMU_MFC (0x15280000) */
+#define MOUT_ACLK_MFC_532_USER	1
+#define DOUT_PCLK_MFC		2
+#define CLK_ACLK_MFC		3
+#define CLK_ACLK_LH_MFC_0	4
+#define CLK_ACLK_LH_MFC_1	5
+#define CLK_PCLK_MFC		6
+#define CLK_ACLK_SMMU_MFC_0	7
+#define CLK_ACLK_SMMU_MFC_1	8
+#define CLK_PCLK_SMMU_MFC_0	9
+#define CLK_PCLK_SMMU_MFC_1	10
+#define MFC_NR_CLK		11
 #endif /* _DT_BINDINGS_CLOCK_EXYNOS7_H */
