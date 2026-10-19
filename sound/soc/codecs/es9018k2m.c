@@ -161,6 +161,8 @@ static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 static int es9018k2m_hw_power(struct es9018k2m_priv *priv, bool enable)
 {
 	if (enable) {
+		regcache_cache_only(priv->regmap, false);
+
 		/* Power on sequence */
 		gpiod_set_value_cansleep(priv->mute_gpio, 1);
 		gpiod_set_value_cansleep(priv->dvdd18_gpio, 1);
@@ -202,6 +204,9 @@ static int es9018k2m_hw_power(struct es9018k2m_priv *priv, bool enable)
 		gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
 		gpiod_set_value_cansleep(priv->open_gpio, 0);
 		gpiod_set_value_cansleep(priv->dvdd18_gpio, 0);
+
+		regcache_mark_dirty(priv->regmap);
+		regcache_cache_only(priv->regmap, true);
 	}
 	return 0;
 }
@@ -447,6 +452,8 @@ static int es9018k2m_i2c_probe(struct i2c_client *i2c)
 	gpiod_set_value_cansleep(priv->out_select_gpio, 0);
 	priv->power_state = false;
 	priv->out_select = false;
+	regcache_mark_dirty(priv->regmap);
+	regcache_cache_only(priv->regmap, true);
 
 	ret = devm_snd_soc_register_component(dev, &soc_component_dev_es9018k2m,
 					      &es9018k2m_dai, 1);
