@@ -149,8 +149,11 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 	 */
 	ret = dev_pm_qos_add_request(bus_dev, &priv->qos_req,
 				     DEV_PM_QOS_MIN_FREQUENCY, 0);
-	if (ret < 0)
-		goto err_node_del;
+	if (ret < 0) {
+		/* Not on provider->nodes yet, so icc_nodes_remove() misses it. */
+		icc_node_destroy(icc_node->id);
+		return ret;
+	}
 
 	icc_node_add(icc_node, provider);
 
@@ -173,7 +176,6 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 
 err_pmqos_del:
 	dev_pm_qos_remove_request(&priv->qos_req);
-err_node_del:
 	icc_nodes_remove(provider);
 
 	return ret;
