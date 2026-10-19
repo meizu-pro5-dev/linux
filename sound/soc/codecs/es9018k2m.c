@@ -37,18 +37,13 @@ static const struct reg_default es9018k2m_reg_defaults[] = {
 	{ 12, 0x5a },
 	{ 13, 0x40 },
 	{ 14, 0x8a },
-	{ 15, 0x00 },
-	{ 16, 0x00 },
+	{ 15, 0x20 },
+	{ 16, 0x20 },
 	{ 17, 0xff },
 	{ 18, 0xff },
 	{ 19, 0xff },
 	{ 20, 0x7f },
 	{ 21, 0x00 },
-	{ 26, 0x00 },
-	{ 27, 0x00 },
-	{ 28, 0x00 },
-	{ 29, 0x00 },
-	{ 30, 0x00 },
 };
 
 /* Flyme OS custom FIR filter coefficients (byte-identical to vendor driver) */
@@ -121,6 +116,14 @@ static bool es9018k2m_writeable(struct device *dev, unsigned int reg)
 
 static bool es9018k2m_volatile(struct device *dev, unsigned int reg)
 {
+	/*
+	 * FIR RAM programming window registers (26..30) must be volatile so
+	 * regmap_write() does not elide repeated write strobes (Reg 30 = 0x02)
+	 * or identical coefficient bytes across the 144 FIR taps.
+	 */
+	if (reg >= ES9018K2M_PROGRAM_FIR_ADDR &&
+	    reg <= ES9018K2M_PROGRAM_FIR_CONTROL)
+		return true;
 	if (reg == ES9018K2M_CHIP_STATUS || (reg >= 65 && reg <= 93))
 		return true;
 	return false;
@@ -155,6 +158,7 @@ static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 			     (es9018k2m_fir_coeff_stage1[i] >> 16) & 0xff);
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
 	}
+	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
 
 	for (i = 0; i < 16; i++) {
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, 0x80 + i);
@@ -166,6 +170,7 @@ static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 			     (es9018k2m_fir_coeff_stage2[i] >> 16) & 0xff);
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
 	}
+	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
 
 	/* Enable custom FIR: bit 0 = enable, bit 2 = cosine stage 2 -> 0x05 */
 	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x05);
@@ -506,6 +511,8 @@ static void es9018k2m_dai_shutdown(struct snd_pcm_substream *substream,
 	priv->stream_active = false;
 	if (!priv->manual_power)
 		es9018k2m_hw_power_locked(priv, false);
+	else
+		es9018k2m_select_output_locked(priv, false);
 	mutex_unlock(&priv->lock);
 }
 
@@ -705,8 +712,7 @@ static struct snd_soc_dai_driver es9018k2m_dai = {
 		.channels_max = 2,
 		.rates = SNDRV_PCM_RATE_8000_192000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE |
-			   SNDRV_PCM_FMTBIT_S24_LE |
-			   SNDRV_PCM_FMTBIT_S32_LE,
+			   SNDRV_PCM_FMTBIT_S24_LE,
 	},
 	.ops = &es9018k2m_dai_ops,
 	.symmetric_rate = 1,
