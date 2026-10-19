@@ -1264,6 +1264,8 @@ static int lv1set_section(struct exynos_iommu_domain *domain,
 			  phys_addr_t paddr, int prot, short *pgcnt)
 {
 	if (lv1ent_section(sent)) {
+		if (section_phys(sent) == paddr)
+			return 0;
 		WARN(1, "Trying mapping on 1MiB@%#08x that is mapped",
 			iova);
 		return -EADDRINUSE;
@@ -1301,8 +1303,12 @@ static int lv2set_page(sysmmu_pte_t *pent, phys_addr_t paddr, size_t size,
 		       int prot, short *pgcnt)
 {
 	if (size == SPAGE_SIZE) {
-		if (WARN_ON(!lv2ent_fault(pent)))
+		if (!lv2ent_fault(pent)) {
+			if (spage_phys(pent) == paddr)
+				return 0;
+			WARN_ON(1);
 			return -EADDRINUSE;
+		}
 
 		exynos_iommu_set_pte(pent, mk_lv2ent_spage(paddr, prot));
 		*pgcnt -= 1;
@@ -1314,7 +1320,10 @@ static int lv2set_page(sysmmu_pte_t *pent, phys_addr_t paddr, size_t size,
 					sizeof(*pent) * SPAGES_PER_LPAGE,
 					DMA_TO_DEVICE);
 		for (i = 0; i < SPAGES_PER_LPAGE; i++, pent++) {
-			if (WARN_ON(!lv2ent_fault(pent))) {
+			if (!lv2ent_fault(pent)) {
+				if (lpage_phys(pent) == paddr)
+					return 0;
+				WARN_ON(1);
 				if (i > 0)
 					memset(pent - i, 0, sizeof(*pent) * i);
 				return -EADDRINUSE;
