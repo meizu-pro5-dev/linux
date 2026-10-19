@@ -77,11 +77,12 @@ struct m86_machine_priv {
 	bool es705_booted;
 	unsigned int sysclk_rate;
 	unsigned int fll_rate;	/* FLL1 output currently programmed, 0 = off */
-	struct snd_soc_aux_dev amp_dev;
+	struct snd_soc_aux_dev aux_devs[2];
 	struct snd_soc_component *amp_component;
 	struct device_node *cpu_np;
 	struct device_node *codec_np;
 	struct device_node *amp_np;
+	struct device_node *hifi_np;
 	/* PM QoS protection for active audio streaming */
 	struct pm_qos_request cpu_latency_req;
 	bool cpu_latency_active;
@@ -991,6 +992,7 @@ static void m86_cleanup_resources(void *data)
 	of_node_put(priv->cpu_np);
 	of_node_put(priv->codec_np);
 	of_node_put(priv->amp_np);
+	of_node_put(priv->hifi_np);
 }
 
 static int m86_audio_probe(struct platform_device *pdev)
@@ -1099,11 +1101,19 @@ static int m86_audio_probe(struct platform_device *pdev)
 	card->dai_link[0].platforms->of_node = priv->cpu_np;
 	card->dai_link[0].codecs->of_node = priv->codec_np;
 
+	card->aux_dev = priv->aux_devs;
+	card->num_aux_devs = 0;
+
 	priv->amp_np = of_parse_phandle(dev->of_node, "audio-amplifier", 0);
 	if (priv->amp_np) {
-		priv->amp_dev.dlc.of_node = priv->amp_np;
-		card->aux_dev = &priv->amp_dev;
-		card->num_aux_devs = 1;
+		priv->aux_devs[card->num_aux_devs].dlc.of_node = priv->amp_np;
+		card->num_aux_devs++;
+	}
+
+	priv->hifi_np = of_parse_phandle(dev->of_node, "hifi-dac", 0);
+	if (priv->hifi_np) {
+		priv->aux_devs[card->num_aux_devs].dlc.of_node = priv->hifi_np;
+		card->num_aux_devs++;
 	}
 
 	ret = devm_add_action_or_reset(dev, m86_cleanup_resources, priv);
