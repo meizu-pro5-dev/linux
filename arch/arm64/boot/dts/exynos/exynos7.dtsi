@@ -28,6 +28,7 @@
 		pinctrl9 = &pinctrl_aud;
 		spi0 = &spi_0;
 		spi3 = &spi_3;
+		spi4 = &spi_4;
 		tmuctrl0 = &tmuctrl_0;
 	};
 
@@ -503,6 +504,22 @@
 			pinctrl-0 = <&spi3_bus>;
 			clocks = <&clock_peric1 PCLK_SPI3>,
 				 <&clock_peric1 SCLK_SPI3>;
+			clock-names = "spi", "spi_busclk0";
+			num-cs = <1>;
+			status = "disabled";
+		};
+
+		spi_4: spi@14d70000 {
+			compatible = "samsung,exynos7-spi";
+			reg = <0x14d70000 0x100>;
+			interrupts = <GIC_SPI 468 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			samsung,spi-src-clk = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi4_bus>;
+			clocks = <&clock_peric1 PCLK_SPI4>,
+				 <&clock_peric1 SCLK_SPI4>;
 			clock-names = "spi", "spi_busclk0";
 			num-cs = <1>;
 			status = "disabled";
