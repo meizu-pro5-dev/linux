@@ -176,8 +176,10 @@ static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
 			return 0;
 		if (chip->hwen_gpio)
 			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
+		/* Keep the cached FLAGS: strobe_work powers off right after
+		 * latching a timeout and flash_fault must still report it.
+		 */
 		chip->hw_enabled = false;
-		chip->flags_valid = false;
 	}
 
 	return 0;
@@ -391,8 +393,16 @@ static int lm3644_refresh_flags_locked(struct lm3644_chip *chip)
 	if (!ret)
 		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
 	if (!ret) {
-		chip->flags1 = flag0;
-		chip->flags2 = flag1;
+		/* Accumulate until the next strobe: a second read of the
+		 * clear-on-read registers returns 0 and must not erase a fault.
+		 */
+		if (chip->flags_valid) {
+			chip->flags1 |= flag0;
+			chip->flags2 |= flag1;
+		} else {
+			chip->flags1 = flag0;
+			chip->flags2 = flag1;
+		}
 		chip->flags_valid = true;
 	}
 	return ret;
