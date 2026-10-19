@@ -322,6 +322,8 @@ static int fpc1155_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "failed to register input device\n");
 
 	device_init_wakeup(dev, true);
+	/* Arm mBack wake by default; userspace may opt out via wakeup_enable. */
+	fpc->wakeup_enabled = true;
 
 	ret = devm_request_threaded_irq(dev, fpc->irq, NULL, fpc1155_irq_thread,
 					IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
