@@ -206,6 +206,8 @@
 
 &ufs {
 	samsung,bus = <&bus_mif>;
+	interconnects = <&bus_int &bus_mif>;
+	interconnect-names = "dma-mem";
 	status = "okay";
 };
 
@@ -468,6 +470,8 @@
 	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
 	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
 	samsung,bus = <&bus_mif>;
+	interconnects = <&bus_int &bus_mif>;
+	interconnect-names = "dma-mem";
 	memory-region = <&decon_iova_resv>;
 	status = "okay";
  display-timings {
@@ -890,6 +894,7 @@
 	bus_mif: bus-mif {
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_mif_opp_table>;
+		#interconnect-cells = <0>;
 		vdd-supply = <&m86_buck1_mif>;
 		status = "okay";
 	};
@@ -897,6 +902,8 @@
 	bus_int: bus-int {
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_int_opp_table>;
+		#interconnect-cells = <0>;
+		interconnects = <&bus_mif>;
 		vdd-supply = <&m86_buck4_int>;
 		devfreq = <&bus_mif>;
 		status = "okay";
