@@ -100,12 +100,15 @@ static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
 	u32 r0, r1, r2, f0, f1, f2, r7, f7;
 	int j;
 
-	r0 = m86_tmu_temp_to_code(trim, 75);
-	f0 = m86_tmu_temp_to_code(trim, 70);
-	r1 = m86_tmu_temp_to_code(trim, 85);
-	f1 = m86_tmu_temp_to_code(trim, 80);
-	r2 = m86_tmu_temp_to_code(trim, 95);
-	f2 = m86_tmu_temp_to_code(trim, 90);
+	/* Levels 0..2 match the m86-cpu-coordinator caps (65/75/85 C) and
+	 * fall 5 C below each, its relax hysteresis.
+	 */
+	r0 = m86_tmu_temp_to_code(trim, 65);
+	f0 = m86_tmu_temp_to_code(trim, 60);
+	r1 = m86_tmu_temp_to_code(trim, 75);
+	f1 = m86_tmu_temp_to_code(trim, 70);
+	r2 = m86_tmu_temp_to_code(trim, 85);
+	f2 = m86_tmu_temp_to_code(trim, 80);
 	r7 = m86_tmu_temp_to_code(trim, 115);
 	f7 = m86_tmu_temp_to_code(trim, 110);
 
