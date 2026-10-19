@@ -1238,6 +1238,19 @@
 		reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
 		#sound-dai-cells = <0>;
 	};
+
+	ess9018k2m: ess9018k2m@48 {
+		compatible = "ess,ess9018k2m";
+		reg = <0x48>;
+		osc48k-gpios = <&gpf2 1 GPIO_ACTIVE_HIGH>;
+		osc44k-gpios = <&gpf2 3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpf0 4 GPIO_ACTIVE_HIGH>;
+		mute-gpios = <&gpf1 3 GPIO_ACTIVE_HIGH>;
+		open-gpios = <&gpf5 0 GPIO_ACTIVE_HIGH>;
+		low-gain-gpios = <&gpf1 0 GPIO_ACTIVE_HIGH>;
+		out-select-gpios = <&gpf1 4 GPIO_ACTIVE_HIGH>;
+		dvdd18-gpios = <&gpf4 1 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 / {
@@ -1251,6 +1264,7 @@
 		dsp-wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
 		dsp-core-supply = <&m86_es705_1v1>;
 		audio-amplifier = <&audio_pa_tfa9890>;
+		hifi-dac = <&ess9018k2m>;
 		samsung,audio-routing =
 			"Headphone", "HPOUTL",
 			"Headphone", "HPOUTR",
