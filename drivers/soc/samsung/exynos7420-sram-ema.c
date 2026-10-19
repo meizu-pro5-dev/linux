@@ -13,20 +13,16 @@
 #include <linux/seq_file.h>
 #include <linux/m86-asv-cal.h>
 
-#define SYSREG_APOLLO_BASE		0x11800000
-#define SYSREG_ATLAS_BASE		0x11900000
-#define SYSREG_G3D_BASE			0x10050000
+#define SYSREG_BASE			0x10050000
+#define SYSREG_SIZE			0x3000
 
-#define SYSREG_EMA_SIZE			0x2000
-
-#define SYSREG_APOLLO_EMA_CON		0x1008
-#define SYSREG_ATLAS_EMA_CON		0x1008
+#define SYSREG_APOLLO_EMA_CON		0x0038
+#define SYSREG_ATLAS_EMA_L1_CON		0x0138
+#define SYSREG_ATLAS_EMA_L2_CON		0x2908
 #define SYSREG_G3D_EMA_CON		0x1224
 
 struct exynos7420_sram_ema_data {
-	void __iomem *apollo_base;
-	void __iomem *atlas_base;
-	void __iomem *g3d_base;
+	void __iomem *base;
 	struct m86_asv_cal_info cal;
 	bool cal_valid;
 };
@@ -35,20 +31,21 @@ static struct exynos7420_sram_ema_data ema_data;
 
 static int exynos7420_sram_ema_show(struct seq_file *s, void *data)
 {
-	u32 val_apollo = 0, val_atlas = 0, val_g3d = 0;
+	u32 val_apollo = 0, val_atlas_l1 = 0, val_atlas_l2 = 0, val_g3d = 0;
 
-	if (ema_data.apollo_base)
-		val_apollo = readl_relaxed(ema_data.apollo_base + SYSREG_APOLLO_EMA_CON);
-	if (ema_data.atlas_base)
-		val_atlas = readl_relaxed(ema_data.atlas_base + SYSREG_ATLAS_EMA_CON);
-	if (ema_data.g3d_base)
-		val_g3d = readl_relaxed(ema_data.g3d_base + SYSREG_G3D_EMA_CON);
+	if (ema_data.base) {
+		val_apollo = readl_relaxed(ema_data.base + SYSREG_APOLLO_EMA_CON);
+		val_atlas_l1 = readl_relaxed(ema_data.base + SYSREG_ATLAS_EMA_L1_CON);
+		val_atlas_l2 = readl_relaxed(ema_data.base + SYSREG_ATLAS_EMA_L2_CON);
+		val_g3d = readl_relaxed(ema_data.base + SYSREG_G3D_EMA_CON);
+	}
 
 	seq_puts(s, "Exynos7420 SRAM EMA/MCS Hardware Monitor\n\n");
 	seq_puts(s, "Live Hardware Registers:\n");
-	seq_printf(s, "  SYSREG_APOLLO [0x11801008]: 0x%08x\n", val_apollo);
-	seq_printf(s, "  SYSREG_ATLAS  [0x11901008]: 0x%08x\n", val_atlas);
-	seq_printf(s, "  SYSREG_G3D    [0x10051224]: 0x%08x\n", val_g3d);
+	seq_printf(s, "  SYSREG_APOLLO    [0x10050038]: 0x%08x\n", val_apollo);
+	seq_printf(s, "  SYSREG_ATLAS_L1  [0x10050138]: 0x%08x\n", val_atlas_l1);
+	seq_printf(s, "  SYSREG_ATLAS_L2  [0x10052908]: 0x%08x\n", val_atlas_l2);
+	seq_printf(s, "  SYSREG_G3D       [0x10051224]: 0x%08x\n", val_g3d);
 
 	if (ema_data.cal_valid) {
 		u32 l1, l2;
@@ -89,17 +86,9 @@ static int __init exynos7420_sram_ema_init(void)
 	if (!of_machine_is_compatible("samsung,exynos7420"))
 		return 0;
 
-	ema_data.apollo_base = ioremap(SYSREG_APOLLO_BASE, SYSREG_EMA_SIZE);
-	if (!ema_data.apollo_base)
-		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG_APOLLO\n");
-
-	ema_data.atlas_base = ioremap(SYSREG_ATLAS_BASE, SYSREG_EMA_SIZE);
-	if (!ema_data.atlas_base)
-		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG_ATLAS\n");
-
-	ema_data.g3d_base = ioremap(SYSREG_G3D_BASE, SYSREG_EMA_SIZE);
-	if (!ema_data.g3d_base)
-		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG_G3D\n");
+	ema_data.base = ioremap(SYSREG_BASE, SYSREG_SIZE);
+	if (!ema_data.base)
+		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG\n");
 
 	if (!m86_asv_cal_read(&ema_data.cal))
 		ema_data.cal_valid = true;
