@@ -321,7 +321,7 @@ err_pm_get:
 	return ret;
 }
 
-static void exynos_trng_remove(struct platform_device *pdev)
+static int exynos_trng_remove(struct platform_device *pdev)
 {
 	struct exynos_trng_dev *trng = platform_get_drvdata(pdev);
 
@@ -333,6 +333,8 @@ static void exynos_trng_remove(struct platform_device *pdev)
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+
+	return 0;
 }
 
 static int exynos_trng_suspend(struct device *dev)

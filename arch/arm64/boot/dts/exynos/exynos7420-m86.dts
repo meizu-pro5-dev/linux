@@ -229,7 +229,7 @@
 	vmmc-supply = <&dvdd29_tf>;
 	vqmmc-supply = <&ldo2_reg>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
+	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &m86_sd2_cd>;
 };
 
 &usbdrd_phy {
@@ -375,7 +375,7 @@
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <0>;
 	};
-	sd2_cd: sd2-cd-pin {
+	m86_sd2_cd: sd2-cd-pin {
 		samsung,pins = "gpa1-3";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <3>;
