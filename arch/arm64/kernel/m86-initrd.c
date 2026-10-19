@@ -152,8 +152,14 @@ static int __init m86_reserved_conflict(const void *fdt, u64 start, u64 end)
 	step = ac + sc;
 	fdt_for_each_subnode(node, fdt, parent) {
 		reg = fdt_getprop(fdt, node, "reg", &len);
-		if (!reg || len <= 0 || len % (step * sizeof(*reg)))
+		if (!reg) {
+			/* Pure IOVA reservations (iommu-addresses without reg) do not occupy DRAM */
+			if (fdt_getprop(fdt, node, "iommu-addresses", NULL))
+				continue;
 			return -EINVAL; /* Dynamic reservations are not this contract. */
+		}
+		if (len <= 0 || len % (step * sizeof(*reg)))
+			return -EINVAL;
 		for (i = 0; i < len / (int)sizeof(*reg); i += step) {
 			base = m86_cells(reg + i, ac);
 			size = m86_cells(reg + i + ac, sc);
