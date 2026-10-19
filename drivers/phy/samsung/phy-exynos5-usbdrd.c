@@ -237,6 +237,7 @@ struct exynos5_usbdrd_phy {
 	struct clk *ref_clk;
 	struct regulator *vbus;
 	struct regulator *vbus_boost;
+	bool ss_phy_calibrated;
 };
 
 static inline
@@ -384,7 +385,26 @@ static void exynos5_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
 	reg &= ~PHYTEST_POWERDOWN_SSP;
 	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
+
+	phy_drd->ss_phy_calibrated = true;
+	dev_info(phy_drd->dev, "Exynos7 USB 3.0 SuperSpeed PIPE3 PHY calibrated (param1=0x%08x)\n",
+		 readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1));
 }
+
+static ssize_t ss_phy_calibrated_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct exynos5_usbdrd_phy *phy_drd = dev_get_drvdata(dev);
+	bool calibrated = false;
+
+	if (phy_drd && phy_drd->reg_phy) {
+		u32 test = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
+		calibrated = phy_drd->ss_phy_calibrated || !(test & PHYTEST_POWERDOWN_SSP);
+	}
+
+	return sysfs_emit(buf, "%d\n", calibrated ? 1 : 0);
+}
+static DEVICE_ATTR_RO(ss_phy_calibrated);
 
 static void exynos5_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
 {
@@ -1105,6 +1125,10 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 		dev_err(phy_drd->dev, "Failed to register phy provider\n");
 		return PTR_ERR(phy_provider);
 	}
+
+	ret = device_create_file(dev, &dev_attr_ss_phy_calibrated);
+	if (ret)
+		dev_warn(dev, "failed to create ss_phy_calibrated sysfs: %d\n", ret);
 
 	return 0;
 }
