@@ -464,6 +464,9 @@ struct tcpm_port {
 	/* port belongs to a self powered device */
 	bool self_powered;
 
+	/* Highest PD revision this port negotiates (connector "pd-revision") */
+	u32 pd_max_rev;
+
 	/* Sink FRS */
 	enum frs_typec_current new_source_frs_current;
 
@@ -2480,7 +2483,7 @@ static void tcpm_pd_data_request(struct tcpm_port *port,
 			break;
 		}
 
-		if (rev < PD_MAX_REV)
+		if (rev < port->pd_max_rev)
 			port->negotiated_rev = rev;
 
 		if (port->pwr_role == TYPEC_SOURCE) {
@@ -2532,7 +2535,7 @@ static void tcpm_pd_data_request(struct tcpm_port *port,
 			break;
 		}
 
-		if (rev < PD_MAX_REV)
+		if (rev < port->pd_max_rev)
 			port->negotiated_rev = rev;
 
 		if (port->pwr_role != TYPEC_SOURCE || cnt != 1) {
@@ -4007,7 +4010,7 @@ static void run_state_machine(struct tcpm_port *port)
 		typec_set_pwr_opmode(port->typec_port, opmode);
 		port->pwr_opmode = TYPEC_PWR_MODE_USB;
 		port->caps_count = 0;
-		port->negotiated_rev = PD_MAX_REV;
+		port->negotiated_rev = port->pd_max_rev;
 		port->message_id = 0;
 		port->rx_msgid = -1;
 		port->explicit_contract = false;
@@ -4248,7 +4251,7 @@ static void run_state_machine(struct tcpm_port *port)
 					      port->cc2 : port->cc1);
 		typec_set_pwr_opmode(port->typec_port, opmode);
 		port->pwr_opmode = TYPEC_PWR_MODE_USB;
-		port->negotiated_rev = PD_MAX_REV;
+		port->negotiated_rev = port->pd_max_rev;
 		port->message_id = 0;
 		port->rx_msgid = -1;
 		port->explicit_contract = false;
@@ -6134,6 +6137,25 @@ static int tcpm_fw_get_caps(struct tcpm_port *port,
 
 	port->port_type = port->typec_caps.type;
 	port->pd_supported = !fwnode_property_read_bool(fwnode, "pd-disable");
+
+	/*
+	 * Optional "pd-revision" (major, minor, version major, version minor)
+	 * caps the negotiated revision. PD 2.0 era TCPCs such as FUSB302 can
+	 * mis-handle PD 3.0 extended control messages (5-bit message type).
+	 */
+	port->pd_max_rev = PD_MAX_REV;
+	if (fwnode_property_count_u8(fwnode, "pd-revision") == 4) {
+		u8 pd_rev[4];
+
+		ret = fwnode_property_read_u8_array(fwnode, "pd-revision",
+						    pd_rev, ARRAY_SIZE(pd_rev));
+		if (ret)
+			return ret;
+		if (pd_rev[0] == 2)
+			port->pd_max_rev = PD_REV20;
+		else if (pd_rev[0] != 3)
+			return -EINVAL;
+	}
 
 	port->slow_charger_loop = fwnode_property_read_bool(fwnode, "slow-charger-loop");
 	if (port->port_type == TYPEC_PORT_SNK)

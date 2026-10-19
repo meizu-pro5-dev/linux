@@ -109,7 +109,7 @@
 
 #define EXYNOS5_DRD_PHYPARAM1			0x20
 
-#define PHYPARAM1_PCS_TXDEEMPH_MASK		(0x3f << 0)
+#define PHYPARAM1_PCS_TXDEEMPH_MASK		(0x1f << 0)
 #define PHYPARAM1_PCS_TXDEEMPH			(0x1c)
 #define PHYPARAM1_PCS_TXDEEMPH_3P5DB_MASK	(0x3f << 0)
 #define PHYPARAM1_PCS_TXDEEMPH_3P5DB(_x)	((_x) << 0)
@@ -263,6 +263,7 @@ struct exynos5_usbdrd_phy {
 	struct regulator *vbus;
 	struct regulator *vbus_boost;
 	bool ss_phy_calibrated;
+	bool hs_host_tune;
 };
 
 static inline
@@ -397,13 +398,57 @@ exynos5_usbdrd_utmi_set_refclk(struct phy_usb_instance *inst)
 	return reg;
 }
 
+static void exynos5_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
+{
+	u32 reg;
+
+	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1);
+	/* Set Tx De-Emphasis level */
+	reg &= ~PHYPARAM1_PCS_TXDEEMPH_MASK;
+	reg |=	PHYPARAM1_PCS_TXDEEMPH;
+	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1);
+
+	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
+	reg &= ~PHYTEST_POWERDOWN_SSP;
+	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
+}
+
+/*
+ * Exynos7420 14nm HS PHY tuning, from the vendor phy-samsung-usb3-cal.c
+ * samsung_exynos5_cal_usb3phy_tune_host()/_tune_dev(). The device values
+ * (TXVREFTUNE 0xf, 3x pre-emphasis) trip the host-side HS disconnect
+ * detector during port reset, so the host role needs its own set.
+ */
+static void exynos7_usbdrd_hs_tune(struct exynos5_usbdrd_phy *phy_drd)
+{
+	u32 reg;
+
+	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0);
+	reg &= ~(PHYPARAM0_COMPDISTUNE_MASK | PHYPARAM0_SQRXTUNE_MASK |
+		 PHYPARAM0_TXPREEMPAMPTUNE_MASK | PHYPARAM0_TXRISETUNE_MASK |
+		 PHYPARAM0_TXVREFTUNE_MASK);
+	if (phy_drd->hs_host_tune)
+		reg |= PHYPARAM0_COMPDISTUNE(0x7) |
+		       PHYPARAM0_SQRXTUNE(0x3) |
+		       PHYPARAM0_TXPREEMPAMPTUNE(0x0) |
+		       PHYPARAM0_TXRISETUNE(0x3) |
+		       PHYPARAM0_TXVREFTUNE(0x1);
+	else
+		reg |= PHYPARAM0_COMPDISTUNE(0x4) |
+		       PHYPARAM0_SQRXTUNE(0x3) |
+		       PHYPARAM0_TXPREEMPAMPTUNE(0x3) |
+		       PHYPARAM0_TXRISETUNE(0x3) |
+		       PHYPARAM0_TXVREFTUNE(0xf);
+	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0);
+}
+
 /*
  * Exynos7420 14nm PIPE3 PHY tuning, ported from the vendor
- * phy-samsung-usb3-cal.c samsung_exynos5_cal_usb3phy_tune_dev() sequence.
- * PHYPCSVAL_PCS_RX_LOS_MASK_VAL(0x18) masks the abnormal LFPS glitches that
- * otherwise produce spurious SuperSpeed disconnects on this PHY.
+ * phy-samsung-usb3-cal.c tune sequence. PHYPCSVAL_PCS_RX_LOS_MASK_VAL(0x18)
+ * masks the abnormal LFPS glitches that otherwise produce spurious
+ * SuperSpeed disconnects on this PHY.
  */
-static void exynos5_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
+static void exynos7_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 {
 	u32 reg;
 
@@ -417,14 +462,7 @@ static void exynos5_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 	reg |= PHY_CLOCK_SEL;
 	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPIPE);
 
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0);
-	reg &= ~PHYPARAM0_COMPDISTUNE_MASK;
-	reg |= PHYPARAM0_COMPDISTUNE(0x4) |
-	       PHYPARAM0_SQRXTUNE(0x3) |
-	       PHYPARAM0_TXPREEMPAMPTUNE(0x3) |
-	       PHYPARAM0_TXRISETUNE(0x3) |
-	       PHYPARAM0_TXVREFTUNE(0xf);
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0);
+	exynos7_usbdrd_hs_tune(phy_drd);
 
 	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1);
 	reg &= ~PHYPARAM1_PCS_TXSWING_FULL_MASK;
@@ -826,8 +864,50 @@ static int exynos5_usbdrd_phy_calibrate(struct phy *phy)
 	return 0;
 }
 
+/*
+ * DWC3 calls phy_set_mode() after dwc3_host_init()/before dwc3_gadget_init()
+ * on every role switch, so only retune PHYPARAM0 here: a PORTRESET at this
+ * point would race the already running xHCI root hub.
+ */
+static int exynos7_usbdrd_phy_set_mode(struct phy *phy, enum phy_mode mode,
+				       int submode)
+{
+	struct phy_usb_instance *inst = phy_get_drvdata(phy);
+	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
+	int ret;
+
+	if (inst->phy_cfg->id != EXYNOS5_DRDPHY_UTMI)
+		return 0;
+	if (mode != PHY_MODE_USB_HOST && mode != PHY_MODE_USB_DEVICE)
+		return 0;
+
+	ret = clk_prepare_enable(phy_drd->clk);
+	if (ret)
+		return ret;
+
+	phy_drd->hs_host_tune = mode == PHY_MODE_USB_HOST;
+	exynos7_usbdrd_hs_tune(phy_drd);
+	dev_dbg(phy_drd->dev, "HS PHY tuned for %s (param0=0x%08x)\n",
+		phy_drd->hs_host_tune ? "host" : "device",
+		readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0));
+
+	clk_disable_unprepare(phy_drd->clk);
+
+	return 0;
+}
+
 static const struct phy_ops exynos5_usbdrd_phy_ops = {
 	.init		= exynos5_usbdrd_phy_init,
+	.exit		= exynos5_usbdrd_phy_exit,
+	.power_on	= exynos5_usbdrd_phy_power_on,
+	.power_off	= exynos5_usbdrd_phy_power_off,
+	.calibrate	= exynos5_usbdrd_phy_calibrate,
+	.owner		= THIS_MODULE,
+};
+
+static const struct phy_ops exynos7_usbdrd_phy_ops = {
+	.init		= exynos5_usbdrd_phy_init,
+	.set_mode	= exynos7_usbdrd_phy_set_mode,
 	.exit		= exynos5_usbdrd_phy_exit,
 	.power_on	= exynos5_usbdrd_phy_power_on,
 	.power_off	= exynos5_usbdrd_phy_power_off,
@@ -1024,6 +1104,21 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_exynos5[] = {
 	},
 };
 
+static const struct exynos5_usbdrd_phy_config phy_cfg_exynos7[] = {
+	{
+		.id		= EXYNOS5_DRDPHY_UTMI,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_utmi_init,
+		.set_refclk	= exynos5_usbdrd_utmi_set_refclk,
+	},
+	{
+		.id		= EXYNOS5_DRDPHY_PIPE3,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos7_usbdrd_pipe3_init,
+		.set_refclk	= exynos5_usbdrd_pipe3_set_refclk,
+	},
+};
+
 static const struct exynos5_usbdrd_phy_config phy_cfg_exynos850[] = {
 	{
 		.id		= EXYNOS5_DRDPHY_UTMI,
@@ -1056,8 +1151,8 @@ static const struct exynos5_usbdrd_phy_drvdata exynos5433_usbdrd_phy = {
 };
 
 static const struct exynos5_usbdrd_phy_drvdata exynos7_usbdrd_phy = {
-	.phy_cfg		= phy_cfg_exynos5,
-	.phy_ops		= &exynos5_usbdrd_phy_ops,
+	.phy_cfg		= phy_cfg_exynos7,
+	.phy_ops		= &exynos7_usbdrd_phy_ops,
 	.pmu_offset_usbdrd0_phy	= EXYNOS5_USBDRD_PHY_CONTROL,
 	.has_common_clk_gate	= false,
 };
