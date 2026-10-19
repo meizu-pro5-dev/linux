@@ -349,6 +349,10 @@
 		compatible = "meizu,m86-tmu-monitor";
 		reg = <0 0x10060000 0 0x200>, <0 0x10064000 0 0x200>,
 		      <0 0x10068000 0 0x200>, <0 0x1006c000 0 0x200>;
+		interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>,
+		             <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,
+		             <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
+		             <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&clock_peris PCLK_TMU>, <&clock_peris SCLK_TMU>;
 		clock-names = "tmu_apbif", "tmu_sclk";
 	};
