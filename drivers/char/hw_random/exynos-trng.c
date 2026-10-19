@@ -21,6 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -67,6 +68,7 @@
 /* SMC_CMD_RANDOM: return values */
 #define HWRNG_RET_OK               0x0
 #define HWRNG_RET_RETRY_ERROR      0x2
+#define HWRNG_RET_INVALID_FLAG_ERROR 0x3
 #define HWRNG_RET_START_UP_TEST_DONE 0x5
 
 #define HWRNG_MAX_TRIES            100
@@ -78,6 +80,8 @@ struct exynos_trng_dev {
 	struct clk       *pclk; /* bus clock */
 	struct hwrng     rng;
 	unsigned long    flags;
+	struct mutex     smc_lock;
+	bool             smc_session;
 };
 
 static int exynos_trng_do_read_reg(struct hwrng *rng, void *data, size_t max,
@@ -99,43 +103,133 @@ static int exynos_trng_do_read_reg(struct hwrng *rng, void *data, size_t max,
 	return max;
 }
 
+static int exynos_trng_smc_init(struct exynos_trng_dev *trng)
+{
+	struct arm_smccc_res res;
+	int tries;
+
+	for (tries = 0; tries < HWRNG_MAX_TRIES; tries++) {
+		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0, 0,
+			      &res);
+		if (res.a0 == HWRNG_RET_OK) {
+			trng->smc_session = true;
+			return 0;
+		}
+		if (res.a0 != HWRNG_RET_RETRY_ERROR)
+			break;
+		usleep_range(50, 100);
+	}
+
+	dev_warn(trng->dev, "SMC TRNG init failed (ret=%ld)\n", (long)res.a0);
+	return -EIO;
+}
+
+static void exynos_trng_smc_exit(struct exynos_trng_dev *trng)
+{
+	struct arm_smccc_res res;
+	int tries;
+
+	for (tries = 0; tries < HWRNG_MAX_TRIES; tries++) {
+		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0,
+			      &res);
+		if (res.a0 == HWRNG_RET_OK ||
+		    res.a0 == HWRNG_RET_INVALID_FLAG_ERROR)
+			break;
+		if (res.a0 != HWRNG_RET_RETRY_ERROR)
+			break;
+		usleep_range(50, 100);
+	}
+	trng->smc_session = false;
+}
+
+/* FIPS start-up test: read 129 blocks from LDFW or wait for the done flag. */
+static int exynos_trng_self_test(struct exynos_trng_dev *trng)
+{
+	struct arm_smccc_res res;
+	int blocks = 0;
+	int tries = 0;
+
+	while (blocks < 129) {
+		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_GET_DATA, 1, 0, 0, 0, 0, 0,
+			      &res);
+		switch (res.a0) {
+		case HWRNG_RET_OK:
+			blocks++;
+			tries = 0;
+			break;
+		case HWRNG_RET_START_UP_TEST_DONE:
+			return 0;
+		case HWRNG_RET_RETRY_ERROR:
+			if (++tries >= HWRNG_MAX_TRIES)
+				return -ETIMEDOUT;
+			usleep_range(50, 100);
+			break;
+		default:
+			dev_err(trng->dev, "SMC TRNG start-up test failed (ret=%ld)\n",
+				(long)res.a0);
+			return -EIO;
+		}
+	}
+
+	return 0;
+}
+
 static int exynos_trng_do_read_smc(struct hwrng *rng, void *data, size_t max,
 				   bool wait)
 {
+	struct exynos_trng_dev *trng = (struct exynos_trng_dev *)rng->priv;
 	struct arm_smccc_res res;
-	unsigned int copied = 0;
-	u32 *buf = data;
+	unsigned char *buf = data;
+	size_t copied = 0;
 	int tries = 0;
+	int ret;
 
-	/* Initialize SMC TRNG session for reading */
-	arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0, 0, &res);
+	mutex_lock(&trng->smc_lock);
+
+	ret = exynos_trng_smc_init(trng);
+	if (ret)
+		goto out_unlock;
 
 	while (copied < max) {
+		u32 tmp[2];
+
 		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_GET_DATA, 0, 0, 0, 0, 0, 0,
 			      &res);
 		switch (res.a0) {
 		case HWRNG_RET_OK:
-			*buf++ = res.a2;
-			*buf++ = res.a3;
-			copied += 8;
+			tmp[0] = (u32)res.a2;
+			tmp[1] = (u32)res.a3;
+			/* The tail may be shorter than the 8-byte SMC block. */
+			memcpy(buf + copied, tmp,
+			       min_t(size_t, sizeof(tmp), max - copied));
+			copied += min_t(size_t, sizeof(tmp), max - copied);
 			tries = 0;
 			break;
 		case HWRNG_RET_RETRY_ERROR:
-			if (!wait)
-				goto out;
-			if (++tries >= HWRNG_MAX_TRIES)
-				goto out;
+			if (!wait) {
+				ret = -EAGAIN;
+				goto out_exit;
+			}
+			if (++tries >= HWRNG_MAX_TRIES) {
+				ret = -ETIMEDOUT;
+				goto out_exit;
+			}
 			usleep_range(50, 100);
 			cond_resched();
 			break;
 		default:
-			goto out;
+			ret = -EIO;
+			goto out_exit;
 		}
 	}
+	ret = 0;
 
-out:
-	arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0, &res);
-	return copied ? copied : -EIO;
+out_exit:
+	if (trng->smc_session)
+		exynos_trng_smc_exit(trng);
+out_unlock:
+	mutex_unlock(&trng->smc_lock);
+	return copied ? (int)copied : ret;
 }
 
 static int exynos_trng_init_reg(struct hwrng *rng)
@@ -174,45 +268,17 @@ static int exynos_trng_init_reg(struct hwrng *rng)
 static int exynos_trng_init_smc(struct hwrng *rng)
 {
 	struct exynos_trng_dev *trng = (struct exynos_trng_dev *)rng->priv;
-	struct arm_smccc_res res;
-	int tries = 0;
-	int blocks = 0;
+	int ret;
 
-	do {
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0, 0, &res);
-		if (res.a0 == HWRNG_RET_RETRY_ERROR) {
-			if (++tries >= HWRNG_MAX_TRIES)
-				break;
-			usleep_range(50, 100);
-		}
-	} while (res.a0 == HWRNG_RET_RETRY_ERROR);
-
-	if ((int)res.a0 < 0 || res.a0 != HWRNG_RET_OK) {
-		dev_warn(trng->dev, "SMC TRNG unavailable (ret=%ld); LDFW not loaded\n",
-			 (long)res.a0);
-		return -ENODEV;
+	mutex_lock(&trng->smc_lock);
+	ret = exynos_trng_smc_init(trng);
+	if (!ret) {
+		ret = exynos_trng_self_test(trng);
+		exynos_trng_smc_exit(trng);
 	}
+	mutex_unlock(&trng->smc_lock);
 
-	/* Run FIPS start-up test loop */
-	tries = 0;
-	while (blocks < 129) {
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_GET_DATA, 1, 0, 0, 0, 0, 0, &res);
-		if (res.a0 == HWRNG_RET_RETRY_ERROR) {
-			if (++tries >= HWRNG_MAX_TRIES)
-				break;
-			usleep_range(50, 100);
-			continue;
-		}
-		if (res.a0 == HWRNG_RET_START_UP_TEST_DONE)
-			break;
-		if (res.a0 != HWRNG_RET_OK)
-			break;
-		blocks++;
-		tries = 0;
-	}
-
-	arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0, &res);
-	return 0;
+	return ret;
 }
 
 static int exynos_trng_probe(struct platform_device *pdev)
@@ -225,6 +291,7 @@ static int exynos_trng_probe(struct platform_device *pdev)
 		return ret;
 
 	platform_set_drvdata(pdev, trng);
+	mutex_init(&trng->smc_lock);
 	trng->dev = &pdev->dev;
 	trng->flags = (unsigned long)device_get_match_data(&pdev->dev);
 
@@ -236,36 +303,27 @@ static int exynos_trng_probe(struct platform_device *pdev)
 	trng->rng.priv = (unsigned long)trng;
 
 	if (trng->flags & EXYNOS_SMC) {
-		/* Pre-test SMC availability before runtime PM & registration */
+		/* Pre-test SMC availability before runtime PM & registration. */
 		struct arm_smccc_res res;
-		int tries = 0;
+		int tries;
 
-		do {
-			arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0, 0, &res);
-			if (res.a0 == HWRNG_RET_RETRY_ERROR) {
-				if (++tries >= HWRNG_MAX_TRIES)
-					break;
-				usleep_range(50, 100);
-			}
-		} while (res.a0 == HWRNG_RET_RETRY_ERROR);
+		for (tries = 0; tries < HWRNG_MAX_TRIES; tries++) {
+			arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0,
+				      0, &res);
+			if (res.a0 == HWRNG_RET_OK)
+				break;
+			if (res.a0 != HWRNG_RET_RETRY_ERROR)
+				break;
+			usleep_range(50, 100);
+		}
 
-		if ((int)res.a0 < 0 || res.a0 != HWRNG_RET_OK) {
+		if (res.a0 != HWRNG_RET_OK) {
 			dev_warn(trng->dev, "SMC TRNG unavailable (ret=%ld); LDFW not loaded\n",
 				 (long)res.a0);
 			return -ENODEV;
 		}
-
-		/* Run FIPS start-up test */
-		tries = 0;
-		while (tries++ < 129) {
-			arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_GET_DATA, 1, 0, 0, 0, 0, 0, &res);
-			if (res.a0 == HWRNG_RET_START_UP_TEST_DONE)
-				break;
-			if (res.a0 != HWRNG_RET_OK && res.a0 != HWRNG_RET_RETRY_ERROR)
-				break;
-			usleep_range(20, 50);
-		}
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0, &res);
+		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0,
+			      &res);
 
 		trng->clk = devm_clk_get_optional_enabled(&pdev->dev, "secss");
 		if (IS_ERR(trng->clk))
@@ -326,9 +384,10 @@ static int exynos_trng_remove(struct platform_device *pdev)
 	struct exynos_trng_dev *trng = platform_get_drvdata(pdev);
 
 	if (trng->flags & EXYNOS_SMC) {
-		struct arm_smccc_res res;
-
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0, &res);
+		mutex_lock(&trng->smc_lock);
+		if (trng->smc_session)
+			exynos_trng_smc_exit(trng);
+		mutex_unlock(&trng->smc_lock);
 	}
 
 	pm_runtime_put_sync(&pdev->dev);
@@ -342,11 +401,14 @@ static int exynos_trng_suspend(struct device *dev)
 	struct exynos_trng_dev *trng = dev_get_drvdata(dev);
 
 	if (trng->flags & EXYNOS_SMC) {
-		struct arm_smccc_res res;
-
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_EXIT, 0, 0, 0, 0, 0, 0, &res);
-		if (res.a0 != HWRNG_RET_OK)
-			return -EIO;
+		mutex_lock(&trng->smc_lock);
+		/* do_read_smc() already closes the LDFW session; only exit an
+		 * actually active session, otherwise LDFW returns
+		 * HWRNG_RET_INVALID_FLAG_ERROR and aborts system suspend.
+		 */
+		if (trng->smc_session)
+			exynos_trng_smc_exit(trng);
+		mutex_unlock(&trng->smc_lock);
 	}
 
 	pm_runtime_put_sync(dev);
@@ -366,17 +428,34 @@ static int exynos_trng_resume(struct device *dev)
 
 	if (trng->flags & EXYNOS_SMC) {
 		struct arm_smccc_res res;
+		int tries;
 
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_RESUME, 0, 0, 0, 0, 0, 0, &res);
-		if (res.a0 != HWRNG_RET_OK)
-			return -EIO;
-
-		arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_INIT, 0, 0, 0, 0, 0, 0, &res);
-		if (res.a0 != HWRNG_RET_OK)
-			return -EIO;
+		mutex_lock(&trng->smc_lock);
+		for (tries = 0; tries < HWRNG_MAX_TRIES; tries++) {
+			arm_smccc_smc(SMC_CMD_RANDOM, HWRNG_RESUME, 0, 0, 0,
+				      0, 0, 0, &res);
+			if (res.a0 == HWRNG_RET_OK)
+				break;
+			if (res.a0 != HWRNG_RET_RETRY_ERROR)
+				break;
+			usleep_range(50, 100);
+		}
+		if (res.a0 != HWRNG_RET_OK) {
+			ret = -EIO;
+		} else {
+			/* Re-init once and close the session so the next read
+			 * starts from a clean LDFW state.
+			 */
+			ret = exynos_trng_smc_init(trng);
+			if (!ret)
+				exynos_trng_smc_exit(trng);
+		}
+		mutex_unlock(&trng->smc_lock);
 	}
 
-	return 0;
+	if (ret)
+		pm_runtime_put_sync(dev);
+	return ret;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(exynos_trng_pm_ops, exynos_trng_suspend,

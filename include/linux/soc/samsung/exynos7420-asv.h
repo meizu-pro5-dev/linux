@@ -11,6 +11,9 @@ enum exynos7420_asv_domain {
 	EXYNOS7420_ASV_DOMAINS_NR,
 };
 
+#include <linux/m86-asv-cal.h>
+
 int exynos7420_asv_get_group(enum exynos7420_asv_domain dom, unsigned int level);
+int exynos7420_asv_get_cal(struct m86_asv_cal_info *cal);
 
 #endif /* __LINUX_SOC_SAMSUNG_EXYNOS7420_ASV_H */

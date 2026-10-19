@@ -722,6 +722,15 @@
 			power-domains = <&pd_mfc>;
 		};
 
+		clock_mscl: clock-controller@150d0000 {
+			compatible = "samsung,exynos7-clock-mscl";
+			reg = <0x150d0000 0x1000>;
+			#clock-cells = <1>;
+			clocks = <&fin_pll>, <&clock_topc ACLK_MSCL_532>;
+			clock-names = "fin_pll", "aclk_mscl_532";
+			power-domains = <&pd_mscl>;
+		};
+
 		adma: dma-controller@11420000 {
 			compatible = "arm,pl330", "arm,primecell";
 			reg = <0x11420000 0x1000>;
@@ -803,6 +812,7 @@
 			clock-names = "pclk_decon0", "aclk_decon0",
 				      "decon0_eclk", "decon0_vclk";
 			iommus = <&sysmmu_disp_ro>, <&sysmmu_disp_rw>;
+			interconnects = <&bus_mif>;
 			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 188 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "vsync", "lcd_sys";

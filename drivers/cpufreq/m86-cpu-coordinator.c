@@ -23,6 +23,8 @@
 #include <linux/workqueue.h>
 #include <linux/m86-bus-qos.h>
 #include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv.h>
+#include <linux/m86-tmu-transition.h>
 
 struct m86_opp { unsigned int khz, uv, bus_qos; };
 #include "m86-opp.h"
@@ -50,6 +52,7 @@ struct m86_coord {
 	void __iomem *topc;
 	struct clk *fin;
 	struct thermal_zone_device *zone;
+	struct notifier_block tmu_nb;
 	struct delayed_work thermal_work;
 	bool faulted, registered;
 	struct mutex bus_lock;
@@ -199,14 +202,24 @@ static int fixed_bus_floor(struct m86_coord *d)
 	return logical_khz >= req_khz ? 0 : -ERANGE;
 }
 
-static int temperature(struct m86_coord *d, int *temp)
+static int temperature(struct m86_coord *d, int *temp, bool refresh)
 {
 	int ret = fixed_bus_floor(d);
 	if (ret) {
 		dev_err_ratelimited(d->dev, "temperature guard: fixed MIF failed ret=%d\n", ret);
 		return ret;
 	}
-	ret = thermal_zone_get_temp(d->zone, temp);
+	/* Prefer the TMU driver's cached sample: no synchronous four-bank MMIO
+	 * transaction on every CPU frequency transition. Cold start falls back
+	 * to one thermal-zone read, which refreshes the same cache.
+	 */
+	if (refresh)
+		ret = thermal_zone_get_temp(d->zone, temp);
+	else {
+		ret = m86_tmu_get_cached_temp(temp);
+		if (ret == -ENODATA || ret == -EPROBE_DEFER)
+			ret = thermal_zone_get_temp(d->zone, temp);
+	}
 	if (ret) dev_err_ratelimited(d->dev, "temperature guard: TMU read failed ret=%d\n", ret);
 	/* TMU monitor checks all four banks' enable, valid status and trim.
 	 * Plausibility catches obviously invalid data; does not prove freshness. */
@@ -302,7 +315,7 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		ret = old_hz == target * 1000UL ? 0 : -EAGAIN;
 		goto out;
 	}
-	ret = temperature(d, &temp);
+	ret = temperature(d, &temp, false);
 	if (ret) { do_fail_closed = true; goto out; }
 	if (temp >= 105000) { ret = -ERANGE; do_fail_closed = true; goto out; }
 	/* Check fresh temperature on every target, independent of governor/QoS lag. */
@@ -444,7 +457,7 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 		if (coordinator->faulted || !known) return -EIO;
 		/* temperature() first invokes fixed_bus_floor(): MIF CON0/MUX
 		 * stable reads, enabled/locked PLL and logical-kHz DT floor. */
-		r = temperature(coordinator, &t);
+		r = temperature(coordinator, &t, true);
 		if (r || t >= 85000) return r ?: -ERANGE;
 		if (i) {
 			r = regmap_read(coordinator->ema, 0x38, &a);
@@ -531,8 +544,8 @@ static int m86_em_power(struct device *dev, unsigned long *power,
   *khz = c->opp[i].khz;
   {
    const struct m86_opp *nom = ci ? apollo_opp : atlas_opp;
-   u64 v_asv = div_u64(c->opp[i].uv, 1000);
-   u64 v_nom = div_u64(nom[i].uv, 1000);
+   u64 v_asv = c->opp[i].uv;
+   u64 v_nom = nom[i].uv;
    u64 p_ref = powers[i];
    if (v_nom > 0 && v_asv > 0)
     *power = (unsigned long)div64_u64(p_ref * v_asv * v_asv + (v_nom * v_nom) / 2, v_nom * v_nom);
@@ -602,6 +615,17 @@ static struct cpufreq_driver m86_cpufreq = {
 	.exit = m86_policy_exit, .attr = cpufreq_generic_attr,
 };
 
+static int m86_tmu_notify(struct notifier_block *nb, unsigned long event,
+			  void *data)
+{
+	struct m86_coord *d = container_of(nb, struct m86_coord, tmu_nb);
+
+	if (!READ_ONCE(d->faulted))
+		mod_delayed_work(system_wq, &d->thermal_work, 0);
+
+	return NOTIFY_OK;
+}
+
 static void monitor(struct work_struct *work)
 {
 	struct m86_coord *d = container_of(to_delayed_work(work), struct m86_coord, thermal_work);
@@ -609,7 +633,7 @@ static void monitor(struct work_struct *work)
 	int temp, ret;
 
 	mutex_lock(&d->lock);
-	ret = temperature(d, &temp);
+	ret = temperature(d, &temp, true);
 	if (ret || temp >= 90000) {
 		fail_closed(d, ret ?: -ERANGE);
 		mutex_unlock(&d->lock);
@@ -665,7 +689,12 @@ static void monitor(struct work_struct *work)
 		}
 	}
 	cpus_read_unlock();
-	if (!d->faulted) schedule_delayed_work(&d->thermal_work, msecs_to_jiffies(250));
+	/* Poll only while a thermal cap is active (>= 70 C). The TMU fall
+	 * threshold IRQ at 70 C wakes this work through the notifier, so idle
+	 * systems at < 70 C stop issuing four-bank TMU reads every 250 ms.
+	 */
+	if (!d->faulted && temp >= 70000)
+		schedule_delayed_work(&d->thermal_work, msecs_to_jiffies(250));
 }
 
 static void put_zone(void *data)
@@ -718,7 +747,9 @@ static int m86_probe(struct platform_device *pdev)
 	if (!d) return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap gate at source line %u\n", __LINE__);
 	d->dev = &pdev->dev;
 	d->required_bus_qos = bus_floor;
-	ret = m86_asv_cal_read(&d->asv_cal);
+	ret = exynos7420_asv_get_cal(&d->asv_cal);
+	if (ret)
+		ret = m86_asv_cal_read(&d->asv_cal);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "bootstrap CPU ASV eFuse read/version at source line %u\n", __LINE__);
 	dev_info(d->dev, "CPU ASV CAL: ver=%u type=%u atlas_grp=0x%03x apollo_grp=0x%03x ssa0_en=%u ssa1_en=%u\n",
@@ -773,7 +804,10 @@ static int m86_probe(struct platform_device *pdev)
 	get_device(&d->zone->device);
 	ret = devm_add_action_or_reset(&pdev->dev, put_zone, d->zone);
 	if (ret) return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
-	ret = temperature(d, &temp);
+	d->tmu_nb.notifier_call = m86_tmu_notify;
+	ret = m86_tmu_register_notifier(&d->tmu_nb);
+	if (ret) return dev_err_probe(&pdev->dev, ret, "TMU notifier registration at source line %u\n", __LINE__);
+	ret = temperature(d, &temp, true);
 	if (ret || temp >= 85000) return dev_err_probe(&pdev->dev, ret ?: -ERANGE, "bootstrap temperature or fixed MIF guard at source line %u\n", __LINE__);
 	/* Require measured unit handoff controls; shared SYSREG reads only. */
 	{
@@ -936,6 +970,7 @@ static int m86_remove(struct platform_device *pdev)
 	struct m86_coord *d = platform_get_drvdata(pdev);
 	int atlas_ret, apollo_ret;
 	cancel_delayed_work_sync(&d->thermal_work);
+	m86_tmu_unregister_notifier(&d->tmu_nb);
 	mutex_lock(&d->lock);
 	d->faulted = true;
 	atlas_ret = set_rate_checked(&d->cluster[0], d->cluster[0].opp[0].khz);

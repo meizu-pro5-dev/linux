@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/seq_file.h>
 #include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv.h>
 
 #define SYSREG_BASE			0x10050000
 #define SYSREG_SIZE			0x3000
@@ -90,7 +91,8 @@ static int __init exynos7420_sram_ema_init(void)
 	if (!ema_data.base)
 		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG\n");
 
-	if (!m86_asv_cal_read(&ema_data.cal))
+	if (!exynos7420_asv_get_cal(&ema_data.cal) ||
+	    !m86_asv_cal_read(&ema_data.cal))
 		ema_data.cal_valid = true;
 
 	debugfs_create_file("exynos7420_sram_ema", 0444, NULL, NULL,

@@ -25,6 +25,7 @@
 #include "m86-g3d-cmu-context.h"
 #include "m86-g3d-clock-owner.h"
 #include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-asv.h>
 #include <linux/m86-asv-cal.h>
 struct gpu_rate { unsigned long hz; u32 uv, mif, int_qos; u16 m; u8 p, s, hpm, cal_lvl; };
 /* Vendor table_g3d, v15 group10 default, hpm_freq_table. 852 (L0) is ASV-only, not vendor DVFS. */
@@ -177,7 +178,9 @@ static int validate_asv(struct gpu_dvfs *d)
 {
  struct m86_asv_cal_info cal;
  unsigned int i;
- int ret = m86_asv_cal_read(&cal);
+ int ret = exynos7420_asv_get_cal(&cal);
+ if (ret)
+  ret = m86_asv_cal_read(&cal);
  if (ret)
   return ret;
  for (i = 0; i < ARRAY_SIZE(rates); i++) {

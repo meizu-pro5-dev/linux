@@ -218,6 +218,7 @@
 	sd-uhs-sdr12;
 	sd-uhs-sdr25;
 	sd-uhs-sdr50;
+	sd-uhs-sdr104;
 	sd-uhs-ddr50;
 	card-detect-delay = <200>;
 	samsung,dw-mshc-ciu-div = <3>;
@@ -679,9 +680,10 @@
   samsung,pin-function = <2>;
  };
  nfc_ctrl_pins: nfc-ctrl-pins {
-  samsung,pins = "gpc3-0", "gpc3-4";
+  samsung,pins = "gpc3-0", "gpc3-4", "gpc3-7";
   samsung,pin-function = <1>;
   samsung,pin-pud = <0>;
+  samsung,pin-con-pdn = <3>;
  };
 };
 

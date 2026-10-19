@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/m86-tmu-transition.h>
+#include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -47,6 +48,8 @@ struct m86_tmu {
 	struct device *hwmon;
 	struct thermal_zone_device *tzd;
 	struct thermal_trip trips[3];
+	int last_temp;
+	bool temp_valid;
 };
 
 /* Serializes sensor reads and the complete bounded G3D power-on sequence.
@@ -54,6 +57,7 @@ struct m86_tmu {
  */
 static DEFINE_MUTEX(m86_tmu_access);
 static struct m86_tmu *m86_tmu_instance;
+static BLOCKING_NOTIFIER_HEAD(m86_tmu_chain);
 
 static const struct thermal_trip m86_tmu_trips[] = {
 	[0] = {
@@ -93,7 +97,7 @@ static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
 {
 	void __iomem *b = t->base[bank];
 	u32 trim = t->trim[bank];
-	u32 r0, r1, r2, f0, f1, f2;
+	u32 r0, r1, r2, f0, f1, f2, r7, f7;
 	int j;
 
 	r0 = m86_tmu_temp_to_code(trim, 75);
@@ -102,22 +106,37 @@ static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
 	f1 = m86_tmu_temp_to_code(trim, 80);
 	r2 = m86_tmu_temp_to_code(trim, 95);
 	f2 = m86_tmu_temp_to_code(trim, 90);
+	r7 = m86_tmu_temp_to_code(trim, 115);
+	f7 = m86_tmu_temp_to_code(trim, 110);
 
 	writel((r1 << 16) | r0, b + EXYNOS7420_TMU_THD_TEMP_RISE1_0);
 	writel((f1 << 16) | f0, b + EXYNOS7420_TMU_THD_TEMP_FALL1_0);
 	writel(r2, b + EXYNOS7420_TMU_THD_TEMP_RISE3_2);
 	writel(f2, b + EXYNOS7420_TMU_THD_TEMP_FALL3_2);
-	writel(0, b + EXYNOS7420_TMU_THD_TEMP_RISE5_4);
-	writel(0, b + EXYNOS7420_TMU_THD_TEMP_FALL5_4);
-	writel(0, b + EXYNOS7420_TMU_THD_TEMP_RISE7_6);
-	writel(0, b + EXYNOS7420_TMU_THD_TEMP_FALL7_6);
+	/* Keep levels 4..5 untouched: firmware may own extra protection trips. */
+	/* Level 7 is the 115 C hardware emergency shutdown trip. Never clear
+	 * RISE7_6; preserve the level-6 nibble and force the level-7 code.
+	 */
+	writel((r7 << 16) | (readl(b + EXYNOS7420_TMU_THD_TEMP_RISE7_6) & 0xffff),
+	       b + EXYNOS7420_TMU_THD_TEMP_RISE7_6);
+	writel((f7 << 16) | (readl(b + EXYNOS7420_TMU_THD_TEMP_FALL7_6) & 0xffff),
+	       b + EXYNOS7420_TMU_THD_TEMP_FALL7_6);
 
 	/* Clear pending interrupts */
 	writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
 
-	/* Enable rise 0..2 (bits 0..2) and fall 0..2 (bits 16..18) */
-	for (j = 0; j < 5; j++)
-		writel(EXYNOS7420_TMU_TRIP_INT_EN, b + EXYNOS7420_TMU_INTEN + j * 0x10);
+	/* Only probe 0 (0x110) is wired to this bank's GIC SPI. Leave the four
+	 * remote probe INTEN registers masked; otherwise their INTPEND bits are
+	 * never cleared and the shared IRQ storms.
+	 */
+	writel(EXYNOS7420_TMU_TRIP_INT_EN, b + EXYNOS7420_TMU_INTEN);
+	for (j = 1; j < 5; j++)
+		writel(0, b + EXYNOS7420_TMU_INTEN + j * 0x10);
+
+	dev_info(t->dev, "TMU%d thresholds rise7_6=%08x fall7_6=%08x inten=%08x\n",
+		 bank, readl(b + EXYNOS7420_TMU_THD_TEMP_RISE7_6),
+		 readl(b + EXYNOS7420_TMU_THD_TEMP_FALL7_6),
+		 readl(b + EXYNOS7420_TMU_INTEN));
 }
 
 static umode_t m86_visible(const void *data, enum hwmon_sensor_types type,
@@ -283,29 +302,76 @@ static const struct hwmon_channel_info * const m86_info[] = {
 };
 static const struct hwmon_chip_info m86_chip = { .ops = &m86_ops, .info = m86_info };
 
-static int m86_thermal_temp(struct thermal_zone_device *tz, int *temp)
+/* Caller must hold m86_tmu_access. */
+static int m86_read_max_temp_locked(struct m86_tmu *t, int *temp)
 {
-	struct m86_tmu *t = thermal_zone_device_priv(tz);
 	long value;
 	int i, ret, maximum = INT_MIN;
-	mutex_lock(&m86_tmu_access);
+
 	for (i = 0; i < 4; i++) {
 		/* Skip GPU TMU2 while sensing is disabled during BLK_G3D power-off. */
 		if (i == 2 && !(readl(t->base[2] + EXYNOS7420_TMU_REG_CONTROL) & BIT(0)))
 			continue;
 		ret = m86_read_locked(t->hwmon, hwmon_temp, hwmon_temp_input, i, &value);
-		if (ret) {
-			mutex_unlock(&m86_tmu_access);
+		if (ret)
 			return ret;
-		}
 		maximum = max(maximum, (int)value);
 	}
-	mutex_unlock(&m86_tmu_access);
 	if (maximum == INT_MIN)
 		return -ENODATA;
 	*temp = maximum;
 	return 0;
 }
+
+static int m86_thermal_temp(struct thermal_zone_device *tz, int *temp)
+{
+	struct m86_tmu *t = thermal_zone_device_priv(tz);
+	int ret;
+
+	mutex_lock(&m86_tmu_access);
+	ret = m86_read_max_temp_locked(t, temp);
+	if (!ret) {
+		t->last_temp = *temp;
+		t->temp_valid = true;
+	}
+	mutex_unlock(&m86_tmu_access);
+	return ret;
+}
+
+/*
+ * Cached maximum junction temperature, refreshed by every thermal-zone read
+ * and by the TMU threshold IRQ thread. CPU DVFS must use this instead of
+ * issuing four synchronous TMU MMIO reads on every frequency transition.
+ */
+int m86_tmu_get_cached_temp(int *temp)
+{
+	struct m86_tmu *t;
+	int ret = 0;
+
+	mutex_lock(&m86_tmu_access);
+	t = m86_tmu_instance;
+	if (!t)
+		ret = -EPROBE_DEFER;
+	else if (!t->temp_valid)
+		ret = -ENODATA;
+	else
+		*temp = t->last_temp;
+	mutex_unlock(&m86_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_get_cached_temp);
+
+int m86_tmu_register_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&m86_tmu_chain, nb);
+}
+EXPORT_SYMBOL_GPL(m86_tmu_register_notifier);
+
+int m86_tmu_unregister_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&m86_tmu_chain, nb);
+}
+EXPORT_SYMBOL_GPL(m86_tmu_unregister_notifier);
 
 static struct thermal_zone_device_ops m86_thermal_ops = {
 	.get_temp = m86_thermal_temp,
@@ -325,9 +391,27 @@ static irqreturn_t m86_tmu_irq_thread(int irq, void *data)
 {
 	struct m86_tmu_bank *bank = data;
 	struct m86_tmu *t = bank->tmu;
+	int temp = 0;
+	int ret;
+
+	/* Refresh the cached maximum before waking thermal consumers. */
+	mutex_lock(&m86_tmu_access);
+	ret = m86_read_max_temp_locked(t, &temp);
+	if (!ret) {
+		t->last_temp = temp;
+		t->temp_valid = true;
+	}
+	mutex_unlock(&m86_tmu_access);
+
+	if (ret)
+		dev_warn_ratelimited(t->dev, "TMU IRQ sample failed: %d\n", ret);
 
 	if (t->tzd)
 		thermal_zone_device_update(t->tzd, THERMAL_EVENT_UNSPECIFIED);
+
+	if (!ret)
+		blocking_notifier_call_chain(&m86_tmu_chain, (unsigned long)temp,
+					     NULL);
 
 	return IRQ_HANDLED;
 }
