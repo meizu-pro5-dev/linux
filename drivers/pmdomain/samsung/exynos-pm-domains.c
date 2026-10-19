@@ -815,24 +815,22 @@ static void __init exynos7420_disable_unused_plls(void)
 }
 
 static const struct exynos7420_reg_bits exynos7420_unused_periph_clks[] __initconst = {
-	/* CMU_PERIC0 (0x13610000): unused hsi2c9, uart0, adcif, pwm (hsi2c0/10 active) */
-	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) | BIT(12) },
+	/* CMU_PERIC0 (0x13610000): unused uart0, adcif, pwm (hsi2c0/9/10 active) */
+	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) },
 	{ 0x13610a00, BIT(21) | BIT(16) },
-	/* CMU_PERIC1 (0x14c80000): unused hsi2c3, uart1/3, spi0/1/2/4, pcm1, spdif (hsi2c2 active) */
-	{ 0x14c80900, BIT(19) | BIT(18) | BIT(16) | BIT(14) | BIT(13) | BIT(12) |
+	/* CMU_PERIC1 (0x14c80000): unused hsi2c3, uart1/3, spi0/1/2, pcm1, spdif (hsi2c2, spi4 active) */
+	{ 0x14c80900, BIT(19) | BIT(18) | BIT(14) | BIT(13) | BIT(12) |
 		      BIT(11) | BIT(9) | BIT(5) },
-	{ 0x14c80a00, BIT(19) | BIT(18) | BIT(16) | BIT(14) | BIT(13) | BIT(12) |
+	{ 0x14c80a00, BIT(19) | BIT(18) | BIT(14) | BIT(13) | BIT(12) |
 		      BIT(11) | BIT(9) },
-	/* CMU_FSYS0 (0x10e90000) & CMU_FSYS1 (0x156e0000): unused mmc0/1/2 */
-	{ 0x10e90804, BIT(31) },
+	/* CMU_FSYS0 (0x10e90000) & CMU_FSYS1 (0x156e0000): unused mmc0/1 (mmc2 active) */
 	{ 0x156e0800, BIT(30) | BIT(29) },
 	/* CMU_TOP0 (0x105d0000): upstream sclk for unused peric0/1 blocks */
 	{ 0x105d0a30, BIT(8) | BIT(4) },
 	{ 0x105d0a34, BIT(20) | BIT(8) },
 	{ 0x105d0a38, BIT(20) },
-	{ 0x105d0a3c, BIT(20) | BIT(16) | BIT(12) | BIT(4) },
-	/* CMU_TOP1 (0x105e0000): upstream sclk for unused mmc0/1/2 */
-	{ 0x105e0a24, BIT(16) },
+	{ 0x105d0a3c, BIT(16) | BIT(12) | BIT(4) },
+	/* CMU_TOP1 (0x105e0000): upstream sclk for unused mmc0/1 */
 	{ 0x105e0a2c, BIT(12) | BIT(0) },
 };
 
