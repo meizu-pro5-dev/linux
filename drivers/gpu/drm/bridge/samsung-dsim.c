@@ -749,7 +749,12 @@ static unsigned long samsung_dsim_set_pll(struct samsung_dsim *dsi,
 	u16 m;
 	u32 reg;
 
-	fin = dsi->pll_clk_rate;
+	if (dsi->pll_clk)
+		fin = clk_get_rate(dsi->pll_clk);
+	else
+		fin = dsi->pll_clk_rate;
+	dev_dbg(dsi->dev, "PLL ref clock freq %lu\n", fin);
+
 	fout = samsung_dsim_pll_find_pms(dsi, fin, freq, &p, &m, &s);
 	if (!fout) {
 		dev_err(dsi->dev,
@@ -794,7 +799,7 @@ static unsigned long samsung_dsim_set_pll(struct samsung_dsim *dsi,
 	}
 	samsung_dsim_write(dsi, DSIM_PLLCTRL_REG, reg);
 
-	timeout = 1000;
+	timeout = 3000;
 	do {
 		if (timeout-- == 0) {
 			dev_err(dsi->dev, "PLL failed to stabilize\n");
@@ -2176,7 +2181,6 @@ static int samsung_dsim_parse_dt(struct samsung_dsim *dsi)
 	u32 lane_polarities[5] = { 0 };
 	struct device_node *endpoint;
 	int i, nr_lanes, ret;
-	struct clk *pll_clk;
 
 	dsi->mic_enabled = of_property_read_bool(node, "samsung,mic-enabled");
 
@@ -2185,11 +2189,9 @@ static int samsung_dsim_parse_dt(struct samsung_dsim *dsi)
 	/* If it doesn't exist, read it from the clock instead of failing */
 	if (ret < 0) {
 		dev_dbg(dev, "Using sclk_mipi for pll clock frequency\n");
-		pll_clk = devm_clk_get(dev, "sclk_mipi");
-		if (!IS_ERR(pll_clk))
-			dsi->pll_clk_rate = clk_get_rate(pll_clk);
-		else
-			return PTR_ERR(pll_clk);
+		dsi->pll_clk = devm_clk_get(dev, "sclk_mipi");
+		if (IS_ERR(dsi->pll_clk))
+			return PTR_ERR(dsi->pll_clk);
 	}
 
 	/* If it doesn't exist, use pixel clock instead of failing */
