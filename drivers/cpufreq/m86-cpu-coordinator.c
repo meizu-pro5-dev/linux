@@ -529,7 +529,16 @@ static int m86_em_power(struct device *dev, unsigned long *power,
  for (i = 0; i < c->nr; i++) {
   if (c->opp[i].khz < *khz) continue;
   *khz = c->opp[i].khz;
-  *power = powers[i];
+  {
+   const struct m86_opp *nom = ci ? apollo_opp : atlas_opp;
+   u64 v_asv = div_u64(c->opp[i].uv, 1000);
+   u64 v_nom = div_u64(nom[i].uv, 1000);
+   u64 p_ref = powers[i];
+   if (v_nom > 0 && v_asv > 0)
+    *power = (unsigned long)div64_u64(p_ref * v_asv * v_asv + (v_nom * v_nom) / 2, v_nom * v_nom);
+   else
+    *power = powers[i];
+  }
   return 0;
  }
  return -EINVAL;
@@ -560,16 +569,23 @@ static void m86_register_em(struct cpufreq_policy *policy)
  }
  ret = em_dev_register_perf_domain(get_cpu_device(policy->cpu), c->nr,
                                   &cb, policy->related_cpus, true);
- if (ret) {
-  mutex_lock(&coordinator->lock);
-  fail_closed(coordinator, ret);
-  mutex_unlock(&coordinator->lock);
-  return;
- }
- dev_info(coordinator->dev,
-          "EAS M0 uncalibrated per-core EM registered CPUs=%*pbl states=%u; native cpufreq frequency invariance\n",
-          cpumask_pr_args(policy->related_cpus), c->nr);
- return;
+	if (ret) {
+		mutex_lock(&coordinator->lock);
+		fail_closed(coordinator, ret);
+		mutex_unlock(&coordinator->lock);
+		return;
+	}
+	{
+		unsigned long min_uw = 0, max_uw = 0, test_khz;
+		test_khz = c->opp[0].khz;
+		m86_em_power(get_cpu_device(policy->cpu), &min_uw, &test_khz);
+		test_khz = c->opp[c->nr - 1].khz;
+		m86_em_power(get_cpu_device(policy->cpu), &max_uw, &test_khz);
+		dev_info(coordinator->dev,
+			 "EAS ASV-scaled per-core EM registered CPUs=%*pbl states=%u (%lu..%lu uW); native cpufreq frequency invariance\n",
+			 cpumask_pr_args(policy->related_cpus), c->nr, min_uw, max_uw);
+	}
+	return;
 invalid_em:
  mutex_lock(&coordinator->lock);
  fail_closed(coordinator, -EINVAL);

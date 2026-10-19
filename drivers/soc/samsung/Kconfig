@@ -3,7 +3,8 @@
 # Samsung SoC drivers
 #
 menuconfig SOC_SAMSUNG
-	bool "Samsung SoC driver support" if COMPILE_TEST
+	bool "Samsung SoC driver support"
+	default ARCH_EXYNOS
 
 if SOC_SAMSUNG
 
@@ -13,7 +14,7 @@ config EXYNOS_ASV_ARM
 	depends on EXYNOS_CHIPID
 
 config EXYNOS_CHIPID
-	tristate "Exynos ChipID controller and ASV driver"
+	bool "Exynos ChipID controller and ASV driver"
 	depends on ARCH_EXYNOS || COMPILE_TEST
 	default ARCH_EXYNOS
 	select EXYNOS_ASV_ARM if ARM && ARCH_EXYNOS
