@@ -211,6 +211,27 @@
 	status = "okay";
 };
 
+&mmc_2 {
+	status = "okay";
+	num-slots = <1>;
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-ddr50;
+	card-detect-delay = <200>;
+	samsung,dw-mshc-ciu-div = <3>;
+	samsung,dw-mshc-sdr-timing = <3 0 3 2>;
+	samsung,dw-mshc-ddr-timing = <3 0 2 1>;
+	fifo-depth = <0x40>;
+	bus-width = <4>;
+	cd-gpios = <&gpa1 3 GPIO_ACTIVE_LOW>;
+	vmmc-supply = <&dvdd29_tf>;
+	vqmmc-supply = <&ldo2_reg>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &sd2_cd>;
+};
+
 &usbdrd_phy {
 	status = "okay";
 };
@@ -306,6 +327,15 @@
 		pinctrl-0 = <&fpc_irq_pin &fpc_rst_pin>;
 		wakeup-source;
 	};
+
+	dvdd29_tf: regulator-tf-2v9 {
+		compatible = "regulator-fixed";
+		regulator-name = "vmmc_sdcard";
+		regulator-min-microvolt = <2900000>;
+		regulator-max-microvolt = <2900000>;
+		gpio = <&gpf2 2 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
 };
 
 &pinctrl_alive {
@@ -340,6 +370,11 @@
 		samsung,pins = "gpa2-2";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <0>;
+	};
+	sd2_cd: sd2-cd-pin {
+		samsung,pins = "gpa1-3";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
 	};
 };
 
@@ -485,6 +520,12 @@
 			regulator-max-microvolt = <1800000>;
 			regulator-boot-on;
 			regulator-always-on;
+		};
+		ldo2_reg: LDO2 {
+			regulator-name = "vqmmc_sdcard";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <3300000>;
+			regulator-boot-on;
 		};
 	};
   };

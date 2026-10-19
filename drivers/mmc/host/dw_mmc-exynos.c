@@ -101,7 +101,8 @@ static void dw_mci_exynos_config_smu(struct dw_mci *host)
 	 * set for non-ecryption mode at this time.
 	 */
 	if (priv->ctrl_type == DW_MCI_TYPE_EXYNOS5420_SMU ||
-		priv->ctrl_type == DW_MCI_TYPE_EXYNOS7_SMU) {
+		priv->ctrl_type == DW_MCI_TYPE_EXYNOS7_SMU ||
+		priv->ctrl_type == DW_MCI_TYPE_EXYNOS7) {
 		mci_writel(host, MPSBEGIN0, 0);
 		mci_writel(host, MPSEND0, SDMMC_ENDING_SEC_NR_MAX);
 		mci_writel(host, MPSCTRL0, SDMMC_MPSCTRL_SECURE_WRITE_BIT |
@@ -125,6 +126,12 @@ static int dw_mci_exynos_priv_init(struct dw_mci *host)
 		if (!priv->dqs_delay)
 			priv->dqs_delay =
 				DQS_CTRL_GET_RD_DELAY(priv->saved_strobe_ctrl);
+	}
+
+	if (priv->ctrl_type == DW_MCI_TYPE_EXYNOS7 ||
+		priv->ctrl_type == DW_MCI_TYPE_EXYNOS7_SMU) {
+		/* Quirk needed for Exynos7 64-bit FIFO with 32-bit bus */
+		host->quirks |= DW_MMC_QUIRK_FIFO64_32;
 	}
 
 	if (priv->ctrl_type == DW_MCI_TYPE_ARTPEC8) {
