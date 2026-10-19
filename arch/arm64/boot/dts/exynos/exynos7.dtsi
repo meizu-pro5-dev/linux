@@ -617,11 +617,25 @@
 			reg = <0x105c0000 0x5000>;
 		};
 
-		pd_g3d: power-domain@105c4060 {
-			compatible = "samsung,exynos5433-pd";
+		pd_aud: power-domain@105c4000 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4000 0x20>;
+			#power-domain-cells = <0>;
+			label = "AUD";
+		};
+
+		pd_cam0: power-domain@105c4040 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4040 0x20>;
+			#power-domain-cells = <0>;
+			label = "CAM0";
+		};
+
+		pd_cam1: power-domain@105c4060 {
+			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4060 0x20>;
 			#power-domain-cells = <0>;
-			label = "G3D";
+			label = "CAM1";
 		};
 
 		pd_disp: power-domain@105c4080 {
@@ -630,6 +644,41 @@
 			#power-domain-cells = <0>;
 			label = "DISP";
 			status = "okay";
+		};
+
+		pd_g3d: power-domain@105c40c0 {
+			compatible = "samsung,exynos5433-pd";
+			reg = <0x105c40c0 0x20>;
+			#power-domain-cells = <0>;
+			label = "G3D";
+		};
+
+		pd_isp0: power-domain@105c4140 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4140 0x20>;
+			#power-domain-cells = <0>;
+			label = "ISP0";
+		};
+
+		pd_isp1: power-domain@105c4180 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4180 0x20>;
+			#power-domain-cells = <0>;
+			label = "ISP1";
+		};
+
+		pd_mfc: power-domain@105c41a0 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c41a0 0x20>;
+			#power-domain-cells = <0>;
+			label = "MFC";
+		};
+
+		pd_mscl: power-domain@105c41c0 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c41c0 0x20>;
+			#power-domain-cells = <0>;
+			label = "MSCL";
 		};
 
 		rtc: rtc@10590000 {
@@ -662,6 +711,14 @@
 			compatible = "samsung,exynos7-clock-aud";
 			reg = <0x114c0000 0x1000>;
 			#clock-cells = <1>;
+		};
+
+		clock_mfc: clock-controller@15280000 {
+			compatible = "samsung,exynos7-clock-mfc";
+			reg = <0x15280000 0x1000>;
+			#clock-cells = <1>;
+			clocks = <&fin_pll>, <&clock_topc ACLK_MFC_532>;
+			clock-names = "fin_pll", "aclk_mfc_532";
 		};
 
 		adma: dma-controller@11420000 {

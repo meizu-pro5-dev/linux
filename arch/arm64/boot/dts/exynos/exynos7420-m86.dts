@@ -245,7 +245,7 @@
 &cmu_g3d { status = "okay"; };
 &cmu_aud { status = "okay"; };
 &cmu_disp { status = "disabled"; };
-&pd_g3d { status = "disabled"; };
+&pd_g3d { status = "okay"; };
 &pd_disp { status = "disabled"; };
 &pinctrl_aud { status = "okay"; };
 &sysmmu_disp_ro { status = "disabled"; };

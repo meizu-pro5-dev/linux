@@ -47,6 +47,349 @@ struct exynos_pm_domain_config {
 	unsigned int n_post;
 };
 
+struct exynos7420_reg_bits {
+	phys_addr_t pa;
+	u32 mask;
+};
+
+struct exynos7420_unused_pd {
+	const char *name;
+	u32 pmu_off;
+	phys_addr_t lpi_busmaster_pa;
+	bool clear_a7is_option;
+	bool is_aud;
+	const struct exynos7420_reg_bits *top_clks;
+	size_t num_top_clks;
+	const struct exynos7420_reg_bits *local_clks;
+	size_t num_local_clks;
+	const struct exynos7420_reg_bits *async_clks;
+	size_t num_async_clks;
+	const struct exynos7420_reg_bits *sys_pwr_regs;
+	size_t num_sys_pwr_regs;
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_mfc[] = {
+	{ 0x10570804, BIT(8) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_mfc[] = {
+	{ 0x15280800, BIT(31) | BIT(30) | BIT(19) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_mfc[] = {
+	{ 0x105c1470, BIT(0) },
+	{ 0x105c14b0, BIT(0) },
+	{ 0x105c14f0, BIT(0) },
+	{ 0x105c1530, BIT(0) },
+	{ 0x105c1570, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c15b0, BIT(0) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_mscl[] = {
+	{ 0x10570804, BIT(20) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_mscl[] = {
+	{ 0x150d0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) | BIT(27) | BIT(26) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_mscl[] = {
+	{ 0x105c1474, BIT(0) },
+	{ 0x105c14b4, BIT(0) },
+	{ 0x105c14f4, BIT(0) },
+	{ 0x105c1534, BIT(0) },
+	{ 0x105c1574, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c15b4, BIT(0) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_isp0[] = {
+	{ 0x105d0810, BIT(28) | BIT(24) | BIT(20) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_isp0[] = {
+	{ 0x146d0800, BIT(17) | BIT(15) | BIT(13) | BIT(1) | BIT(0) },
+	{ 0x146d0804, BIT(1) | BIT(0) },
+	{ 0x14290800, BIT(1) | BIT(0) },
+	{ 0x14290804, BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_async_clks_isp0[] = {
+	{ 0x145d0804, BIT(25) | BIT(10) },
+	{ 0x145d0800, BIT(19) },
+	{ 0x141f0800, BIT(4) },
+	{ 0x144d0800, BIT(1) | BIT(0) },
+	{ 0x140f0800, BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp0[] = {
+	{ 0x105c1468, BIT(0) },
+	{ 0x105c14a8, BIT(0) },
+	{ 0x105c14e8, BIT(0) },
+	{ 0x105c1528, BIT(0) },
+	{ 0x105c1568, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c15a8, BIT(0) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_isp1[] = {
+	{ 0x105d0810, BIT(16) | BIT(12) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_isp1[] = {
+	{ 0x147d0800, BIT(12) | BIT(9) | BIT(8) | BIT(1) | BIT(0) },
+	{ 0x147d0900, BIT(0) },
+	{ 0x142f0800, BIT(1) | BIT(0) },
+	{ 0x142f0900, BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_async_clks_isp1[] = {
+	{ 0x145d0804, BIT(26) | BIT(22) | BIT(11) },
+	{ 0x144d0800, BIT(1) | BIT(0) },
+	{ 0x140f0800, BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp1[] = {
+	{ 0x105c146c, BIT(0) },
+	{ 0x105c14ac, BIT(0) },
+	{ 0x105c14ec, BIT(0) },
+	{ 0x105c152c, BIT(0) },
+	{ 0x105c156c, BIT(1) | BIT(0) },
+	{ 0x105c15ac, BIT(0) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_cam0[] = {
+	{ 0x105d0814, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
+	{ 0x105d0818, BIT(28) | BIT(24) | BIT(20) | BIT(16) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_cam0[] = {
+	{ 0x144d0800, BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
+	{ 0x144d0804, BIT(18) | BIT(17) | BIT(16) | BIT(10) },
+	{ 0x144d0900, BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
+	{ 0x144d0904, BIT(17) | BIT(16) },
+	{ 0x140f0800, BIT(6) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x140f0900, BIT(6) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_async_clks_cam0[] = {
+	{ 0x145d0804, BIT(23) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam0[] = {
+	{ 0x105c1448, BIT(0) },
+	{ 0x105c1488, BIT(0) },
+	{ 0x105c14c8, BIT(0) },
+	{ 0x105c1508, BIT(0) },
+	{ 0x105c1548, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c1588, BIT(0) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_cam1[] = {
+	{ 0x105d081c, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
+	{ 0x105d0a24, BIT(20) | BIT(8) | BIT(4) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_cam1[] = {
+	{ 0x145d0800, BIT(3) | BIT(2) | BIT(0) },
+	{ 0x145d0804, BIT(28) | BIT(26) | BIT(25) | BIT(23) | BIT(22) | BIT(11) | BIT(10) },
+	{ 0x145d080c, BIT(3) | BIT(2) },
+	{ 0x145d0900, BIT(3) | BIT(2) | BIT(0) },
+	{ 0x141f0800, BIT(2) | BIT(1) | BIT(0) },
+	{ 0x141f0900, BIT(2) | BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] = {
+	{ 0x105c144c, BIT(0) },
+	{ 0x105c148c, BIT(0) },
+	{ 0x105c14cc, BIT(0) },
+	{ 0x105c150c, BIT(0) },
+	{ 0x105c154c, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c158c, BIT(0) },
+};
+
+static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
+	{
+		.name = "pd-mfc",
+		.pmu_off = 0x41a0,
+		.top_clks = exynos7420_top_clks_mfc,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mfc),
+		.local_clks = exynos7420_local_clks_mfc,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mfc),
+		.sys_pwr_regs = exynos7420_sys_pwr_mfc,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_mfc),
+	},
+	{
+		.name = "pd-mscl",
+		.pmu_off = 0x41c0,
+		.top_clks = exynos7420_top_clks_mscl,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mscl),
+		.local_clks = exynos7420_local_clks_mscl,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mscl),
+		.sys_pwr_regs = exynos7420_sys_pwr_mscl,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_mscl),
+	},
+	{
+		.name = "pd-isp0",
+		.pmu_off = 0x4140,
+		.lpi_busmaster_pa = 0x146e0000,
+		.top_clks = exynos7420_top_clks_isp0,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
+		.local_clks = exynos7420_local_clks_isp0,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp0),
+		.async_clks = exynos7420_async_clks_isp0,
+		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_isp0),
+		.sys_pwr_regs = exynos7420_sys_pwr_isp0,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_isp0),
+	},
+	{
+		.name = "pd-isp1",
+		.pmu_off = 0x4180,
+		.lpi_busmaster_pa = 0x147e0000,
+		.top_clks = exynos7420_top_clks_isp1,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
+		.local_clks = exynos7420_local_clks_isp1,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp1),
+		.async_clks = exynos7420_async_clks_isp1,
+		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_isp1),
+		.sys_pwr_regs = exynos7420_sys_pwr_isp1,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_isp1),
+	},
+	{
+		.name = "pd-cam0",
+		.pmu_off = 0x4040,
+		.lpi_busmaster_pa = 0x120e0000,
+		.top_clks = exynos7420_top_clks_cam0,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam0),
+		.local_clks = exynos7420_local_clks_cam0,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam0),
+		.async_clks = exynos7420_async_clks_cam0,
+		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_cam0),
+		.sys_pwr_regs = exynos7420_sys_pwr_cam0,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam0),
+	},
+	{
+		.name = "pd-cam1",
+		.pmu_off = 0x4060,
+		.lpi_busmaster_pa = 0x145e0000,
+		.clear_a7is_option = true,
+		.top_clks = exynos7420_top_clks_cam1,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam1),
+		.local_clks = exynos7420_local_clks_cam1,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam1),
+		.sys_pwr_regs = exynos7420_sys_pwr_cam1,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam1),
+	},
+};
+
+static int exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
+{
+	void __iomem *base = ioremap(pa & PAGE_MASK, PAGE_SIZE);
+	u32 off = pa & ~PAGE_MASK;
+	u32 val;
+
+	if (!base)
+		return -ENOMEM;
+
+	val = readl_relaxed(base + off);
+	val |= set_mask;
+	val &= ~clr_mask;
+	writel_relaxed(val, base + off);
+	readl_relaxed(base + off);
+	iounmap(base);
+	return 0;
+}
+
+static int exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
+				    size_t n, bool set)
+{
+	size_t i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		ret = exynos7420_rmw_phys(list[i].pa,
+					  set ? list[i].mask : 0,
+					  set ? 0 : list[i].mask);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
+					  const struct exynos7420_unused_pd *pd)
+{
+	u32 stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
+	int timeout;
+
+	if (stat == 0)
+		return 0;
+
+	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, true);
+	udelay(10);
+	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
+	if (pd->is_aud)
+		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
+	exynos7420_apply_reg_list(pd->async_clks, pd->num_async_clks, true);
+	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
+
+	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
+	writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
+
+	timeout = 200;
+	while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
+		if (--timeout <= 0)
+			break;
+		usleep_range(10, 20);
+	}
+
+	if ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0 &&
+	    pd->lpi_busmaster_pa) {
+		exynos7420_rmw_phys(pd->lpi_busmaster_pa, 0xffffffff, 0);
+		if (pd->clear_a7is_option) {
+			u32 a7is = readl_relaxed(pmu_base + 0x2588);
+
+			writel_relaxed(a7is & ~(0x7 << 15), pmu_base + 0x2588);
+		}
+		writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
+		timeout = 200;
+		while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
+			if (--timeout <= 0)
+				break;
+			usleep_range(10, 20);
+		}
+	}
+
+	stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
+	if (stat != 0) {
+		pr_err("exynos-pd: failed to power off unused %s (stat=%#x)\n",
+		       pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
+		return -EBUSY;
+	}
+
+	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, false);
+	pr_info("exynos-pd: powered off unused %s (stat=%#x, top_clks gated)\n",
+		pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
+	return 0;
+}
+
+static int exynos7420_power_on_one(void __iomem *pmu_base,
+				   const struct exynos7420_unused_pd *cfg)
+{
+	int timeout = 200;
+
+	/* 1. Enable top clocks */
+	exynos7420_apply_reg_list(cfg->top_clks, cfg->num_top_clks, true);
+
+	/* 2. Write OPTION and PWR_CFG to power on */
+	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
+	writel_relaxed(0xf, pmu_base + cfg->pmu_off + 0x0);
+
+	/* 3. Poll status == 0xf (up to 2ms) */
+	while ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0xf) {
+		if (--timeout <= 0)
+			break;
+		usleep_range(10, 20);
+	}
+
+	if ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0xf) {
+		pr_err("exynos-pd: failed to power on %s (stat=%#x)\n",
+		       cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+		return -ETIMEDOUT;
+	}
+
+	/* 4. Enable local clocks and async clocks */
+	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
+	exynos7420_apply_reg_list(cfg->async_clks, cfg->num_async_clks, true);
+
+	pr_info("exynos-pd: powered on %s (stat=%#x)\n",
+		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	return 0;
+}
+
 /*
  * Exynos specific wrapper around the generic power domain
  */
@@ -60,7 +403,11 @@ struct exynos_pm_domain {
 	unsigned int n_pre;
 	const struct exynos_pd_seq *post;
 	unsigned int n_post;
+	const struct exynos7420_unused_pd *e7420_cfg;
+	void __iomem *pmu_base;
 };
+
+static struct exynos_pm_domain *e7420_genpd[ARRAY_SIZE(exynos7420_unused_pds)];
 
 static const resource_size_t exynos7420_pd_blk_addr[PD_NUM_BLKS] = {
 	[PD_BLK_TOP0] = 0x105d0000,
@@ -99,6 +446,11 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 	char *op;
 
 	pd = container_of(domain, struct exynos_pm_domain, pd);
+
+	if (pd->e7420_cfg && pd->pmu_base)
+		return power_on ? exynos7420_power_on_one(pd->pmu_base, pd->e7420_cfg)
+				: exynos7420_power_off_one_unused(pd->pmu_base, pd->e7420_cfg);
+
 	base = pd->base;
 
 	pwr = power_on ? pd->local_pwr_cfg : 0;
@@ -213,6 +565,8 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct of_phandle_args child, parent;
 	struct exynos_pm_domain *pd;
+	struct resource res;
+	u32 pmu_off = 0;
 	int on, ret;
 
 	pm_domain_cfg = of_device_get_match_data(dev);
@@ -237,6 +591,27 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	pd->post = pm_domain_cfg->post;
 	pd->n_post = pm_domain_cfg->n_post;
 
+	if (of_address_to_resource(np, 0, &res) == 0)
+		pmu_off = res.start & 0xffff;
+
+	if (of_device_is_compatible(np, "samsung,exynos7420-pd") && pmu_off != 0x4080) {
+		int i;
+
+		pd->n_pre = 0;
+		pd->n_post = 0;
+		pd->local_pwr_cfg = 0xf;
+		pd->local_pwr_option = 0x0102;
+
+		for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++) {
+			if (exynos7420_unused_pds[i].pmu_off == pmu_off) {
+				pd->e7420_cfg = &exynos7420_unused_pds[i];
+				pd->pmu_base = devm_ioremap(dev, 0x105c0000, 0x5000);
+				e7420_genpd[i] = pd;
+				break;
+			}
+		}
+	}
+
 	/* Exynos7420: map the clock/PMU register windows used by the seqs */
 	if (pd->n_pre || pd->n_post) {
 		int i;
@@ -254,8 +629,12 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	pm_genpd_init(&pd->pd, NULL, !on);
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
+	if (ret) {
+		iounmap(pd->base);
+		return ret;
+	}
 
-	if (ret == 0 && of_parse_phandle_with_args(np, "power-domains",
+	if (of_parse_phandle_with_args(np, "power-domains",
 				      "#power-domain-cells", 0, &parent) == 0) {
 		child.np = np;
 		child.args_count = 0;
@@ -269,7 +648,7 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(dev);
-	return ret;
+	return 0;
 }
 
 static struct platform_driver exynos_pd_driver = {
@@ -286,238 +665,6 @@ static __init int exynos4_pm_init_power_domain(void)
 	return platform_driver_register(&exynos_pd_driver);
 }
 core_initcall(exynos4_pm_init_power_domain);
-
-/*
- * Exynos 7420 (Meizu PRO 5 / m86) unused multimedia/camera/ISP power-domain
- * shutoff at late_initcall_sync, ported 1:1 from vendor 3.10 kernel:
- *   arch/arm64/mach-exynos/pm_domains.c:exynos_pm_domain_idle()
- *   arch/arm64/mach-exynos/pm_domains-exynos7420.c
- *   arch/arm64/mach-exynos/pm_domains-exynos7420-cal.h
- *
- * S-Boot leaves CAM0, CAM1, ISP0, ISP1, MFC, MSCL, and VPP powered ON
- * (PMU_*_STATUS = 0x0003000f). Note: pd-vpp (0x105c41e0) is coupled to
- * active DECON display scanout via the display async bridge (ACLK_VPP[3:0])
- * and must remain powered on while DISP is active; the 6 non-display domains
- * (pd-mfc, pd-mscl, pd-isp0, pd-isp1, pd-cam0, pd-cam1) have no Linux 6.6
- * consumers and are powered off in child-to-parent order.
- */
-struct exynos7420_reg_bits {
-	phys_addr_t pa;
-	u32 mask;
-};
-
-struct exynos7420_unused_pd {
-	const char *name;
-	u32 pmu_off;
-	phys_addr_t lpi_busmaster_pa;
-	bool clear_a7is_option;
-	bool is_aud;
-	const struct exynos7420_reg_bits *top_clks;
-	size_t num_top_clks;
-	const struct exynos7420_reg_bits *local_clks;
-	size_t num_local_clks;
-	const struct exynos7420_reg_bits *async_clks;
-	size_t num_async_clks;
-	const struct exynos7420_reg_bits *sys_pwr_regs;
-	size_t num_sys_pwr_regs;
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_mfc[] __initconst = {
-	{ 0x10570804, BIT(8) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_mfc[] __initconst = {
-	{ 0x15280800, BIT(31) | BIT(30) | BIT(19) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_mfc[] __initconst = {
-	{ 0x105c1470, BIT(0) },
-	{ 0x105c14b0, BIT(0) },
-	{ 0x105c14f0, BIT(0) },
-	{ 0x105c1530, BIT(0) },
-	{ 0x105c1570, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x105c15b0, BIT(0) },
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_mscl[] __initconst = {
-	{ 0x10570804, BIT(20) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_mscl[] __initconst = {
-	{ 0x150d0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) | BIT(27) | BIT(26) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_mscl[] __initconst = {
-	{ 0x105c1474, BIT(0) },
-	{ 0x105c14b4, BIT(0) },
-	{ 0x105c14f4, BIT(0) },
-	{ 0x105c1534, BIT(0) },
-	{ 0x105c1574, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x105c15b4, BIT(0) },
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_isp0[] __initconst = {
-	{ 0x105d0810, BIT(28) | BIT(24) | BIT(20) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_isp0[] __initconst = {
-	{ 0x146d0800, BIT(17) | BIT(15) | BIT(13) | BIT(1) | BIT(0) },
-	{ 0x146d0804, BIT(1) | BIT(0) },
-	{ 0x14290800, BIT(1) | BIT(0) },
-	{ 0x14290804, BIT(1) | BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_async_clks_isp0[] __initconst = {
-	{ 0x145d0804, BIT(25) | BIT(10) },
-	{ 0x145d0800, BIT(19) },
-	{ 0x141f0800, BIT(4) },
-	{ 0x144d0800, BIT(1) | BIT(0) },
-	{ 0x140f0800, BIT(1) | BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp0[] __initconst = {
-	{ 0x105c1468, BIT(0) },
-	{ 0x105c14a8, BIT(0) },
-	{ 0x105c14e8, BIT(0) },
-	{ 0x105c1528, BIT(0) },
-	{ 0x105c1568, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x105c15a8, BIT(0) },
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_isp1[] __initconst = {
-	{ 0x105d0810, BIT(16) | BIT(12) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_isp1[] __initconst = {
-	{ 0x147d0800, BIT(12) | BIT(9) | BIT(8) | BIT(1) | BIT(0) },
-	{ 0x147d0900, BIT(0) },
-	{ 0x142f0800, BIT(1) | BIT(0) },
-	{ 0x142f0900, BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_async_clks_isp1[] __initconst = {
-	{ 0x145d0804, BIT(26) | BIT(22) | BIT(11) },
-	{ 0x144d0800, BIT(1) | BIT(0) },
-	{ 0x140f0800, BIT(1) | BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp1[] __initconst = {
-	{ 0x105c146c, BIT(0) },
-	{ 0x105c14ac, BIT(0) },
-	{ 0x105c14ec, BIT(0) },
-	{ 0x105c152c, BIT(0) },
-	{ 0x105c156c, BIT(1) | BIT(0) },
-	{ 0x105c15ac, BIT(0) },
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_cam0[] __initconst = {
-	{ 0x105d0814, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
-	{ 0x105d0818, BIT(28) | BIT(24) | BIT(20) | BIT(16) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_cam0[] __initconst = {
-	{ 0x144d0800, BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
-	{ 0x144d0804, BIT(18) | BIT(17) | BIT(16) | BIT(10) },
-	{ 0x144d0900, BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
-	{ 0x144d0904, BIT(17) | BIT(16) },
-	{ 0x140f0800, BIT(6) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x140f0900, BIT(6) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_async_clks_cam0[] __initconst = {
-	{ 0x145d0804, BIT(23) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam0[] __initconst = {
-	{ 0x105c1448, BIT(0) },
-	{ 0x105c1488, BIT(0) },
-	{ 0x105c14c8, BIT(0) },
-	{ 0x105c1508, BIT(0) },
-	{ 0x105c1548, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x105c1588, BIT(0) },
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_cam1[] __initconst = {
-	{ 0x105d081c, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
-	{ 0x105d0a24, BIT(20) | BIT(8) | BIT(4) },
-};
-static const struct exynos7420_reg_bits exynos7420_local_clks_cam1[] __initconst = {
-	{ 0x145d0800, BIT(3) | BIT(2) | BIT(0) },
-	{ 0x145d0804, BIT(28) | BIT(26) | BIT(25) | BIT(23) | BIT(22) | BIT(11) | BIT(10) },
-	{ 0x145d080c, BIT(3) | BIT(2) },
-	{ 0x145d0900, BIT(3) | BIT(2) | BIT(0) },
-	{ 0x141f0800, BIT(2) | BIT(1) | BIT(0) },
-	{ 0x141f0900, BIT(2) | BIT(1) | BIT(0) },
-};
-static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] __initconst = {
-	{ 0x105c144c, BIT(0) },
-	{ 0x105c148c, BIT(0) },
-	{ 0x105c14cc, BIT(0) },
-	{ 0x105c150c, BIT(0) },
-	{ 0x105c154c, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ 0x105c158c, BIT(0) },
-};
-
-static const struct exynos7420_unused_pd exynos7420_unused_pds[] __initconst = {
-	{
-		.name = "pd-mfc",
-		.pmu_off = 0x41a0,
-		.top_clks = exynos7420_top_clks_mfc,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mfc),
-		.local_clks = exynos7420_local_clks_mfc,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mfc),
-		.sys_pwr_regs = exynos7420_sys_pwr_mfc,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_mfc),
-	},
-	{
-		.name = "pd-mscl",
-		.pmu_off = 0x41c0,
-		.top_clks = exynos7420_top_clks_mscl,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mscl),
-		.local_clks = exynos7420_local_clks_mscl,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mscl),
-		.sys_pwr_regs = exynos7420_sys_pwr_mscl,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_mscl),
-	},
-	{
-		.name = "pd-isp0",
-		.pmu_off = 0x4140,
-		.lpi_busmaster_pa = 0x146e0000,
-		.top_clks = exynos7420_top_clks_isp0,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
-		.local_clks = exynos7420_local_clks_isp0,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp0),
-		.async_clks = exynos7420_async_clks_isp0,
-		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_isp0),
-		.sys_pwr_regs = exynos7420_sys_pwr_isp0,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_isp0),
-	},
-	{
-		.name = "pd-isp1",
-		.pmu_off = 0x4180,
-		.lpi_busmaster_pa = 0x147e0000,
-		.top_clks = exynos7420_top_clks_isp1,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
-		.local_clks = exynos7420_local_clks_isp1,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp1),
-		.async_clks = exynos7420_async_clks_isp1,
-		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_isp1),
-		.sys_pwr_regs = exynos7420_sys_pwr_isp1,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_isp1),
-	},
-	{
-		.name = "pd-cam0",
-		.pmu_off = 0x4040,
-		.lpi_busmaster_pa = 0x120e0000,
-		.top_clks = exynos7420_top_clks_cam0,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam0),
-		.local_clks = exynos7420_local_clks_cam0,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam0),
-		.async_clks = exynos7420_async_clks_cam0,
-		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_cam0),
-		.sys_pwr_regs = exynos7420_sys_pwr_cam0,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam0),
-	},
-	{
-		.name = "pd-cam1",
-		.pmu_off = 0x4060,
-		.lpi_busmaster_pa = 0x145e0000,
-		.clear_a7is_option = true,
-		.top_clks = exynos7420_top_clks_cam1,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam1),
-		.local_clks = exynos7420_local_clks_cam1,
-		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam1),
-		.sys_pwr_regs = exynos7420_sys_pwr_cam1,
-		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam1),
-	},
-};
 
 /*
  * Initialize BLK_AUD (0x105c4000) and LPASS Top SFRs (0x11400000) before
@@ -600,97 +747,6 @@ static int __init exynos7420_init_aud_lpass(void)
 	return 0;
 }
 core_initcall(exynos7420_init_aud_lpass);
-
-static int __init exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
-{
-	void __iomem *base = ioremap(pa & PAGE_MASK, PAGE_SIZE);
-	u32 off = pa & ~PAGE_MASK;
-	u32 val;
-
-	if (!base)
-		return -ENOMEM;
-
-	val = readl_relaxed(base + off);
-	val |= set_mask;
-	val &= ~clr_mask;
-	writel_relaxed(val, base + off);
-	readl_relaxed(base + off);
-	iounmap(base);
-	return 0;
-}
-
-static int __init exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
-					    size_t n, bool set)
-{
-	size_t i;
-	int ret;
-
-	for (i = 0; i < n; i++) {
-		ret = exynos7420_rmw_phys(list[i].pa,
-					  set ? list[i].mask : 0,
-					  set ? 0 : list[i].mask);
-		if (ret)
-			return ret;
-	}
-	return 0;
-}
-
-static int __init exynos7420_power_off_one_unused(void __iomem *pmu_base,
-						  const struct exynos7420_unused_pd *pd)
-{
-	u32 stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
-	int timeout;
-
-	if (stat == 0)
-		return 0;
-
-	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, true);
-	udelay(10);
-	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
-	if (pd->is_aud)
-		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
-	exynos7420_apply_reg_list(pd->async_clks, pd->num_async_clks, true);
-	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
-
-	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
-	writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
-
-	timeout = 200;
-	while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
-		if (--timeout <= 0)
-			break;
-		usleep_range(10, 20);
-	}
-
-	if ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0 &&
-	    pd->lpi_busmaster_pa) {
-		exynos7420_rmw_phys(pd->lpi_busmaster_pa, 0xffffffff, 0);
-		if (pd->clear_a7is_option) {
-			u32 a7is = readl_relaxed(pmu_base + 0x2588);
-
-			writel_relaxed(a7is & ~(0x7 << 15), pmu_base + 0x2588);
-		}
-		writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
-		timeout = 200;
-		while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
-			if (--timeout <= 0)
-				break;
-			usleep_range(10, 20);
-		}
-	}
-
-	stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
-	if (stat != 0) {
-		pr_err("exynos-pd: failed to power off unused %s (stat=%#x)\n",
-		       pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
-		return -EBUSY;
-	}
-
-	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, false);
-	pr_info("exynos-pd: powered off unused %s (stat=%#x, top_clks gated)\n",
-		pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
-	return 0;
-}
 
 struct exynos7420_unused_pll {
 	const char *name;
@@ -789,8 +845,11 @@ static __init int exynos7420_power_off_unused_domains(void)
 	if (!pmu_base)
 		return -ENOMEM;
 
-	for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++)
+	for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++) {
 		exynos7420_power_off_one_unused(pmu_base, &exynos7420_unused_pds[i]);
+		if (e7420_genpd[i])
+			e7420_genpd[i]->pd.status = GENPD_STATE_OFF;
+	}
 
 	exynos7420_disable_unused_plls();
 	exynos7420_apply_reg_list(exynos7420_unused_periph_clks,
