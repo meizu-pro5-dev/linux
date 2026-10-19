@@ -639,14 +639,17 @@ static void monitor(struct work_struct *work)
 		mutex_unlock(&d->lock);
 		return;
 	}
-	/* 3C hysteresis: do not relax a cap until below its boundary-3000. */
+	/* 5C hysteresis: do not relax a cap until below its boundary-5000.
+	 * Under full load the TMU reading moves ~4C per 250 ms sample, so 3C
+	 * toggled 1.0/2.1 GHz every poll at the 65C boundary.
+	 */
 	for (i = 0; i < 2; i++) {
 		struct m86_cluster *c = &d->cluster[i];
 		caps[i] = cap_for_temp(c, temp);
 		if (caps[i] > c->thermal_cap &&
-		    cap_for_temp(c, temp + 3000) < caps[i]) caps[i] = c->thermal_cap;
+		    cap_for_temp(c, temp + 5000) < caps[i]) caps[i] = c->thermal_cap;
 		if (caps[i] != c->thermal_cap)
-			dev_info(d->dev, "thermal cap cluster=%u temp=%d old=%u new=%u\n", i, temp, c->thermal_cap, caps[i]);
+			dev_info_ratelimited(d->dev, "thermal cap cluster=%u temp=%d old=%u new=%u\n", i, temp, c->thermal_cap, caps[i]);
 		c->thermal_cap = caps[i];
 	}
 	mutex_unlock(&d->lock);
@@ -689,12 +692,24 @@ static void monitor(struct work_struct *work)
 		}
 	}
 	cpus_read_unlock();
-	/* Poll only while a thermal cap is active (>= 70 C). The TMU fall
-	 * threshold IRQ at 70 C wakes this work through the notifier, so idle
-	 * systems at < 70 C stop issuing four-bank TMU reads every 250 ms.
+	/* Poll while any cap is active or inside the 5 C relax band of the
+	 * lowest (65 C) cap. Otherwise a cap set on the way down would never
+	 * be lifted: the TMU has no trip below 60 C to wake this work again.
+	 * The 65 C rise trip restarts polling through the notifier.
 	 */
-	if (!d->faulted && temp >= 70000)
+	if (!d->faulted &&
+	    (temp >= 60000 ||
+	     caps[0] < d->cluster[0].max_khz || caps[1] < d->cluster[1].max_khz))
 		schedule_delayed_work(&d->thermal_work, msecs_to_jiffies(250));
+}
+
+static void m86_tmu_notifier_release(void *data)
+{
+	struct m86_coord *d = data;
+
+	/* Unregister before cancelling so the notifier cannot requeue work. */
+	m86_tmu_unregister_notifier(&d->tmu_nb);
+	cancel_delayed_work_sync(&d->thermal_work);
 }
 
 static void put_zone(void *data)
@@ -807,6 +822,8 @@ static int m86_probe(struct platform_device *pdev)
 	d->tmu_nb.notifier_call = m86_tmu_notify;
 	ret = m86_tmu_register_notifier(&d->tmu_nb);
 	if (ret) return dev_err_probe(&pdev->dev, ret, "TMU notifier registration at source line %u\n", __LINE__);
+	ret = devm_add_action_or_reset(&pdev->dev, m86_tmu_notifier_release, d);
+	if (ret) return dev_err_probe(&pdev->dev, ret, "TMU notifier release action at source line %u\n", __LINE__);
 	ret = temperature(d, &temp, true);
 	if (ret || temp >= 85000) return dev_err_probe(&pdev->dev, ret ?: -ERANGE, "bootstrap temperature or fixed MIF guard at source line %u\n", __LINE__);
 	/* Require measured unit handoff controls; shared SYSREG reads only. */
@@ -969,8 +986,7 @@ static int m86_remove(struct platform_device *pdev)
 {
 	struct m86_coord *d = platform_get_drvdata(pdev);
 	int atlas_ret, apollo_ret;
-	cancel_delayed_work_sync(&d->thermal_work);
-	m86_tmu_unregister_notifier(&d->tmu_nb);
+	m86_tmu_notifier_release(d);
 	mutex_lock(&d->lock);
 	d->faulted = true;
 	atlas_ret = set_rate_checked(&d->cluster[0], d->cluster[0].opp[0].khz);
