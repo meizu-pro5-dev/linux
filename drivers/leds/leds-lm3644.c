@@ -10,6 +10,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/leds.h>
+#include <linux/led-class-flash.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -27,9 +28,12 @@
 #define LM3644_REG_TORCH_LED0_BR	0x05
 #define LM3644_REG_TORCH_LED1_BR	0x06
 #define LM3644_REG_FLASH_TOUT		0x08
+#define LM3644_REG_TIMING		0x08
 #define LM3644_REG_TEMP			0x09
 #define LM3644_REG_FLAG0		0x0A
+#define LM3644_REG_FLAGS1		0x0A
 #define LM3644_REG_FLAG1		0x0B
+#define LM3644_REG_FLAGS2		0x0B
 #define LM3644_REG_DEV_ID		0x0C
 
 /* LM3644_REG_ENABLE (0x01) */
@@ -66,11 +70,13 @@ struct lm3644_chip;
 
 struct lm3644_led {
 	struct lm3644_chip *chip;
-	struct led_classdev cdev;
+	struct led_classdev_flash fled_cdev;
 	enum lm3644_channel_id id;
 	int led_index;	/* 0 = LED0 (cool white), 1 = LED1 (warm white) */
 	bool is_flash;
 };
+
+#define to_lm3644_led(c) container_of(c, struct lm3644_led, fled_cdev.led_cdev)
 
 struct lm3644_chip {
 	struct device *dev;
@@ -90,6 +96,18 @@ static const struct regmap_config lm3644_regmap_cfg = {
 	.max_register = 0x0F,
 };
 
+static u8 lm3644_timeout_to_reg(u32 timeout_us)
+{
+	if (timeout_us <= 100000) {
+		if (timeout_us < 10000)
+			return 0;
+		return (timeout_us / 10000) - 1;
+	}
+	if (timeout_us >= 400000)
+		return 0x0f;
+	return 9 + (timeout_us - 100000 + 49999) / 50000;
+}
+
 static int lm3644_hw_init(struct lm3644_chip *chip)
 {
 	int ret;
@@ -100,9 +118,9 @@ static int lm3644_hw_init(struct lm3644_chip *chip)
 	if (ret)
 		return ret;
 
-	/* Set flash timeout to maximum */
+	/* Set flash timeout to default (150ms -> 0x0a) */
 	ret = regmap_update_bits(chip->regmap, LM3644_REG_FLASH_TOUT,
-				 0x0F, LM3644_FLASH_TOUT_MAX);
+				 0x0F, lm3644_timeout_to_reg(150000));
 	if (ret)
 		return ret;
 
@@ -154,7 +172,7 @@ static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
 static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 					  enum led_brightness brightness)
 {
-	struct lm3644_led *led = container_of(cdev, struct lm3644_led, cdev);
+	struct lm3644_led *led = to_lm3644_led(cdev);
 	struct lm3644_chip *chip = led->chip;
 	u8 reg_br, led_bit;
 	int ret = 0;
@@ -248,6 +266,116 @@ out:
 	return ret;
 }
 
+static int lm3644_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32 brightness)
+{
+	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
+	struct lm3644_chip *chip = led->chip;
+	u8 reg_br;
+	int ret = 0;
+
+	fled_cdev->brightness.val = brightness;
+
+	mutex_lock(&chip->lock);
+	if (chip->hw_enabled && (chip->flash_en_mask & ((led->led_index == 0) ? LM3644_LED0_EN : LM3644_LED1_EN))) {
+		reg_br = (led->led_index == 0) ?
+			 LM3644_REG_FLASH_LED0_BR : LM3644_REG_FLASH_LED1_BR;
+		ret = regmap_write(chip->regmap, reg_br, min_t(u32, brightness, LM3644_FLASH_MAX_LEVEL));
+	}
+	mutex_unlock(&chip->lock);
+
+	return ret;
+}
+
+static int lm3644_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool state)
+{
+	return lm3644_brightness_set_blocking(&fled_cdev->led_cdev,
+					      state ? fled_cdev->brightness.val : 0);
+}
+
+static int lm3644_flash_strobe_get(struct led_classdev_flash *fled_cdev, bool *state)
+{
+	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
+	struct lm3644_chip *chip = led->chip;
+	u8 led_bit = (led->led_index == 0) ? LM3644_LED0_EN : LM3644_LED1_EN;
+
+	mutex_lock(&chip->lock);
+	*state = !!(chip->flash_en_mask & led_bit);
+	mutex_unlock(&chip->lock);
+
+	return 0;
+}
+
+static int lm3644_flash_timeout_set(struct led_classdev_flash *fled_cdev, u32 timeout)
+{
+	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
+	struct lm3644_chip *chip = led->chip;
+	u8 reg_val;
+	int ret;
+
+	reg_val = lm3644_timeout_to_reg(timeout);
+
+	mutex_lock(&chip->lock);
+	ret = lm3644_set_hw_power(chip, true);
+	if (ret) {
+		mutex_unlock(&chip->lock);
+		return ret;
+	}
+	ret = regmap_update_bits(chip->regmap, LM3644_REG_TIMING, 0x0F, reg_val);
+	if (!chip->flash_en_mask && !chip->torch_en_mask)
+		lm3644_set_hw_power(chip, false);
+	mutex_unlock(&chip->lock);
+
+	if (!ret)
+		fled_cdev->timeout.val = timeout;
+	return ret;
+}
+
+static int lm3644_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fault)
+{
+	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
+	struct lm3644_chip *chip = led->chip;
+	unsigned int flag0 = 0, flag1 = 0;
+	int ret = 0;
+
+	*fault = 0;
+
+	mutex_lock(&chip->lock);
+	if (chip->hw_enabled) {
+		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
+		if (!ret)
+			ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
+	}
+	mutex_unlock(&chip->lock);
+
+	if (ret)
+		return ret;
+
+	if (flag0 & BIT(0))
+		*fault |= LED_FAULT_TIMEOUT;
+	if (flag0 & BIT(1))
+		*fault |= LED_FAULT_UNDER_VOLTAGE;
+	if (flag0 & BIT(2))
+		*fault |= LED_FAULT_OVER_TEMPERATURE;
+	if (flag0 & BIT(3))
+		*fault |= LED_FAULT_LED_OVER_TEMPERATURE;
+	if (flag0 & (BIT(4) | BIT(5)))
+		*fault |= LED_FAULT_SHORT_CIRCUIT;
+	if (flag0 & BIT(6))
+		*fault |= LED_FAULT_OVER_VOLTAGE;
+	if (flag0 & BIT(7))
+		*fault |= LED_FAULT_INPUT_VOLTAGE;
+
+	return 0;
+}
+
+static const struct led_flash_ops lm3644_flash_ops = {
+	.flash_brightness_set = lm3644_flash_brightness_set,
+	.strobe_set = lm3644_flash_strobe_set,
+	.strobe_get = lm3644_flash_strobe_get,
+	.timeout_set = lm3644_flash_timeout_set,
+	.fault_get = lm3644_flash_fault_get,
+};
+
 static ssize_t flags_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct lm3644_chip *chip = dev_get_drvdata(dev);
@@ -256,9 +384,9 @@ static ssize_t flags_show(struct device *dev, struct device_attribute *attr, cha
 
 	mutex_lock(&chip->lock);
 	if (chip->hw_enabled) {
-		ret = regmap_read(chip->regmap, LM3644_REG_FLAG0, &flag0);
+		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
 		if (!ret)
-			ret = regmap_read(chip->regmap, LM3644_REG_FLAG1, &flag1);
+			ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
 	}
 	mutex_unlock(&chip->lock);
 
@@ -378,7 +506,7 @@ static int lm3644_probe(struct i2c_client *client)
 
 	dev_info(dev, "TI LM3644 Flash/Torch driver probed (dev_id=0x%02x)\n", dev_id);
 
-	/* Register 4 LED class devices: torch0, torch1, flash0, flash1 */
+	/* Register LEDs: torch0/1 as led_classdev, flash0/1 as led_classdev_flash */
 	for (i = 0; i < LM3644_ID_MAX; i++) {
 		struct lm3644_led *led = &chip->leds[i];
 
@@ -387,17 +515,39 @@ static int lm3644_probe(struct i2c_client *client)
 		led->led_index = lm3644_led_defs[i].led_index;
 		led->is_flash = lm3644_led_defs[i].is_flash;
 
-		led->cdev.name = lm3644_led_defs[i].name;
-		led->cdev.default_trigger = lm3644_led_defs[i].default_trigger;
-		led->cdev.max_brightness = lm3644_led_defs[i].max_brightness;
-		led->cdev.brightness = 0;
-		led->cdev.brightness_set_blocking = lm3644_brightness_set_blocking;
+		led->fled_cdev.led_cdev.name = lm3644_led_defs[i].name;
+		led->fled_cdev.led_cdev.default_trigger = lm3644_led_defs[i].default_trigger;
+		led->fled_cdev.led_cdev.max_brightness = lm3644_led_defs[i].max_brightness;
+		led->fled_cdev.led_cdev.brightness = 0;
+		led->fled_cdev.led_cdev.brightness_set_blocking = lm3644_brightness_set_blocking;
 
-		ret = devm_led_classdev_register(dev, &led->cdev);
-		if (ret) {
-			dev_err(dev, "Failed to register LED %s: %d\n",
-				led->cdev.name, ret);
-			return ret;
+		if (led->is_flash) {
+			led->fled_cdev.ops = &lm3644_flash_ops;
+			led->fled_cdev.led_cdev.flags |= LED_DEV_CAP_FLASH;
+
+			led->fled_cdev.timeout.min = 10000;
+			led->fled_cdev.timeout.max = 400000;
+			led->fled_cdev.timeout.step = 10000;
+			led->fled_cdev.timeout.val = 150000;
+
+			led->fled_cdev.brightness.min = 1;
+			led->fled_cdev.brightness.max = LM3644_FLASH_MAX_LEVEL;
+			led->fled_cdev.brightness.step = 1;
+			led->fled_cdev.brightness.val = LM3644_FLASH_MAX_LEVEL;
+
+			ret = devm_led_classdev_flash_register_ext(dev, &led->fled_cdev, NULL);
+			if (ret) {
+				dev_err(dev, "Failed to register flash LED %s: %d\n",
+					led->fled_cdev.led_cdev.name, ret);
+				return ret;
+			}
+		} else {
+			ret = devm_led_classdev_register(dev, &led->fled_cdev.led_cdev);
+			if (ret) {
+				dev_err(dev, "Failed to register torch LED %s: %d\n",
+					led->fled_cdev.led_cdev.name, ret);
+				return ret;
+			}
 		}
 	}
 
