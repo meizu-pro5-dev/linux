@@ -91,9 +91,13 @@ struct es9018k2m_priv {
 	struct gpio_desc *dvdd18_gpio;
 
 	bool power_state;
+	bool manual_power;
+	bool stream_active;
 	bool out_select;
 	bool gain;		/* false = Low Gain, true = High Gain */
 	unsigned int filter_mode;/* 0=Fast, 1=Slow, 2=Min Phase, 3=Meizu FIR */
+	unsigned int sysclk;
+	bool master;
 	bool is_v_version;
 };
 
@@ -138,19 +142,28 @@ static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 {
 	int i;
 
+	if (!priv->is_v_version)
+		return;
+
 	for (i = 0; i < 128; i++) {
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, i);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1, es9018k2m_fir_coeff_stage1[i] & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2, (es9018k2m_fir_coeff_stage1[i] >> 8) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC, (es9018k2m_fir_coeff_stage1[i] >> 16) & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
+			     es9018k2m_fir_coeff_stage1[i] & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
+			     (es9018k2m_fir_coeff_stage1[i] >> 8) & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
+			     (es9018k2m_fir_coeff_stage1[i] >> 16) & 0xff);
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
 	}
 
 	for (i = 0; i < 16; i++) {
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, 0x80 + i);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1, es9018k2m_fir_coeff_stage2[i] & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2, (es9018k2m_fir_coeff_stage2[i] >> 8) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC, (es9018k2m_fir_coeff_stage2[i] >> 16) & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
+			     es9018k2m_fir_coeff_stage2[i] & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
+			     (es9018k2m_fir_coeff_stage2[i] >> 8) & 0xff);
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
+			     (es9018k2m_fir_coeff_stage2[i] >> 16) & 0xff);
 		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
 	}
 
@@ -158,57 +171,156 @@ static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x05);
 }
 
-static int es9018k2m_hw_power(struct es9018k2m_priv *priv, bool enable)
+static void es9018k2m_apply_filter(struct es9018k2m_priv *priv)
 {
+	if (!priv->power_state)
+		return;
+
+	if (priv->filter_mode < 3) {
+		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+				   0x60, priv->filter_mode << 5);
+	} else {
+		es9018k2m_load_custom_fir(priv);
+	}
+}
+
+/*
+ * osc48k (gpf2-1) and osc44k (gpf2-3) share the same Samsung GPIO bank (GPF2DAT).
+ * Because samsung_gpio_set_value() reads the physical pad pin state from GPF2DAT,
+ * back-to-back writes to two pins in the same bank without a settling delay can
+ * read the old pad voltage and clobber the first write. Always clear the inactive
+ * oscillator first, wait 1ms, and then assert the active oscillator.
+ */
+static void es9018k2m_select_osc_locked(struct es9018k2m_priv *priv, bool use_44k)
+{
+	if (use_44k) {
+		gpiod_set_value_cansleep(priv->osc48k_gpio, 0);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->osc44k_gpio, 1);
+	} else {
+		gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->osc48k_gpio, 1);
+	}
+	usleep_range(2000, 3000);
+}
+
+/*
+ * On Meizu PRO 5, ES9018K2M VCCA/AVCC is OR-wired between low_gain_gpio (gpf1-0)
+ * and ES9018K2M's internal GPIO1 (Reg 8: 0x07=LOW, 0x0f=HIGH).
+ * To prevent dropping VCCA during gain transitions or reset:
+ * - During reset/power-on (when Reg 8 resets to 0x10 input), low_gain_gpio MUST be 1.
+ * - Switching to High Gain: drive Reg 8 = 0x0f (GPIO1 HIGH) BEFORE setting low_gain_gpio = 0.
+ * - Switching to Low Gain: drive low_gain_gpio = 1 BEFORE setting Reg 8 = 0x07 (GPIO1 LOW).
+ */
+static void es9018k2m_apply_gain_locked(struct es9018k2m_priv *priv)
+{
+	if (!priv->power_state)
+		return;
+
+	if (priv->gain) {
+		regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
+				   0x0f, 0x0f);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->low_gain_gpio, 0);
+	} else {
+		gpiod_set_value_cansleep(priv->low_gain_gpio, 1);
+		usleep_range(1000, 1500);
+		regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
+				   0x0f, 0x07);
+	}
+	usleep_range(1000, 1500);
+}
+
+/*
+ * Must be called with priv->lock held.
+ * Performs pop-free power-up / power-down of ES9018K2M + TI OPA1612.
+ */
+static int es9018k2m_hw_power_locked(struct es9018k2m_priv *priv, bool enable)
+{
+	bool use_44k = (priv->sysclk == 45158400);
+
+	if (enable == priv->power_state)
+		return 0;
+
 	if (enable) {
 		regcache_cache_only(priv->regmap, false);
 
-		/* Power on sequence */
+		/* Mute analog switch and assert VCCA (low_gain_gpio=1) with bank settle delay */
 		gpiod_set_value_cansleep(priv->mute_gpio, 1);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->low_gain_gpio, 1);
+		usleep_range(1000, 1500);
 		gpiod_set_value_cansleep(priv->dvdd18_gpio, 1);
 		gpiod_set_value_cansleep(priv->open_gpio, 1);
-		gpiod_set_value_cansleep(priv->osc48k_gpio, 1);
-		gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
+		es9018k2m_select_osc_locked(priv, use_44k);
 
-		/* Pulse reset: 0 -> 2ms -> 1 -> 10ms */
+		/* Pulse RESETB: low -> 2ms -> high -> 10ms */
 		gpiod_set_value_cansleep(priv->reset_gpio, 0);
 		usleep_range(2000, 3000);
 		gpiod_set_value_cansleep(priv->reset_gpio, 1);
 		usleep_range(10000, 12000);
 
+		priv->power_state = true;
+
 		regcache_mark_dirty(priv->regmap);
 		regcache_sync(priv->regmap);
 
-		/* Configure hardware gain */
-		gpiod_set_value_cansleep(priv->low_gain_gpio, priv->gain ? 0 : 1);
-		regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG, 0x0f, priv->gain ? 0x0f : 0x07);
+		/* Configure hardware gain & GPIO1 output safely after reset */
+		es9018k2m_apply_gain_locked(priv);
 
-		/* Configure filter mode */
-		if (priv->filter_mode < 3) {
-			regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
-			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x60, priv->filter_mode << 5);
-		} else {
-			es9018k2m_load_custom_fir(priv);
-		}
+		/* Configure digital reconstruction filter */
+		es9018k2m_apply_filter(priv);
 
 		/* Soft start & unmute */
 		regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START, 0x80, 0x80);
 		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x03, 0x00);
+		usleep_range(5000, 6000);
 		gpiod_set_value_cansleep(priv->mute_gpio, 0);
+		usleep_range(1000, 1500);
 	} else {
-		/* Power off sequence */
+		/* Pop-free power-off sequence */
 		gpiod_set_value_cansleep(priv->mute_gpio, 1);
+		usleep_range(1000, 1500);
+		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x03, 0x03);
 		regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START, 0x80, 0x00);
+		usleep_range(5000, 6000);
+
+		/* Return analog headphone switch to WM8998 before cutting OPA1612 rails */
+		priv->out_select = false;
+		gpiod_set_value_cansleep(priv->out_select_gpio, 0);
+		usleep_range(5000, 6000);
+
 		gpiod_set_value_cansleep(priv->reset_gpio, 0);
 		gpiod_set_value_cansleep(priv->osc48k_gpio, 0);
+		usleep_range(1000, 1500);
 		gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
+		gpiod_set_value_cansleep(priv->low_gain_gpio, 0);
+		usleep_range(1000, 1500);
 		gpiod_set_value_cansleep(priv->open_gpio, 0);
 		gpiod_set_value_cansleep(priv->dvdd18_gpio, 0);
+		gpiod_set_value_cansleep(priv->mute_gpio, 0);
+		usleep_range(1000, 1500);
 
+		priv->power_state = false;
 		regcache_mark_dirty(priv->regmap);
 		regcache_cache_only(priv->regmap, true);
 	}
 	return 0;
+}
+
+static void es9018k2m_select_output_locked(struct es9018k2m_priv *priv, bool hifi)
+{
+	if (hifi == priv->out_select)
+		return;
+
+	gpiod_set_value_cansleep(priv->mute_gpio, 1);
+	usleep_range(5000, 6000);
+	priv->out_select = hifi;
+	gpiod_set_value_cansleep(priv->out_select_gpio, hifi ? 1 : 0);
+	usleep_range(5000, 6000);
+	gpiod_set_value_cansleep(priv->mute_gpio, 0);
 }
 
 static const DECLARE_TLV_DB_SCALE(es9018k2m_vol_tlv, -12750, 50, 1);
@@ -229,14 +341,16 @@ static int es9018k2m_power_switch_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool enable = !!ucontrol->value.integer.value[0];
+	bool changed = false;
 
 	mutex_lock(&priv->lock);
-	if (enable != priv->power_state) {
-		es9018k2m_hw_power(priv, enable);
-		priv->power_state = enable;
+	priv->manual_power = enable;
+	if ((enable || priv->stream_active) != priv->power_state) {
+		es9018k2m_hw_power_locked(priv, enable || priv->stream_active);
+		changed = true;
 	}
 	mutex_unlock(&priv->lock);
-	return 1;
+	return changed ? 1 : 0;
 }
 
 static const char * const es9018k2m_path_texts[] = { "WM8998", "ES9018K2M HiFi" };
@@ -258,14 +372,15 @@ static int es9018k2m_path_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool val = !!ucontrol->value.enumerated.item[0];
+	bool changed = false;
 
 	mutex_lock(&priv->lock);
 	if (val != priv->out_select) {
-		priv->out_select = val;
-		gpiod_set_value_cansleep(priv->out_select_gpio, val ? 1 : 0);
+		es9018k2m_select_output_locked(priv, val);
+		changed = true;
 	}
 	mutex_unlock(&priv->lock);
-	return 1;
+	return changed ? 1 : 0;
 }
 
 static const char * const es9018k2m_gain_texts[] = { "Low Gain", "High Gain" };
@@ -287,16 +402,27 @@ static int es9018k2m_gain_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool val = !!ucontrol->value.enumerated.item[0];
+	bool changed = false;
 
 	mutex_lock(&priv->lock);
 	if (val != priv->gain) {
 		priv->gain = val;
-		gpiod_set_value_cansleep(priv->low_gain_gpio, val ? 0 : 1);
-		if (priv->power_state)
-			regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG, 0x0f, val ? 0x0f : 0x07);
+		if (priv->power_state) {
+			gpiod_set_value_cansleep(priv->mute_gpio, 1);
+			usleep_range(1000, 1500);
+			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+					   0x03, 0x03);
+			es9018k2m_apply_gain_locked(priv);
+			usleep_range(5000, 6000);
+			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+					   0x03, 0x00);
+			gpiod_set_value_cansleep(priv->mute_gpio, 0);
+			usleep_range(1000, 1500);
+		}
+		changed = true;
 	}
 	mutex_unlock(&priv->lock);
-	return 1;
+	return changed ? 1 : 0;
 }
 
 static const char * const es9018k2m_filter_texts[] = {
@@ -320,6 +446,7 @@ static int es9018k2m_filter_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	unsigned int val = ucontrol->value.enumerated.item[0];
+	bool changed = false;
 
 	if (val >= ARRAY_SIZE(es9018k2m_filter_texts))
 		return -EINVAL;
@@ -327,17 +454,11 @@ static int es9018k2m_filter_put(struct snd_kcontrol *kcontrol,
 	mutex_lock(&priv->lock);
 	if (val != priv->filter_mode) {
 		priv->filter_mode = val;
-		if (priv->power_state) {
-			if (val < 3) {
-				regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
-				regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x60, val << 5);
-			} else {
-				es9018k2m_load_custom_fir(priv);
-			}
-		}
+		es9018k2m_apply_filter(priv);
+		changed = true;
 	}
 	mutex_unlock(&priv->lock);
-	return 1;
+	return changed ? 1 : 0;
 }
 
 static const struct snd_kcontrol_new es9018k2m_snd_controls[] = {
@@ -349,6 +470,9 @@ static const struct snd_kcontrol_new es9018k2m_snd_controls[] = {
 		     es9018k2m_gain_get, es9018k2m_gain_put),
 	SOC_ENUM_EXT("HiFi Filter", es9018k2m_filter_enum,
 		     es9018k2m_filter_get, es9018k2m_filter_put),
+	SOC_DOUBLE_R_TLV("HiFi Playback Volume",
+			 ES9018K2M_VOLUME1, ES9018K2M_VOLUME2,
+			 0, 255, 1, es9018k2m_vol_tlv),
 	SOC_SINGLE_TLV("HiFi Left Volume", ES9018K2M_VOLUME1, 0, 255, 1, es9018k2m_vol_tlv),
 	SOC_SINGLE_TLV("HiFi Right Volume", ES9018K2M_VOLUME2, 0, 255, 1, es9018k2m_vol_tlv),
 };
@@ -358,19 +482,234 @@ static const struct snd_soc_component_driver soc_component_dev_es9018k2m = {
 	.num_controls = ARRAY_SIZE(es9018k2m_snd_controls),
 };
 
+static int es9018k2m_dai_startup(struct snd_pcm_substream *substream,
+				 struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+
+	mutex_lock(&priv->lock);
+	priv->stream_active = true;
+	es9018k2m_hw_power_locked(priv, true);
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static void es9018k2m_dai_shutdown(struct snd_pcm_substream *substream,
+				   struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+
+	mutex_lock(&priv->lock);
+	priv->stream_active = false;
+	if (!priv->manual_power)
+		es9018k2m_hw_power_locked(priv, false);
+	mutex_unlock(&priv->lock);
+}
+
+static int es9018k2m_set_dai_sysclk(struct snd_soc_dai *dai,
+				    int clk_id, unsigned int freq, int dir)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+	bool use_44k;
+
+	if (freq != 49152000 && freq != 45158400) {
+		dev_err(comp->dev, "Unsupported MCLK frequency: %u\n", freq);
+		return -EINVAL;
+	}
+
+	use_44k = (freq == 45158400);
+
+	mutex_lock(&priv->lock);
+	if (priv->sysclk != freq) {
+		priv->sysclk = freq;
+		if (priv->power_state) {
+			/* Re-sequence oscillator and reset on clock family switch */
+			gpiod_set_value_cansleep(priv->mute_gpio, 1);
+			usleep_range(1000, 1500);
+			gpiod_set_value_cansleep(priv->low_gain_gpio, 1);
+			usleep_range(1000, 1500);
+			gpiod_set_value_cansleep(priv->reset_gpio, 0);
+			es9018k2m_select_osc_locked(priv, use_44k);
+			gpiod_set_value_cansleep(priv->reset_gpio, 1);
+			usleep_range(10000, 12000);
+
+			regcache_mark_dirty(priv->regmap);
+			regcache_sync(priv->regmap);
+			es9018k2m_apply_gain_locked(priv);
+			es9018k2m_apply_filter(priv);
+			regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START,
+					   0x80, 0x80);
+			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+					   0x03, 0x00);
+			usleep_range(5000, 6000);
+			gpiod_set_value_cansleep(priv->mute_gpio, 0);
+			usleep_range(1000, 1500);
+		}
+	}
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static int es9018k2m_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+	unsigned int mode_reg;
+	u8 iface = 0;
+	u8 format = 0;
+
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBP_CFP:
+		iface |= 0x80;
+		priv->master = true;
+		break;
+	case SND_SOC_DAIFMT_CBC_CFC:
+		priv->master = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+	case SND_SOC_DAIFMT_I2S:
+		format &= ~0x30;
+		break;
+	case SND_SOC_DAIFMT_LEFT_J:
+		format |= 0x10;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+	case SND_SOC_DAIFMT_NB_NF:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	mode_reg = priv->is_v_version ? ES9018K2M_V_MODE_CONTROL :
+					ES9018K2M_W_MODE_CONTROL;
+
+	mutex_lock(&priv->lock);
+	regmap_update_bits(priv->regmap, mode_reg, 0x80, iface);
+	regmap_update_bits(priv->regmap, ES9018K2M_INPUT_CONFIG, 0x30, format);
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static int es9018k2m_dai_hw_params(struct snd_pcm_substream *substream,
+				   struct snd_pcm_hw_params *params,
+				   struct snd_soc_dai *dai)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+	unsigned int rate = params_rate(params);
+	unsigned int sysclk = (rate % 8000 == 0) ? 49152000 : 45158400;
+	unsigned int bick_div = sysclk / rate / 64;
+	unsigned int mode_reg;
+	unsigned int iface = 0;
+	u8 bick = 0;
+	u8 word_len = 0;
+
+	switch (params_width(params)) {
+	case 16:
+		word_len = 0x00;
+		break;
+	case 24:
+		word_len = 0x40;
+		break;
+	case 32:
+		word_len = 0x80;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (priv->master) {
+		switch (bick_div) {
+		case 16:
+			bick = 0x40;
+			break;
+		case 8:
+			bick = 0x20;
+			break;
+		case 4:
+			bick = 0x00;
+			break;
+		default:
+			dev_err(comp->dev, "Unsupported bick_div %u for rate %u\n",
+				bick_div, rate);
+			return -EINVAL;
+		}
+		/* Vendor driver sets 32-bit I2S frame word length (0x80) in master mode */
+		word_len = 0x80;
+	}
+
+	mode_reg = priv->is_v_version ? ES9018K2M_V_MODE_CONTROL :
+					ES9018K2M_W_MODE_CONTROL;
+
+	mutex_lock(&priv->lock);
+	regmap_read(priv->regmap, ES9018K2M_INPUT_CONFIG, &iface);
+	iface = (iface & 0x3f) | word_len;
+	regmap_write(priv->regmap, ES9018K2M_INPUT_CONFIG, iface);
+
+	if (priv->master)
+		regmap_update_bits(priv->regmap, mode_reg, 0xe0, 0x80 | bick);
+
+	regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START, 0x80, 0x80);
+	regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x03, 0x00);
+
+	/* Route analog headphone switch to ES9018K2M + OPA1612 */
+	es9018k2m_select_output_locked(priv, true);
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static int es9018k2m_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
+{
+	struct snd_soc_component *comp = dai->component;
+	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+
+	mutex_lock(&priv->lock);
+	if (priv->power_state) {
+		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+				   0x03, mute ? 0x03 : 0x00);
+	}
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
 static const struct snd_soc_dai_ops es9018k2m_dai_ops = {
+	.startup	= es9018k2m_dai_startup,
+	.shutdown	= es9018k2m_dai_shutdown,
+	.set_sysclk	= es9018k2m_set_dai_sysclk,
+	.set_fmt	= es9018k2m_set_dai_fmt,
+	.hw_params	= es9018k2m_dai_hw_params,
+	.mute_stream	= es9018k2m_mute_stream,
 };
 
 static struct snd_soc_dai_driver es9018k2m_dai = {
 	.name = "ess9018k2m-hifi",
 	.playback = {
-		.stream_name = "Playback",
-		.channels_min = 1,
+		.stream_name = "HiFi Playback",
+		.channels_min = 2,
 		.channels_max = 2,
 		.rates = SNDRV_PCM_RATE_8000_192000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE |
+			   SNDRV_PCM_FMTBIT_S24_LE |
+			   SNDRV_PCM_FMTBIT_S32_LE,
 	},
 	.ops = &es9018k2m_dai_ops,
+	.symmetric_rate = 1,
 };
 
 static int es9018k2m_i2c_probe(struct i2c_client *i2c)
@@ -387,6 +726,9 @@ static int es9018k2m_i2c_probe(struct i2c_client *i2c)
 	priv->dev = dev;
 	mutex_init(&priv->lock);
 	priv->filter_mode = 3; /* Default to Meizu Custom FIR */
+	priv->sysclk = 49152000;
+	priv->master = true;
+	priv->is_v_version = true;
 	i2c_set_clientdata(i2c, priv);
 
 	/* Parse GPIOs */
@@ -402,7 +744,8 @@ static int es9018k2m_i2c_probe(struct i2c_client *i2c)
 	if (IS_ERR(priv->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(priv->reset_gpio), "failed to get reset-gpio\n");
 
-	priv->mute_gpio = devm_gpiod_get_optional(dev, "mute", GPIOD_OUT_HIGH);
+	/* Keep mute_gpio deasserted (0) at idle so WM8998 headphone path is not muted */
+	priv->mute_gpio = devm_gpiod_get_optional(dev, "mute", GPIOD_OUT_LOW);
 	if (IS_ERR(priv->mute_gpio))
 		return dev_err_probe(dev, PTR_ERR(priv->mute_gpio), "failed to get mute-gpio\n");
 
@@ -427,9 +770,11 @@ static int es9018k2m_i2c_probe(struct i2c_client *i2c)
 		return dev_err_probe(dev, PTR_ERR(priv->regmap), "failed to init regmap\n");
 
 	/* Briefly power on to detect chip ID (reg 64) */
+	gpiod_set_value_cansleep(priv->low_gain_gpio, 1);
+	usleep_range(1000, 1500);
 	gpiod_set_value_cansleep(priv->dvdd18_gpio, 1);
 	gpiod_set_value_cansleep(priv->open_gpio, 1);
-	gpiod_set_value_cansleep(priv->osc48k_gpio, 1);
+	es9018k2m_select_osc_locked(priv, false);
 	gpiod_set_value_cansleep(priv->reset_gpio, 0);
 	usleep_range(2000, 3000);
 	gpiod_set_value_cansleep(priv->reset_gpio, 1);
@@ -444,12 +789,18 @@ static int es9018k2m_i2c_probe(struct i2c_client *i2c)
 		dev_warn(dev, "failed to read ES9018K2M reg64: %d\n", ret);
 	}
 
-	/* Power back down to standby */
+	/* Power back down to standby, leaving 3.5mm jack unmuted on WM8998 */
 	gpiod_set_value_cansleep(priv->reset_gpio, 0);
 	gpiod_set_value_cansleep(priv->osc48k_gpio, 0);
+	usleep_range(1000, 1500);
+	gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
+	gpiod_set_value_cansleep(priv->low_gain_gpio, 0);
+	usleep_range(1000, 1500);
 	gpiod_set_value_cansleep(priv->open_gpio, 0);
 	gpiod_set_value_cansleep(priv->dvdd18_gpio, 0);
 	gpiod_set_value_cansleep(priv->out_select_gpio, 0);
+	usleep_range(1000, 1500);
+	gpiod_set_value_cansleep(priv->mute_gpio, 0);
 	priv->power_state = false;
 	priv->out_select = false;
 	regcache_mark_dirty(priv->regmap);
@@ -467,8 +818,10 @@ static void es9018k2m_i2c_remove(struct i2c_client *i2c)
 {
 	struct es9018k2m_priv *priv = i2c_get_clientdata(i2c);
 
+	mutex_lock(&priv->lock);
 	if (priv->power_state)
-		es9018k2m_hw_power(priv, false);
+		es9018k2m_hw_power_locked(priv, false);
+	mutex_unlock(&priv->lock);
 }
 
 static const struct of_device_id es9018k2m_of_match[] = {

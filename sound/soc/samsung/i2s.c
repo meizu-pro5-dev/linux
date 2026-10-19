@@ -1718,7 +1718,7 @@ static const struct samsung_i2s_dai_data i2sv6_dai_type __maybe_unused = {
 
 static const struct samsung_i2s_dai_data i2sv7_dai_type __maybe_unused = {
 	.quirks = QUIRK_PRI_6CHAN | QUIRK_SEC_DAI | QUIRK_NEED_RSTCLR |
-			QUIRK_SUPPORTS_TDM,
+			QUIRK_SUPPORTS_TDM | QUIRK_FORCE_TXRX,
 	.pcm_rates = SNDRV_PCM_RATE_8000_192000,
 	.i2s_variant_regs = &i2sv7_regs,
 };

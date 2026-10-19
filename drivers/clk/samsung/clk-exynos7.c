@@ -1519,7 +1519,8 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 	GATE(SCLK_PCM, "sclk_pcm", "dout_sclk_pcm",
 			ENABLE_SCLK_AUD, 27, CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_I2S, "sclk_i2s", "dout_sclk_i2s",
-			ENABLE_SCLK_AUD, 28, CLK_SET_RATE_PARENT, 0),
+			ENABLE_SCLK_AUD, 28,
+			CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED, 0),
 	GATE(SCLK_UART, "sclk_uart", "dout_sclk_uart",
 			ENABLE_SCLK_AUD, 29, CLK_SET_RATE_PARENT, 0),
 	GATE(0, "sclk_slimbus", "dout_sclk_slimbus",
@@ -1537,7 +1538,8 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 	GATE(PCLK_PCM, "pclk_pcm", "dout_aclk_aud",
 			ENABLE_PCLK_AUD, 26, CLK_SET_RATE_PARENT, 0),
 	GATE(PCLK_I2S, "pclk_i2s", "dout_aclk_aud",
-			ENABLE_PCLK_AUD, 27, CLK_SET_RATE_PARENT, 0),
+			ENABLE_PCLK_AUD, 27,
+			CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED, 0),
 	GATE(0, "pclk_timer", "dout_aclk_aud",
 			ENABLE_PCLK_AUD, 28, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "pclk_smmu_aud", "dout_aclk_aud",
@@ -1549,7 +1551,8 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 			ENABLE_ACLK_AUD, 27, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk_acel_lh_async_si_top", "dout_aclk_aud",
 			ENABLE_ACLK_AUD, 28, CLK_IGNORE_UNUSED, 0),
-	GATE(ACLK_ADMA, "aclk_dmac", "dout_aclk_aud", ENABLE_ACLK_AUD, 31, 0, 0),
+	GATE(ACLK_ADMA, "aclk_dmac", "dout_aclk_aud",
+			ENABLE_ACLK_AUD, 31, CLK_IGNORE_UNUSED, 0),
 };
 
 static const struct samsung_cmu_info aud_cmu_info __initconst = {
@@ -1591,7 +1594,7 @@ static void __init exynos7_clk_aud_init(struct device_node *np)
 		writel_relaxed(val, reg_base + ENABLE_PCLK_AUD);
 
 		val = readl_relaxed(reg_base + ENABLE_SCLK_AUD);
-		val |= BIT(29);
+		val |= BIT(29) | BIT(28);
 		writel_relaxed(val, reg_base + ENABLE_SCLK_AUD);
 
 		iounmap(reg_base);
