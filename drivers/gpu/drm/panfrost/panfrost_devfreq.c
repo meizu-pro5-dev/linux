@@ -66,6 +66,7 @@ static int panfrost_devfreq_get_dev_status(struct device *dev,
 	spin_lock_irqsave(&pfdevfreq->lock, irqflags);
 
 	panfrost_devfreq_update_utilization(pfdevfreq);
+	pfdevfreq->current_frequency = status->current_frequency;
 
 	status->total_time = ktime_to_ns(ktime_add(pfdevfreq->busy_time,
 						   pfdevfreq->idle_time));
@@ -125,6 +126,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	struct devfreq *devfreq;
 	struct thermal_cooling_device *cooling;
 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+	unsigned long freq = ULONG_MAX;
 
 	if (pfdev->comp->num_supplies > 1) {
 		/*
@@ -188,6 +190,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 		dev_pm_opp_put(opp);
 		return ret;
 	}
+
+	/* Find the fastest defined rate  */
+	opp = dev_pm_opp_find_freq_floor(dev, &freq);
+	if (IS_ERR(opp))
+		return PTR_ERR(opp);
+	pfdevfreq->fast_rate = freq;
 
 	dev_pm_opp_put(opp);
 
