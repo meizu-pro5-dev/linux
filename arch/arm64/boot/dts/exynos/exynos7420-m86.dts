@@ -294,6 +294,18 @@
 			wakeup-source;
 		};
 	};
+
+	fpc_irq: fpc1155-mback {
+		compatible = "meizu,m86-fpc1155", "fpc,fpc_irq";
+		irq-gpios = <&gpa2 2 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpv7 4 GPIO_ACTIVE_HIGH>;
+		vdd-supply = <&ldo14_reg>;
+		clocks = <&clock_peric1 PCLK_SPI4>, <&clock_peric1 SCLK_SPI4>;
+		clock-names = "pclk", "sclk";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fpc_irq_pin &fpc_rst_pin>;
+		wakeup-source;
+	};
 };
 
 &pinctrl_alive {
@@ -323,6 +335,19 @@
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <3>;
 		samsung,pin-drv = <0>;
+	};
+	fpc_irq_pin: fpc-irq-pins {
+		samsung,pins = "gpa2-2";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+	};
+};
+
+&pinctrl_ese {
+	fpc_rst_pin: fpc-rst-pins {
+		samsung,pins = "gpv7-4";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
 	};
 };
 
@@ -453,6 +478,13 @@
 			regulator-min-microvolt = <2800000>;
 			regulator-max-microvolt = <2800000>;
 			regulator-boot-on;
+		};
+		ldo14_reg: LDO14 {
+			regulator-name = "vdd28_fp";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-boot-on;
+			regulator-always-on;
 		};
 	};
   };
