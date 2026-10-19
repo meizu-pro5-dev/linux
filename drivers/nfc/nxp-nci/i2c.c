@@ -221,8 +221,12 @@ static irqreturn_t nxp_nci_i2c_irq_thread_fn(int irq, void *phy_id)
 		r = nxp_nci_i2c_fw_read(phy, &skb);
 		break;
 	case NXP_NCI_MODE_COLD:
-		r = -EREMOTEIO;
-		break;
+		/*
+		 * VEN is low: a glitch on the IRQ line (seen on m86 at probe)
+		 * is not a transport error. Latching hard_fault here makes the
+		 * next NFC_CMD_DEV_UP fail with -EREMOTEIO.
+		 */
+		goto exit_irq_handled;
 	}
 
 	if (r == -EREMOTEIO) {
