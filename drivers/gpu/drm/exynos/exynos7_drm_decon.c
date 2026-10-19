@@ -70,7 +70,6 @@ struct decon_context {
 	unsigned long			irq_flags;
 	bool				i80_if;
 	bool				i80_handoff_processed;
-	bool				suspended;
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
 	struct gpio_desc		*te_gpio;
@@ -117,7 +116,7 @@ static void decon_enable_te_irq(struct decon_context *ctx)
 		return;
 
 	spin_lock_irqsave(&ctx->te_lock, flags);
-	if (!ctx->te_irq_enabled && !READ_ONCE(ctx->suspended)) {
+	if (!ctx->te_irq_enabled && pm_runtime_active(ctx->dev)) {
 		enable_irq(ctx->te_irq);
 		ctx->te_irq_enabled = true;
 	}
@@ -141,9 +140,6 @@ static void decon_disable_te_irq_nosync(struct decon_context *ctx)
 
 static void decon_wait_for_vblank(struct decon_context *ctx)
 {
-	if (ctx->suspended)
-		return;
-
 	atomic_set(&ctx->wait_vsync_event, 1);
 	decon_enable_te_irq(ctx);
 
@@ -218,9 +214,6 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 	struct drm_display_mode *mode = &crtc->base.state->adjusted_mode;
 	u32 val, clkdiv;
 
-	if (ctx->suspended)
-		return;
-
 	/* nothing to do if we haven't set the mode yet */
 	if (mode->htotal == 0 || mode->vtotal == 0)
 		return;
@@ -289,9 +282,6 @@ static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	u32 val;
 
-	if (ctx->suspended)
-		return -EPERM;
-
 	if (!test_and_set_bit(0, &ctx->irq_flags)) {
 		val = readl(ctx->regs + VIDINTCON0);
 
@@ -317,9 +307,6 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 	u32 val;
-
-	if (ctx->suspended)
-		return;
 
 	if (test_and_clear_bit(0, &ctx->irq_flags)) {
 		val = readl(ctx->regs + VIDINTCON0);
@@ -450,9 +437,6 @@ static void decon_atomic_begin(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	int i;
 
-	if (ctx->suspended)
-		return;
-
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_shadow_protect_win(ctx, i, true);
 }
@@ -471,9 +455,6 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	unsigned int win = plane->index;
 	unsigned int cpp = fb->format->cpp[0];
 	unsigned int pitch = fb->pitches[0];
-
-	if (ctx->suspended)
-		return;
 
 	/*
 	 * SHADOWCON/PRTCON register is used for enabling timing.
@@ -588,9 +569,6 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	unsigned int win = plane->index;
 	u32 val;
 
-	if (ctx->suspended)
-		return;
-
 	/* protect windows */
 	decon_shadow_protect_win(ctx, win, true);
 
@@ -617,7 +595,7 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	struct decon_context *ctx = dev_id;
 	unsigned long flags;
 
-	if (READ_ONCE(ctx->suspended) || !ctx->drm_dev) {
+	if (!pm_runtime_active(ctx->dev) || !ctx->drm_dev) {
 		decon_disable_te_irq_nosync(ctx);
 		return IRQ_HANDLED;
 	}
@@ -661,7 +639,7 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	 */
 	spin_lock_irqsave(&ctx->te_lock, flags);
 	if (ctx->te_irq_enabled &&
-	    (READ_ONCE(ctx->suspended) ||
+	    (!pm_runtime_active(ctx->dev) ||
 	     (!test_bit(0, &ctx->irq_flags) &&
 	      !atomic_read(&ctx->frame_pending) &&
 	      !atomic_read(&ctx->wait_vsync_event)))) {
@@ -677,9 +655,6 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 	int i;
-
-	if (ctx->suspended)
-		return;
 
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_shadow_protect_win(ctx, i, false);
@@ -744,9 +719,6 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	int ret;
 
-	if (!ctx->suspended)
-		return;
-
 	if (ctx->bus_qos_active) {
 		dev_pm_qos_update_request(&ctx->bus_qos_req, 416000);
 		ctx->cur_bus_qos = 416000;
@@ -783,9 +755,6 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 
 	decon_init(ctx);
 
-	/* Must clear suspended before re-enabling vblank and committing hardware state */
-	WRITE_ONCE(ctx->suspended, false);
-
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
 		decon_enable_vblank(ctx->crtc);
@@ -817,9 +786,6 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	int i;
 
-	if (ctx->suspended)
-		return;
-
 	/*
 	 * We need to make sure that all windows are disabled before we
 	 * suspend that connector. Otherwise we might try to scan from
@@ -843,7 +809,6 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 		}
 	}
 
-	WRITE_ONCE(ctx->suspended, true);
 	atomic_set(&ctx->frame_pending, 0);
 	decon_disable_te_irq_nosync(ctx);
 	if (ctx->te_irq > 0)
@@ -981,7 +946,6 @@ static int decon_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ctx->dev = dev;
-	ctx->suspended = true;
 
 	i80_if_timings = of_get_child_by_name(dev->of_node, "i80-if-timings");
 	if (i80_if_timings)
