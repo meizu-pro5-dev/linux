@@ -336,6 +336,9 @@ struct samsung_cmu_info {
 	unsigned int nr_suspend_regs;
 	/* name of the parent clock needed for CMU register access */
 	const char *clk_name;
+
+	/* ARM64 Exynos CMUs */
+	bool manual_plls;
 };
 
 struct samsung_clk_provider *samsung_clk_init(struct device *dev,
