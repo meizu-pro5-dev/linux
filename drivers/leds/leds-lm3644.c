@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #define LM3644_NAME			"leds-lm3644"
 #define LM3644_ADDR			0x63
@@ -87,6 +88,11 @@ struct lm3644_chip {
 	bool hw_enabled;
 	u8 torch_en_mask;
 	u8 flash_en_mask;
+	u32 flash_timeout_us;
+	struct delayed_work strobe_work;
+	unsigned int flags1;
+	unsigned int flags2;
+	bool flags_valid;
 	struct lm3644_led leds[LM3644_ID_MAX];
 };
 
@@ -118,9 +124,9 @@ static int lm3644_hw_init(struct lm3644_chip *chip)
 	if (ret)
 		return ret;
 
-	/* Set flash timeout to default (150ms -> 0x0a) */
+	/* Restore the timeout requested through the flash class device. */
 	ret = regmap_update_bits(chip->regmap, LM3644_REG_FLASH_TOUT,
-				 0x0F, lm3644_timeout_to_reg(150000));
+				 0x0F, lm3644_timeout_to_reg(chip->flash_timeout_us));
 	if (ret)
 		return ret;
 
@@ -130,11 +136,19 @@ static int lm3644_hw_init(struct lm3644_chip *chip)
 	if (ret)
 		return ret;
 
-	/* Initialize brightness registers to safe baseline */
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR, 0x20);
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR, 0x20);
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR, 0x40);
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR, 0x40);
+	/* Initialize brightness registers from the class-device state. */
+	regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR,
+		     min_t(u32, chip->leds[LM3644_ID_TORCH0].fled_cdev.brightness.val,
+			   LM3644_TORCH_MAX_LEVEL));
+	regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR,
+		     min_t(u32, chip->leds[LM3644_ID_TORCH1].fled_cdev.brightness.val,
+			   LM3644_TORCH_MAX_LEVEL));
+	regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR,
+		     min_t(u32, chip->leds[LM3644_ID_FLASH0].fled_cdev.brightness.val,
+			   LM3644_FLASH_MAX_LEVEL));
+	regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR,
+		     min_t(u32, chip->leds[LM3644_ID_FLASH1].fled_cdev.brightness.val,
+			   LM3644_FLASH_MAX_LEVEL));
 
 	return 0;
 }
@@ -160,10 +174,10 @@ static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
 	} else {
 		if (!chip->hw_enabled)
 			return 0;
-		if (chip->hwen_gpio) {
+		if (chip->hwen_gpio)
 			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
-			chip->hw_enabled = false;
-		}
+		chip->hw_enabled = false;
+		chip->flags_valid = false;
 	}
 
 	return 0;
@@ -276,7 +290,10 @@ static int lm3644_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32
 	fled_cdev->brightness.val = brightness;
 
 	mutex_lock(&chip->lock);
-	if (chip->hw_enabled && (chip->flash_en_mask & ((led->led_index == 0) ? LM3644_LED0_EN : LM3644_LED1_EN))) {
+	/* Write the flash current even while torch mode is active: the value is
+	 * latched for the next flash pulse and must not be lost.
+	 */
+	if (chip->hw_enabled) {
 		reg_br = (led->led_index == 0) ?
 			 LM3644_REG_FLASH_LED0_BR : LM3644_REG_FLASH_LED1_BR;
 		ret = regmap_write(chip->regmap, reg_br, min_t(u32, brightness, LM3644_FLASH_MAX_LEVEL));
@@ -288,8 +305,28 @@ static int lm3644_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32
 
 static int lm3644_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool state)
 {
-	return lm3644_brightness_set_blocking(&fled_cdev->led_cdev,
-					      state ? fled_cdev->brightness.val : 0);
+	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
+	struct lm3644_chip *chip = led->chip;
+	int ret;
+
+	ret = lm3644_brightness_set_blocking(&fled_cdev->led_cdev,
+					     state ? fled_cdev->brightness.val : 0);
+	if (ret)
+		return ret;
+
+	mutex_lock(&chip->lock);
+	if (state) {
+		/* Hardware flash timeout is armed when the pulse starts. */
+		chip->flags_valid = false;
+		mod_delayed_work(system_wq, &chip->strobe_work,
+				 usecs_to_jiffies(chip->flash_timeout_us) +
+				 msecs_to_jiffies(10));
+	} else {
+		cancel_delayed_work(&chip->strobe_work);
+	}
+	mutex_unlock(&chip->lock);
+
+	return 0;
 }
 
 static int lm3644_flash_strobe_get(struct led_classdev_flash *fled_cdev, bool *state)
@@ -297,12 +334,22 @@ static int lm3644_flash_strobe_get(struct led_classdev_flash *fled_cdev, bool *s
 	struct lm3644_led *led = container_of(fled_cdev, struct lm3644_led, fled_cdev);
 	struct lm3644_chip *chip = led->chip;
 	u8 led_bit = (led->led_index == 0) ? LM3644_LED0_EN : LM3644_LED1_EN;
+	unsigned int enable;
+	int ret;
 
 	mutex_lock(&chip->lock);
-	*state = !!(chip->flash_en_mask & led_bit);
+	if (!chip->hw_enabled) {
+		*state = false;
+		ret = 0;
+	} else {
+		ret = regmap_read(chip->regmap, LM3644_REG_ENABLE, &enable);
+		if (!ret)
+			*state = (enable & LM3644_MODE_MASK) == LM3644_MODE_FLASH &&
+				 (enable & led_bit);
+	}
 	mutex_unlock(&chip->lock);
 
-	return 0;
+	return ret;
 }
 
 static int lm3644_flash_timeout_set(struct led_classdev_flash *fled_cdev, u32 timeout)
@@ -315,18 +362,39 @@ static int lm3644_flash_timeout_set(struct led_classdev_flash *fled_cdev, u32 ti
 	reg_val = lm3644_timeout_to_reg(timeout);
 
 	mutex_lock(&chip->lock);
-	ret = lm3644_set_hw_power(chip, true);
-	if (ret) {
-		mutex_unlock(&chip->lock);
-		return ret;
-	}
-	ret = regmap_update_bits(chip->regmap, LM3644_REG_TIMING, 0x0F, reg_val);
-	if (!chip->flash_en_mask && !chip->torch_en_mask)
-		lm3644_set_hw_power(chip, false);
-	mutex_unlock(&chip->lock);
-
+	/* Persist the timeout across power-down: lm3644_hw_init() reloads it. */
+	chip->flash_timeout_us = clamp(timeout, fled_cdev->timeout.min,
+				       fled_cdev->timeout.max);
+	ret = 0;
+	if (chip->hw_enabled)
+		ret = regmap_update_bits(chip->regmap, LM3644_REG_TIMING, 0x0F,
+					 reg_val);
 	if (!ret)
 		fled_cdev->timeout.val = timeout;
+	mutex_unlock(&chip->lock);
+
+	return ret;
+}
+
+static int lm3644_refresh_flags_locked(struct lm3644_chip *chip)
+{
+	unsigned int flag0 = 0, flag1 = 0;
+	int ret;
+
+	if (!chip->hw_enabled)
+		return 0;
+
+	/* FLAGS1/FLAGS2 are read-to-clear. Cache the values so the flags and
+	 * flash_fault sysfs attributes cannot consume each other's evidence.
+	 */
+	ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
+	if (!ret)
+		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
+	if (!ret) {
+		chip->flags1 = flag0;
+		chip->flags2 = flag1;
+		chip->flags_valid = true;
+	}
 	return ret;
 }
 
@@ -340,10 +408,14 @@ static int lm3644_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fau
 	*fault = 0;
 
 	mutex_lock(&chip->lock);
-	if (chip->hw_enabled) {
-		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
-		if (!ret)
-			ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
+	/* Refresh once; subsequent readers consume the cached value instead of
+	 * re-reading the clear-on-read FLAGS registers.
+	 */
+	if (!chip->flags_valid)
+		ret = lm3644_refresh_flags_locked(chip);
+	if (!ret && chip->flags_valid) {
+		flag0 = chip->flags1;
+		flag1 = chip->flags2;
 	}
 	mutex_unlock(&chip->lock);
 
@@ -368,6 +440,30 @@ static int lm3644_flash_fault_get(struct led_classdev_flash *fled_cdev, u32 *fau
 	return 0;
 }
 
+static void lm3644_strobe_work(struct work_struct *work)
+{
+	struct lm3644_chip *chip = container_of(work, struct lm3644_chip,
+						strobe_work.work);
+
+	mutex_lock(&chip->lock);
+	/* The LM3644 expires the pulse in hardware. Mirror that state so
+	 * flash_strobe reads 0 and HWEN does not stay high (leakage).
+	 */
+	lm3644_refresh_flags_locked(chip);
+	chip->flash_en_mask = 0;
+	if (chip->torch_en_mask)
+		regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
+				   LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
+				   chip->torch_en_mask | LM3644_MODE_TORCH);
+	else {
+		regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
+				   LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
+				   LM3644_MODE_STANDBY);
+		lm3644_set_hw_power(chip, false);
+	}
+	mutex_unlock(&chip->lock);
+}
+
 static const struct led_flash_ops lm3644_flash_ops = {
 	.flash_brightness_set = lm3644_flash_brightness_set,
 	.strobe_set = lm3644_flash_strobe_set,
@@ -380,13 +476,16 @@ static ssize_t flags_show(struct device *dev, struct device_attribute *attr, cha
 {
 	struct lm3644_chip *chip = dev_get_drvdata(dev);
 	unsigned int flag0 = 0, flag1 = 0;
-	int ret = 0;
+	int ret;
 
 	mutex_lock(&chip->lock);
-	if (chip->hw_enabled) {
-		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
-		if (!ret)
-			ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
+	/* Cache the clear-on-read FLAGS registers so flash_fault can still
+	 * report the same event after this attribute has been read.
+	 */
+	ret = lm3644_refresh_flags_locked(chip);
+	if (!ret && chip->flags_valid) {
+		flag0 = chip->flags1;
+		flag1 = chip->flags2;
 	}
 	mutex_unlock(&chip->lock);
 
@@ -453,6 +552,11 @@ static int lm3644_probe(struct i2c_client *client)
 
 	chip->dev = dev;
 	mutex_init(&chip->lock);
+	chip->flash_timeout_us = 150000;
+	INIT_DELAYED_WORK(&chip->strobe_work, lm3644_strobe_work);
+	for (i = 0; i < LM3644_ID_MAX; i++)
+		chip->leds[i].fled_cdev.brightness.val =
+			lm3644_led_defs[i].is_flash ? 0x40 : 0x20;
 	i2c_set_clientdata(client, chip);
 
 	chip->regmap = devm_regmap_init_i2c(client, &lm3644_regmap_cfg);
@@ -533,7 +637,7 @@ static int lm3644_probe(struct i2c_client *client)
 			led->fled_cdev.brightness.min = 1;
 			led->fled_cdev.brightness.max = LM3644_FLASH_MAX_LEVEL;
 			led->fled_cdev.brightness.step = 1;
-			led->fled_cdev.brightness.val = LM3644_FLASH_MAX_LEVEL;
+			/* Keep the safe 0x40 baseline programmed by hw_init. */
 
 			ret = devm_led_classdev_flash_register_ext(dev, &led->fled_cdev, NULL);
 			if (ret) {
@@ -558,6 +662,7 @@ static void lm3644_remove(struct i2c_client *client)
 {
 	struct lm3644_chip *chip = i2c_get_clientdata(client);
 
+	cancel_delayed_work_sync(&chip->strobe_work);
 	mutex_lock(&chip->lock);
 	if (chip->hw_enabled) {
 		regmap_write(chip->regmap, LM3644_REG_ENABLE, LM3644_MODE_STANDBY);

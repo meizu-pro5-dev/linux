@@ -22,6 +22,7 @@
 #include <linux/pm_qos.h>
 #include <linux/regulator/consumer.h>
 #include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv.h>
 
 #define EXYNOS7420_NUM_MIF_CH		4
 #define EXYNOS7420_MIF_LV_COUNT		13
@@ -642,7 +643,9 @@ static int exynos7420_hw_bus_init_once(struct device *dev)
 	if (exynos7420_hw.initialized)
 		return 0;
 
-	ret = m86_asv_cal_read(&cal);
+	ret = exynos7420_asv_get_cal(&cal);
+	if (ret)
+		ret = m86_asv_cal_read(&cal);
 	if (ret == 0) {
 		for (i = 0; i < EXYNOS7420_MIF_LV_COUNT; i++) {
 			exynos7420_mif_opp_table[i].volt_uv =

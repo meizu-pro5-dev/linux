@@ -55,6 +55,9 @@ struct exynos7420_reg_bits {
 struct exynos7420_unused_pd {
 	const char *name;
 	u32 pmu_off;
+	/* Partner domain whose CMU registers are touched by async_clks. */
+	u32 dep_pmu_off;
+	const char *dep_name;
 	phys_addr_t lpi_busmaster_pa;
 	bool clear_a7is_option;
 	bool is_aud;
@@ -215,6 +218,8 @@ static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
 	{
 		.name = "pd-isp0",
 		.pmu_off = 0x4140,
+		.dep_pmu_off = 0x4040,
+		.dep_name = "CAM0",
 		.lpi_busmaster_pa = 0x146e0000,
 		.top_clks = exynos7420_top_clks_isp0,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
@@ -228,6 +233,8 @@ static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
 	{
 		.name = "pd-isp1",
 		.pmu_off = 0x4180,
+		.dep_pmu_off = 0x4060,
+		.dep_name = "CAM1",
 		.lpi_busmaster_pa = 0x147e0000,
 		.top_clks = exynos7420_top_clks_isp1,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
@@ -299,6 +306,38 @@ static int exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
 	return 0;
 }
 
+/*
+ * The ISP async clock registers live in CMU_CAM0/CMU_CAM1. Touching them while
+ * the partner CAM power domain is off raises a fatal AXI SError, so only
+ * program them when the partner PMU STATUS field reports all four power
+ * switches on (STATUS[3:0] == 0xf).
+ */
+static bool exynos7420_dep_powered(void __iomem *pmu_base,
+				   const struct exynos7420_unused_pd *pd)
+{
+	if (!pd->dep_pmu_off)
+		return true;
+
+	return (readl_relaxed(pmu_base + pd->dep_pmu_off + 0x4) & 0xf) == 0xf;
+}
+
+static void exynos7420_apply_async_clks(void __iomem *pmu_base,
+					const struct exynos7420_unused_pd *pd,
+					bool set)
+{
+	if (!pd->num_async_clks)
+		return;
+
+	if (!exynos7420_dep_powered(pmu_base, pd)) {
+		pr_debug("exynos-pd: skip %s async_clks, partner %s is off (stat=%#x)\n",
+			 pd->name, pd->dep_name,
+			 readl_relaxed(pmu_base + pd->dep_pmu_off + 0x4));
+		return;
+	}
+
+	exynos7420_apply_reg_list(pd->async_clks, pd->num_async_clks, set);
+}
+
 static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
 					  const struct exynos7420_unused_pd *pd)
 {
@@ -313,7 +352,7 @@ static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
 	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
 	if (pd->is_aud)
 		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
-	exynos7420_apply_reg_list(pd->async_clks, pd->num_async_clks, true);
+	exynos7420_apply_async_clks(pmu_base, pd, true);
 	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
 
 	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
@@ -385,9 +424,18 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 		return -ETIMEDOUT;
 	}
 
-	/* 4. Enable local clocks and async clocks */
+	/* 4. Restore busmaster handshake and A7IS option before clocks. */
+	if (cfg->lpi_busmaster_pa)
+		exynos7420_rmw_phys(cfg->lpi_busmaster_pa, 0xffffffff, 0);
+	if (cfg->clear_a7is_option) {
+		u32 a7is = readl_relaxed(pmu_base + 0x2588);
+
+		writel_relaxed(a7is | (0x7 << 15), pmu_base + 0x2588);
+	}
+
+	/* 5. Enable local clocks and async clocks (partner CAM must be on). */
 	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
-	exynos7420_apply_reg_list(cfg->async_clks, cfg->num_async_clks, true);
+	exynos7420_apply_async_clks(pmu_base, cfg, true);
 
 	pr_info("exynos-pd: powered on %s (stat=%#x)\n",
 		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
@@ -588,6 +636,11 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
+	/* BLK_AUD feeds LPASS/Bluetooth and BLK_G3D must stay powered while the
+	 * GPU driver owns the domain; never let the generic PM core gate them.
+	 */
+	if (!strcmp(pd->pd.name, "AUD") || !strcmp(pd->pd.name, "G3D"))
+		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
 	pd->local_pwr_option = pm_domain_cfg->local_pwr_option;
 	pd->pre = pm_domain_cfg->pre;

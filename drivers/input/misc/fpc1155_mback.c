@@ -4,6 +4,12 @@
  *
  * Provides Linux input events for mBack touch (KEY_BACK + BTN_TOUCH) while
  * preserving sysfs compatibility with Android TEE fingerprint hal (libfpc_tac.so).
+ *
+ * The fingerprint sensor SPI bus (SPI4 @ 0x14d70000) is declared secure-mode in
+ * the vendor DT and owned by the TEE fpc_tee driver. Non-secure register access
+ * (0x1c READ_INTERRUPT_WITH_CLEAR / 0x24 WAIT_FOR_FINGER_PRESENT) would require
+ * touching TrustZone-exclusive SFRs, so this driver only bridges the gpa2-2 IRQ.
+ * Finger-detect state remains pending TEE-mediated access (Phase 7).
  */
 
 #include <linux/clk.h>
@@ -35,6 +41,7 @@ struct fpc1155_data {
 	struct mutex lock;
 	bool clocks_enabled;
 	bool wakeup_enabled;
+	bool irq_wake_enabled;
 	bool mback_input_enable;
 
 	/* Bus QoS */
@@ -100,13 +107,11 @@ static ssize_t wakeup_enable_store(struct device *dev, struct device_attribute *
 		return -EINVAL;
 
 	mutex_lock(&fpc->lock);
-	if (enable != fpc->wakeup_enabled) {
-		if (enable)
-			enable_irq_wake(fpc->irq);
-		else
-			disable_irq_wake(fpc->irq);
-		fpc->wakeup_enabled = enable;
-	}
+	/* Only record the request. enable_irq_wake() is paired with
+	 * disable_irq_wake() in fpc1155_suspend()/resume(), so the wake depth
+	 * cannot be incremented twice.
+	 */
+	fpc->wakeup_enabled = enable;
 	mutex_unlock(&fpc->lock);
 
 	return count;
@@ -328,6 +333,36 @@ static int fpc1155_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static int fpc1155_suspend(struct device *dev)
+{
+	struct fpc1155_data *fpc = dev_get_drvdata(dev);
+
+	mutex_lock(&fpc->lock);
+	if (fpc->wakeup_enabled && device_may_wakeup(dev) &&
+	    !fpc->irq_wake_enabled) {
+		if (!enable_irq_wake(fpc->irq))
+			fpc->irq_wake_enabled = true;
+	}
+	mutex_unlock(&fpc->lock);
+	return 0;
+}
+
+static int fpc1155_resume(struct device *dev)
+{
+	struct fpc1155_data *fpc = dev_get_drvdata(dev);
+
+	mutex_lock(&fpc->lock);
+	if (fpc->irq_wake_enabled) {
+		disable_irq_wake(fpc->irq);
+		fpc->irq_wake_enabled = false;
+	}
+	mutex_unlock(&fpc->lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(fpc1155_pm_ops, fpc1155_suspend,
+				fpc1155_resume);
+
 static int fpc1155_remove(struct platform_device *pdev)
 {
 	struct fpc1155_data *fpc = platform_get_drvdata(pdev);
@@ -337,8 +372,10 @@ static int fpc1155_remove(struct platform_device *pdev)
 		fpc->bus_qos_active = false;
 	}
 
-	if (fpc->wakeup_enabled)
+	if (fpc->irq_wake_enabled) {
 		disable_irq_wake(fpc->irq);
+		fpc->irq_wake_enabled = false;
+	}
 
 	if (fpc->clocks_enabled) {
 		if (fpc->sclk)
@@ -368,6 +405,7 @@ static struct platform_driver fpc1155_driver = {
 		.name = "fpc_irq",
 		.of_match_table = fpc1155_of_match,
 		.dev_groups = fpc1155_groups,
+		.pm = pm_sleep_ptr(&fpc1155_pm_ops),
 	},
 };
 module_platform_driver(fpc1155_driver);

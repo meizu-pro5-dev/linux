@@ -56,6 +56,7 @@ struct exynos_arm64_cmu_data {
 	int nr_pclks;
 
 	unsigned int tzpc_addr;			/* address for PM SMC calls */
+	bool no_pm_smc;
 	struct samsung_clk_provider *ctx;
 };
 
@@ -178,7 +179,7 @@ static int exynos_arm64_pm_smc(struct device *dev, bool on)
 	struct arm_smccc_res res;
 	unsigned int pm_arg;
 
-	if (!data->tzpc_addr)
+	if (!data->tzpc_addr || data->no_pm_smc)
 		return 0;
 
 	pm_arg = on ? EXYNOS_WAKEUP_PD_DOWN : EXYNOS_GET_IN_PD_DOWN;
@@ -249,6 +250,7 @@ int __init exynos_arm64_register_cmu_pm(struct platform_device *pdev,
 	platform_set_drvdata(pdev, data);
 
 	of_property_read_u32(np, "samsung,tzpc", (u32 *)&data->tzpc_addr);
+	data->no_pm_smc = cmu->no_pm_smc;
 
 	ret = exynos_arm64_cmu_prepare_pm(dev, cmu);
 	if (ret)

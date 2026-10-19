@@ -12,6 +12,7 @@
 #include <linux/component.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/interconnect.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
@@ -83,6 +84,7 @@ struct decon_context {
 	struct dev_pm_qos_request	bus_qos_req;
 	bool				bus_qos_active;
 	u32				cur_bus_qos;
+	struct icc_path			*icc;
 };
 
 static const struct of_device_id decon_driver_dt_match[] = {
@@ -723,6 +725,8 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 		dev_pm_qos_update_request(&ctx->bus_qos_req, 416000);
 		ctx->cur_bus_qos = 416000;
 	}
+	if (ctx->icc)
+		icc_set_bw(ctx->icc, 500000, 1000000);
 
 	ret = pm_runtime_resume_and_get(ctx->dev);
 	if (ret < 0) {
@@ -748,7 +752,7 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 				fb = addr;
 		}
 		if (fb)
-			exynos_iommu_map_identity(ctx->dev, fb, SZ_64M);
+			exynos_iommu_map_identity(ctx->dev, fb, SZ_16M);
 	}
 
 	exynos_iommu_master_ready(ctx->dev);
@@ -820,6 +824,8 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 		dev_pm_qos_update_request(&ctx->bus_qos_req, 0);
 		ctx->cur_bus_qos = 0;
 	}
+	if (ctx->icc)
+		icc_set_bw(ctx->icc, 0, 0);
 }
 
 static const struct exynos_drm_crtc_ops decon_crtc_ops = {
@@ -1041,6 +1047,17 @@ static int decon_probe(struct platform_device *pdev)
 			ctx->bus_dev = exynos_bus_get_dev("bus-mif");
 		if (!ctx->bus_dev)
 			ctx->bus_dev = exynos_bus_get_dev(NULL);
+		ctx->icc = devm_of_icc_get(dev, NULL);
+		if (IS_ERR(ctx->icc)) {
+			ret = PTR_ERR(ctx->icc);
+			if (ret == -EPROBE_DEFER)
+				goto err_iounmap;
+			dev_dbg(dev, "no interconnect path: %d\n", ret);
+			ctx->icc = NULL;
+			ret = 0;
+		} else if (ctx->icc) {
+			dev_info(dev, "ICC bandwidth path registered on bus-mif\n");
+		}
 		if (ctx->bus_dev) {
 			ctx->cur_bus_qos = 416000;
 			ret = dev_pm_qos_add_request(ctx->bus_dev, &ctx->bus_qos_req,

@@ -349,6 +349,8 @@ struct samsung_cmu_info {
 
 	/* ARM64 Exynos CMUs */
 	bool manual_plls;
+	/* Exynos7420 CMUs do not implement the Exynos850 0x82000410 SMC. */
+	bool no_pm_smc;
 };
 
 struct samsung_clk_provider *samsung_clk_init(struct device *dev,

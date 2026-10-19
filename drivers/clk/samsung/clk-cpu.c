@@ -680,13 +680,6 @@ static int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 	cpuclk->clk_nb.notifier_call = exynos_cpuclk_notifier_cb;
 	cpuclk->chip = &exynos_clkcpu_chips[clk_data->reg_layout];
 
-	ret = clk_notifier_register(parent->clk, &cpuclk->clk_nb);
-	if (ret) {
-		pr_err("%s: failed to register clock notifier for %s\n",
-		       __func__, clk_data->name);
-		goto free_cpuclk;
-	}
-
 	/* Find count of configuration rates in cfg */
 	for (num_cfgs = 0; clk_data->cfg[num_cfgs].prate != 0; )
 		num_cfgs++;
@@ -695,23 +688,33 @@ static int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 			      GFP_KERNEL);
 	if (!cpuclk->cfg) {
 		ret = -ENOMEM;
-		goto unregister_clk_nb;
+		goto free_cpuclk;
+	}
+
+	/* Register only after cfg is populated: a parent rate change can run
+	 * the notifier immediately and dereference cpuclk->cfg.
+	 */
+	ret = clk_notifier_register(parent->clk, &cpuclk->clk_nb);
+	if (ret) {
+		pr_err("%s: failed to register clock notifier for %s\n",
+		       __func__, clk_data->name);
+		goto free_cpuclk_data;
 	}
 
 	ret = clk_hw_register(NULL, &cpuclk->hw);
 	if (ret) {
 		pr_err("%s: could not register cpuclk %s\n", __func__,
 		       clk_data->name);
-		goto free_cpuclk_data;
+		goto unregister_clk_nb;
 	}
 
 	samsung_clk_add_lookup(ctx, &cpuclk->hw, clk_data->id);
 	return 0;
 
-free_cpuclk_data:
-	kfree(cpuclk->cfg);
 unregister_clk_nb:
 	clk_notifier_unregister(parent->clk, &cpuclk->clk_nb);
+free_cpuclk_data:
+	kfree(cpuclk->cfg);
 free_cpuclk:
 	kfree(cpuclk);
 	return ret;

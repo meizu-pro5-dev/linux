@@ -220,6 +220,7 @@ struct exynos_ufs {
 	struct dev_pm_qos_request bus_qos_req;
 	bool bus_qos_active;
 	u32 bus_qos_khz;
+	struct icc_path *icc;
 
 	u32 opts;
 #define EXYNOS_UFS_OPT_HAS_APB_CLK_CTRL		BIT(0)

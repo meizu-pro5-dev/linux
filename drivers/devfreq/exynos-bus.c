@@ -665,9 +665,21 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	if (bus->is_exynos7420_mif) {
 		exynos7420_hw.mif_bus = bus;
 		exynos7420_hw.vdd_mif = bus->reg_vdd;
+		if (bus->reg_vdd) {
+			int uv = regulator_get_voltage(bus->reg_vdd);
+
+			if (uv > 0)
+				exynos7420_hw.cur_mif_volt_uv = uv;
+		}
 	} else if (bus->is_exynos7420_int) {
 		exynos7420_hw.int_bus = bus;
 		exynos7420_hw.vdd_int = bus->reg_vdd;
+		if (bus->reg_vdd) {
+			int uv = regulator_get_voltage(bus->reg_vdd);
+
+			if (uv > 0)
+				exynos7420_hw.cur_int_volt_uv = uv;
+		}
 		exynos7420_int_set_clocks(exynos7420_hw.cur_int_idx);
 	}
 	mutex_unlock(&exynos7420_hw.lock);

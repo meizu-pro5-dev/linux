@@ -64,15 +64,31 @@ int exynos7420_asv_get_group(enum exynos7420_asv_domain dom, unsigned int level)
 		return grp;
 	}
 
-	if (level < 3)
-		subgrp = level;
-	else
-		subgrp = m86_asv_match_subgrp((enum m86_asv_domain)dom, level);
+	/* level is the vendor SYSC_DVFS_L* index; always map it through the
+	 * vendor sub-group table (the old "level < 3" shortcut selected the
+	 * wrong nibble for BIG/LIT L0..L2).
+	 */
+	subgrp = m86_asv_match_subgrp((enum m86_asv_domain)dom, level);
 
 	raw = m86_asv_domain_group_raw(&asv_data.cal, (enum m86_asv_domain)dom);
 	return (raw >> (subgrp * 4U)) & 0xfU;
 }
 EXPORT_SYMBOL_GPL(exynos7420_asv_get_group);
+
+/*
+ * Return the single ASV/eFuse snapshot read at subsys_initcall. Consumers
+ * (cpufreq, GPU DVFS, MIF/INT, SRAM EMA) must share it instead of issuing
+ * 16 SMC calls each.
+ */
+int exynos7420_asv_get_cal(struct m86_asv_cal_info *cal)
+{
+	if (!asv_data.initialized)
+		return -EAGAIN;
+
+	*cal = asv_data.cal;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7420_asv_get_cal);
 
 static const char * const domain_names[] = {
 	[EXYNOS7420_ASV_BIG] = "BIG (ATLAS)",

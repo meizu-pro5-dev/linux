@@ -15,6 +15,7 @@
 #include <linux/of_address.h>
 #include <linux/mfd/syscon.h>
 #include <linux/phy/phy.h>
+#include <linux/interconnect.h>
 #include <linux/platform_device.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
@@ -1214,6 +1215,18 @@ static int exynos_ufs_init(struct ufs_hba *hba)
 			ufs->bus_dev = exynos_bus_get_dev("bus-mif");
 		if (!ufs->bus_dev)
 			ufs->bus_dev = exynos_bus_get_dev(NULL);
+		ufs->icc = devm_of_icc_get(dev, NULL);
+		if (IS_ERR(ufs->icc)) {
+			ret = PTR_ERR(ufs->icc);
+			if (ret == -EPROBE_DEFER)
+				goto out;
+			dev_dbg(dev, "no interconnect path: %d\n", ret);
+			ufs->icc = NULL;
+			ret = 0;
+		} else if (ufs->icc) {
+			icc_set_bw(ufs->icc, 800000, 800000);
+			dev_info(dev, "ICC bandwidth path registered (800000 kBps)\n");
+		}
 		if (ufs->bus_dev) {
 			ufs->bus_qos_khz = 416000;
 			ret = dev_pm_qos_add_request(ufs->bus_dev, &ufs->bus_qos_req,
@@ -1439,6 +1452,8 @@ static int exynos_ufs_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op,
 
 	if (ufs->bus_qos_active)
 		dev_pm_qos_update_request(&ufs->bus_qos_req, 0);
+	if (ufs->icc)
+		icc_set_bw(ufs->icc, 0, 0);
 
 	return 0;
 }
@@ -1449,6 +1464,8 @@ static int exynos_ufs_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 
 	if (ufs->bus_qos_active)
 		dev_pm_qos_update_request(&ufs->bus_qos_req, ufs->bus_qos_khz);
+	if (ufs->icc)
+		icc_set_bw(ufs->icc, 800000, 800000);
 
 	if (!ufshcd_is_link_active(hba))
 		phy_power_on(ufs->phy);
