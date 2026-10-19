@@ -363,12 +363,16 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 
 	/* 1. Enable top clocks */
 	exynos7420_apply_reg_list(cfg->top_clks, cfg->num_top_clks, true);
+	udelay(10);
 
-	/* 2. Write OPTION and PWR_CFG to power on */
+	/* 2. Clear sys_pwr_regs before power on */
+	exynos7420_apply_reg_list(cfg->sys_pwr_regs, cfg->num_sys_pwr_regs, false);
+
+	/* 3. Write OPTION and PWR_CFG to power on */
 	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
 	writel_relaxed(0xf, pmu_base + cfg->pmu_off + 0x0);
 
-	/* 3. Poll status == 0xf (up to 2ms) */
+	/* 4. Poll status == 0xf (up to 2ms) */
 	while ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0xf) {
 		if (--timeout <= 0)
 			break;

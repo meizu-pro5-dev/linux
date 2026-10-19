@@ -719,6 +719,7 @@
 			#clock-cells = <1>;
 			clocks = <&fin_pll>, <&clock_topc ACLK_MFC_532>;
 			clock-names = "fin_pll", "aclk_mfc_532";
+			power-domains = <&pd_mfc>;
 		};
 
 		adma: dma-controller@11420000 {
