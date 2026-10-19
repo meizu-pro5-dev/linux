@@ -336,6 +336,10 @@
 		gpio = <&gpf2 2 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 	};
+
+	trng {
+		compatible = "samsung,exynos7420-trng", "samsung,exynos850-trng";
+	};
 };
 
 &pinctrl_alive {
