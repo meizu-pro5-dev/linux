@@ -35,6 +35,7 @@
 #include "i2s.h"
 #include <linux/mfd/arizona/registers.h>
 #include "../codecs/wm8998.h"
+#include "../codecs/es9018k2m.h"
 
 #define MCLK_RATE		24000000U
 
@@ -77,11 +78,12 @@ struct m86_machine_priv {
 	bool es705_booted;
 	unsigned int sysclk_rate;
 	unsigned int fll_rate;	/* FLL1 output currently programmed, 0 = off */
-	struct snd_soc_aux_dev aux_devs[2];
+	struct snd_soc_aux_dev aux_devs[1];
 	struct snd_soc_component *amp_component;
 	struct device_node *cpu_np;
 	struct device_node *codec_np;
 	struct device_node *amp_np;
+	struct device_node *hifi_cpu_np;
 	struct device_node *hifi_np;
 	/* PM QoS protection for active audio streaming */
 	struct pm_qos_request cpu_latency_req;
@@ -762,6 +764,72 @@ static const struct snd_soc_ops m86_aif1_ops = {
 	.prepare   = m86_aif1_prepare,
 };
 
+static int m86_hifi_hw_params(struct snd_pcm_substream *substream,
+			      struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	unsigned int pll_out;
+	int ret;
+
+	switch (params_rate(params)) {
+	case 8000:
+	case 16000:
+	case 24000:
+	case 32000:
+	case 48000:
+	case 64000:
+	case 96000:
+	case 192000:
+		pll_out = 49152000;
+		break;
+	case 11025:
+	case 22050:
+	case 44100:
+	case 88200:
+	case 176400:
+		pll_out = 45158400;
+		break;
+	default:
+		dev_err(codec_dai->dev, "Unsupported HiFi sample rate: %d\n",
+			params_rate(params));
+		return -EINVAL;
+	}
+
+	ret = snd_soc_dai_set_sysclk(codec_dai, ES9018K2M_SYSCLK_MCLK,
+				     pll_out, SND_SOC_CLOCK_IN);
+	if (ret < 0) {
+		dev_err(codec_dai->dev, "Failed to set HiFi MCLK: %d\n", ret);
+		return ret;
+	}
+
+	/* Configure LPASS I2S0 in slave mode receiving 64fs BCLK/LRCK from ES9018K2M */
+	ret = snd_soc_dai_set_sysclk(cpu_dai, SAMSUNG_I2S_CDCLK,
+				     0, SND_SOC_CLOCK_IN);
+	if (ret < 0)
+		dev_warn(cpu_dai->dev, "Failed to set HiFi I2S_CDCLK: %d\n", ret);
+
+	ret = snd_soc_dai_set_sysclk(cpu_dai, SAMSUNG_I2S_OPCLK,
+				     0, SAMSUNG_I2S_OPCLK_PCLK);
+	if (ret < 0)
+		dev_warn(cpu_dai->dev, "Failed to set HiFi I2S_OPCLK: %d\n", ret);
+
+	ret = snd_soc_dai_set_clkdiv(cpu_dai, SAMSUNG_I2S_DIV_BCLK, 64);
+	if (ret < 0) {
+		dev_err(cpu_dai->dev, "Failed to set HiFi BCLK 64fs: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static const struct snd_soc_ops m86_hifi_ops = {
+	.startup   = m86_aif1_startup,
+	.shutdown  = m86_aif1_shutdown,
+	.hw_params = m86_hifi_hw_params,
+};
+
 static const struct snd_kcontrol_new m86_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Headphone"),
 	SOC_DAPM_PIN_SWITCH("Earpiece"),
@@ -796,6 +864,11 @@ SND_SOC_DAILINK_DEFS(aif1,
 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "wm8998-aif1")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
+SND_SOC_DAILINK_DEFS(hifi,
+	DAILINK_COMP_ARRAY(COMP_CPU(SAMSUNG_I2S_DAI)),
+	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "ess9018k2m-hifi")),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
 static struct snd_soc_dai_link m86_dai_links[] = {
 	{
 		.name		= "WM8998 AIF1",
@@ -806,6 +879,15 @@ static struct snd_soc_dai_link m86_dai_links[] = {
 		/* TXR=2 (I2S1) and one FLL1 serve both directions */
 		.symmetric_rate	= 1,
 		SND_SOC_DAILINK_REG(aif1),
+	},
+	{
+		.name		= "ES9018K2M HiFi",
+		.stream_name	= "HiFi Playback",
+		.ops		= &m86_hifi_ops,
+		.dai_fmt	= SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+				  SND_SOC_DAIFMT_CBM_CFM,
+		.playback_only	= 1,
+		SND_SOC_DAILINK_REG(hifi),
 	},
 };
 
@@ -987,11 +1069,15 @@ static void m86_cleanup_resources(void *data)
 	m86_card.dai_link[0].cpus->of_node = NULL;
 	m86_card.dai_link[0].platforms->of_node = NULL;
 	m86_card.dai_link[0].codecs->of_node = NULL;
+	m86_card.dai_link[1].cpus->of_node = NULL;
+	m86_card.dai_link[1].platforms->of_node = NULL;
+	m86_card.dai_link[1].codecs->of_node = NULL;
 	m86_card.aux_dev = NULL;
 	m86_card.num_aux_devs = 0;
 	of_node_put(priv->cpu_np);
 	of_node_put(priv->codec_np);
 	of_node_put(priv->amp_np);
+	of_node_put(priv->hifi_cpu_np);
 	of_node_put(priv->hifi_np);
 }
 
@@ -1101,18 +1187,23 @@ static int m86_audio_probe(struct platform_device *pdev)
 	card->dai_link[0].platforms->of_node = priv->cpu_np;
 	card->dai_link[0].codecs->of_node = priv->codec_np;
 
+	priv->hifi_cpu_np = of_parse_phandle(dev->of_node, "hifi-cpu", 0);
+	priv->hifi_np = of_parse_phandle(dev->of_node, "hifi-dac", 0);
+	if (priv->hifi_cpu_np && priv->hifi_np) {
+		card->dai_link[1].cpus->of_node = priv->hifi_cpu_np;
+		card->dai_link[1].platforms->of_node = priv->hifi_cpu_np;
+		card->dai_link[1].codecs->of_node = priv->hifi_np;
+		card->num_links = 2;
+	} else {
+		card->num_links = 1;
+	}
+
 	card->aux_dev = priv->aux_devs;
 	card->num_aux_devs = 0;
 
 	priv->amp_np = of_parse_phandle(dev->of_node, "audio-amplifier", 0);
 	if (priv->amp_np) {
 		priv->aux_devs[card->num_aux_devs].dlc.of_node = priv->amp_np;
-		card->num_aux_devs++;
-	}
-
-	priv->hifi_np = of_parse_phandle(dev->of_node, "hifi-dac", 0);
-	if (priv->hifi_np) {
-		priv->aux_devs[card->num_aux_devs].dlc.of_node = priv->hifi_np;
 		card->num_aux_devs++;
 	}
 

@@ -258,7 +258,7 @@
 /* Avoid unneeded first-boot accesses and the S6 display/audio sequences. */
 &pdma0 { status = "okay"; };
 &pdma1 { status = "okay"; };
-&adma { status = "disabled"; };
+&adma { status = "okay"; };
 &pwm { status = "disabled"; };
 &tmuctrl_0 { status = "disabled"; };
 &tmuctrl_1 { status = "disabled"; };
@@ -1196,6 +1196,12 @@
 	};
 };
 
+&i2s0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2s0_bus>;
+};
+
 &i2s1 {
 	status = "okay";
 };
@@ -1250,6 +1256,7 @@
 		low-gain-gpios = <&gpf1 0 GPIO_ACTIVE_HIGH>;
 		out-select-gpios = <&gpf1 4 GPIO_ACTIVE_HIGH>;
 		dvdd18-gpios = <&gpf4 1 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
 	};
 };
 
@@ -1264,6 +1271,7 @@
 		dsp-wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
 		dsp-core-supply = <&m86_es705_1v1>;
 		audio-amplifier = <&audio_pa_tfa9890>;
+		hifi-cpu = <&i2s0 0>;
 		hifi-dac = <&ess9018k2m>;
 		samsung,audio-routing =
 			"Headphone", "HPOUTL",
