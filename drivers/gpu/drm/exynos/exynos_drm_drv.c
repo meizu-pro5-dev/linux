@@ -10,6 +10,7 @@
 #include <linux/component.h>
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/uaccess.h>
 
@@ -301,6 +302,14 @@ static int exynos_drm_bind(struct device *dev)
 
 	exynos_drm_fbdev_setup(drm);
 
+	/*
+	 * KMS restores the display state on resume, so suspend needs no VT
+	 * switch. Without fbdev emulation nothing else registers this, and
+	 * the switch makes logind pause the session and revoke DRM master
+	 * around every s2idle cycle.
+	 */
+	pm_vt_switch_required(dev, false);
+
 	return 0;
 
 err_cleanup_poll:
@@ -321,6 +330,7 @@ static void exynos_drm_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 
+	pm_vt_switch_unregister(dev);
 	drm_dev_unregister(drm);
 
 	drm_kms_helper_poll_fini(drm);
