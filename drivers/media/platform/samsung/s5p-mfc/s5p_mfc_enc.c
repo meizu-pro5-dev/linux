@@ -1415,6 +1415,10 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			return -EINVAL;
 		}
 
+		/* A zero-sized stream buffer cannot hold any frame */
+		if (!pix_fmt_mp->plane_fmt[0].sizeimage)
+			pix_fmt_mp->plane_fmt[0].sizeimage =
+				dev->variant->buf_size->cpb;
 		pix_fmt_mp->plane_fmt[0].bytesperline =
 			pix_fmt_mp->plane_fmt[0].sizeimage;
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
