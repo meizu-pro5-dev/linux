@@ -556,10 +556,11 @@ static void show_fault_information(struct sysmmu_drvdata *data,
 {
 	sysmmu_pte_t *ent;
 
-	dev_err(data->sysmmu, "%s: [%s] %s FAULT occurred at %#x\n",
-		dev_name(data->master),
-		fault->type == IOMMU_FAULT_READ ? "READ" : "WRITE",
-		fault->name, fault->addr);
+	dev_err_ratelimited(data->sysmmu,
+			    "%s: [%s] %s FAULT occurred at %#x\n",
+			    dev_name(data->master),
+			    fault->type == IOMMU_FAULT_READ ? "READ" : "WRITE",
+			    fault->name, fault->addr);
 	dev_dbg(data->sysmmu, "Page table base: %pa\n", &data->pgtable);
 	ent = section_entry(phys_to_virt(data->pgtable), fault->addr);
 	dev_dbg(data->sysmmu, "\tLv1 entry: %#x\n", *ent);
@@ -600,7 +601,8 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
 	 * wedge the whole system.
 	 */
 	if (ret)
-		dev_err(data->sysmmu, "Unrecoverable System MMU Fault! (ignored)\n");
+		dev_err_ratelimited(data->sysmmu,
+				    "Unrecoverable System MMU Fault! (ignored)\n");
 
 out:
 	writel(1 << itype, SYSMMU_REG(data, int_clear));
