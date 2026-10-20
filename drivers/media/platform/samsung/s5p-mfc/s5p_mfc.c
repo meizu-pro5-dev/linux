@@ -546,7 +546,8 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 			ctx->state = MFCINST_HEAD_PARSED;
 
 		if ((ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
-			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC) &&
+			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC ||
+			ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC) &&
 				!list_empty(&ctx->src_queue)) {
 			struct s5p_mfc_buf *src_buf;
 
