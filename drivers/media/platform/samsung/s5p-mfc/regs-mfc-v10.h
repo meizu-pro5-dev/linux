@@ -55,6 +55,8 @@
 #define MFC_VERSION_V10		0xA0
 /* MFCv9 uses the v10 map without MFC_CLOCK_OFF/MFC_STATE */
 #define MFC_VERSION_V9		0x90
+#define S5P_FIMV_TMV_BUFFER_SIZE_V9(w, h)	(((w) + 1) * ((h) + 3) * 8)
+#define S5P_FIMV_TMV_BUFFER_ALIGN_V9		32
 #define MFC_NUM_PORTS_V10	1
 
 /* MFCv10 codec defines*/

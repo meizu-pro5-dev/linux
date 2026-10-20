@@ -72,8 +72,13 @@ static int s5p_mfc_alloc_codec_buffers_v6(struct s5p_mfc_ctx *ctx)
 			  ctx->luma_size, ctx->chroma_size, ctx->mv_size);
 		mfc_debug(2, "Totals bufs: %d\n", ctx->total_dpb_count);
 	} else if (ctx->type == MFCINST_ENCODER) {
-		if (IS_MFCV9_PLUS(dev)) {
+		if (IS_MFCV10(dev)) {
 			ctx->tmv_buffer_size = 0;
+		} else if (IS_MFCV9_PLUS(dev)) {
+			/* v9 still writes temporal MVs to E_TMV_BUFFER0/1 */
+			ctx->tmv_buffer_size = S5P_FIMV_NUM_TMV_BUFFERS_V6 *
+			ALIGN(S5P_FIMV_TMV_BUFFER_SIZE_V9(mb_width, mb_height),
+			S5P_FIMV_TMV_BUFFER_ALIGN_V9);
 		} else if (IS_MFCV8_PLUS(dev))
 			ctx->tmv_buffer_size = S5P_FIMV_NUM_TMV_BUFFERS_V6 *
 			ALIGN(S5P_FIMV_TMV_BUFFER_SIZE_V8(mb_width, mb_height),
