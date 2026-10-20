@@ -18,6 +18,7 @@
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/io.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mfd/syscon.h>
 #include <linux/mutex.h>
@@ -56,8 +57,12 @@
 #define ES_SPI_BOOT_CMD		0x0001
 #define ES_SPI_BOOT_ACK		0x0001
 #define ES705_FW_NAME		"audience-es705-fw.bin"
-/* ESCORE_SPI_PACKET_LEN: also the bounce buffer size */
-#define ES705_SPI_PACKET	64
+/*
+ * Bounce buffer size and firmware chunk. Each spi_write() costs ~5.8 ms of
+ * message overhead on spi_3 (PIO, 64-byte FIFO), so 64-byte chunks took ~23 s
+ * for the 254 KiB image; the vendor driver sends the image in one transfer.
+ */
+#define ES705_SPI_PACKET	4096
 
 struct m86_machine_priv {
 	struct snd_soc_component *component;
@@ -379,6 +384,7 @@ static int m86_es705_boot_and_dhwpt(struct m86_machine_priv *priv,
 	struct spi_device *spi = priv->spi_dsp;
 	const struct firmware *fw;
 	size_t offset, chunk;
+	ktime_t start;
 	u32 resp = 0;
 	int ret, retry;
 
@@ -402,6 +408,7 @@ static int m86_es705_boot_and_dhwpt(struct m86_machine_priv *priv,
 		goto out;
 	}
 
+	start = ktime_get();
 	m86_es705_init_hw(dev, priv);
 
 	ret = m86_es705_sbl_handshake(priv, dev);
@@ -435,7 +442,8 @@ static int m86_es705_boot_and_dhwpt(struct m86_machine_priv *priv,
 	ret = m86_es705_enable_dhwpt_sequence(priv, dev);
 	if (ret == 0) {
 		priv->es705_booted = true;
-		dev_info(dev, "ES705 booted with %zu-byte firmware\n", fw->size);
+		dev_info(dev, "ES705 booted with %zu-byte firmware in %lld ms\n",
+			 fw->size, ktime_ms_delta(ktime_get(), start));
 	}
 out:
 	release_firmware(fw);
