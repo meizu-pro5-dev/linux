@@ -1670,10 +1670,27 @@ static int exynos_ufs_probe(struct platform_device *pdev)
 		vops = drv_data->vops;
 
 	err = ufshcd_pltfrm_init(pdev, vops);
-	if (err)
+	if (err) {
 		dev_err(dev, "ufshcd_pltfrm_init() failed %d\n", err);
+		return err;
+	}
 
-	return err;
+	/*
+	 * DME_HIBER_ENTER right after START STOP UNIT to SLEEP or POWERDOWN
+	 * intermittently times out (-110), and the core enters Hibern8 for
+	 * every link-inactive level, including link-off. Keep the link
+	 * active: the vendor kernel defaults to SLEEP with the link active
+	 * at runtime and stops the HBA without Hibern8 for system sleep.
+	 * ufshcd_init() sets the defaults, so override them afterwards.
+	 */
+	if (drv_data && drv_data->opts & EXYNOS_UFS_OPT_BROKEN_H8_AFTER_SSU) {
+		struct ufs_hba *hba = platform_get_drvdata(pdev);
+
+		hba->rpm_lvl = UFS_PM_LVL_2;
+		hba->spm_lvl = UFS_PM_LVL_2;
+	}
+
+	return 0;
 }
 
 static int exynos_ufs_remove(struct platform_device *pdev)
@@ -1761,7 +1778,8 @@ static const struct exynos_ufs_drv_data exynos_ufs_drvs = {
 				  EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL |
 				  EXYNOS_UFS_OPT_BROKEN_RX_SEL_IDX |
 				  EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB |
-				  EXYNOS_UFS_OPT_USE_SW_HIBERN8_TIMER,
+				  EXYNOS_UFS_OPT_USE_SW_HIBERN8_TIMER |
+				  EXYNOS_UFS_OPT_BROKEN_H8_AFTER_SSU,
 	.drv_init		= exynos7_ufs_drv_init,
 	.pre_link		= exynos7_ufs_pre_link,
 	.post_link		= exynos7_ufs_post_link,
