@@ -14,6 +14,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interconnect.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -785,6 +786,47 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	}
 }
 
+/*
+ * Stop the i80 output only after the frame in flight has been sent.
+ * Gating the clocks mid-frame leaves the window DMA suspended on the old
+ * framebuffer; once the compositor frees it, the next atomic_enable
+ * resumes the fetch from an unmapped IOVA and the SYSMMU faults forever.
+ * Same sequence as the vendor decon_reg_stop() for command mode.
+ */
+static void decon_i80_stop(struct decon_context *ctx)
+{
+	u32 val;
+	int ret;
+
+	val = readl(ctx->regs + TRIGCON);
+	val &= ~(TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
+		 TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_SWTRIGCMD_I80_RGB);
+	writel(val, ctx->regs + TRIGCON);
+
+	if (!(readl(ctx->regs + VIDCON0) & VIDCON0_DECON_STOP_STATUS))
+		return;
+
+	ret = readl_poll_timeout(ctx->regs + VIDCON1(0), val,
+				 !VIDCON1_LINECNT_GET(val) &&
+				 (val & VIDCON1_VSTATUS_MASK) == VIDCON1_VSTATUS_IDLE,
+				 10, 50 * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(ctx->dev, "frame still in flight at stop: VIDCON1 0x%08x\n",
+			 val);
+
+	val = readl(ctx->regs + VIDCON0);
+	val &= ~(VIDCON0_ENVID | VIDCON0_ENVID_F);
+	writel(val, ctx->regs + VIDCON0);
+	writel(readl(ctx->regs + DECON_UPDATE) | DECON_UPDATE_STANDALONE_F,
+	       ctx->regs + DECON_UPDATE);
+
+	ret = readl_poll_timeout(ctx->regs + VIDCON0, val,
+				 !(val & VIDCON0_DECON_STOP_STATUS),
+				 10, 20 * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(ctx->dev, "DECON did not stop: VIDCON0 0x%08x\n", val);
+}
+
 static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
@@ -817,6 +859,9 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	decon_disable_te_irq_nosync(ctx);
 	if (ctx->te_irq > 0)
 		synchronize_irq(ctx->te_irq);
+
+	if (ctx->i80_if)
+		decon_i80_stop(ctx);
 
 	pm_runtime_put_sync(ctx->dev);
 

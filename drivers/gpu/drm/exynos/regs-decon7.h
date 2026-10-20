@@ -263,6 +263,8 @@
 /* VIDCON1 */
 #define VIDCON1(_x)				(0x0600 + ((_x) * 0x50))
 #define VIDCON1_LINECNT_GET(_v)			(((_v) >> 17) & 0x1fff)
+#define VIDCON1_VSTATUS_MASK			(0x7 << 13)
+#define VIDCON1_VSTATUS_IDLE			(0x0 << 13)
 #define VIDCON1_VCLK_MASK			(0x3 << 9)
 #define VIDCON1_VCLK_HOLD			(0x0 << 9)
 #define VIDCON1_VCLK_RUN			(0x1 << 9)
