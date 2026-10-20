@@ -542,9 +542,12 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   stage="MIF-floor";
   ret=bus_floor(d,r->mif);
   if(ret) {
-   dev_warn_ratelimited(d->dev, "GPU MIF floor not met (%u kHz), deferring up-switch\n", r->mif);
+   /* Deferral is not a failure: keep the old rate and retry on the next
+    * poll. -EAGAIN made devfreq_monitor() dev_err() every 50 ms, and the
+    * serial console write blocks CPU0 IRQs (~5 ms/line), starving I2S DMA. */
+   dev_dbg(d->dev, "GPU MIF floor not met (%u kHz), deferring up-switch\n", r->mif);
    *freq = old;
-   ret = -EAGAIN;
+   ret = 0;
    goto put;
   }
   {
@@ -559,9 +562,9 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    stage="INT-floor";
    ret=pro5_topc_int_always_on_floor(&int_rates,eff_int_qos);
    if(ret) {
-    dev_warn_ratelimited(d->dev,"GPU INT floor not met (%u kHz), deferring up-switch\n", eff_int_qos);
+    dev_dbg(d->dev,"GPU INT floor not met (%u kHz), deferring up-switch\n", eff_int_qos);
     *freq = old;
-    ret = -EAGAIN;
+    ret = 0;
     goto put;
    }
   }
