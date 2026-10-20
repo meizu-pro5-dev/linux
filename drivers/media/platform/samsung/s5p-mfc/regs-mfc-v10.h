@@ -53,6 +53,8 @@
 #define MAX_FW_SIZE_V10		(SZ_1M)
 #define MAX_CPB_SIZE_V10	(3 * SZ_1M)
 #define MFC_VERSION_V10		0xA0
+/* MFCv9 uses the v10 map without MFC_CLOCK_OFF/MFC_STATE */
+#define MFC_VERSION_V9		0x90
 #define MFC_NUM_PORTS_V10	1
 
 /* MFCv10 codec defines*/

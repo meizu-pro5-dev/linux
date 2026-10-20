@@ -12,6 +12,7 @@
 #include <linux/pm_runtime.h>
 #include "s5p_mfc_common.h"
 #include "s5p_mfc_debug.h"
+#include "s5p_mfc_iommu.h"
 #include "s5p_mfc_pm.h"
 
 static struct s5p_mfc_pm *pm;
@@ -91,6 +92,12 @@ int s5p_mfc_power_on(void)
 			goto err;
 		}
 	}
+
+	/*
+	 * Exynos7 SYSMMUs stay bypassed until the master reports ready;
+	 * do it here, with the MFC domain and clocks up.
+	 */
+	exynos_iommu_master_ready(pm->device);
 
 	/* prepare for software clock gating */
 	clk_disable(pm->clock_gate);

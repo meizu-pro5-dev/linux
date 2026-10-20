@@ -774,19 +774,23 @@ void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq);
 #define IS_MFCV6_PLUS(dev)	(dev->variant->version >= 0x60 ? 1 : 0)
 #define IS_MFCV7_PLUS(dev)	(dev->variant->version >= 0x70 ? 1 : 0)
 #define IS_MFCV8_PLUS(dev)	(dev->variant->version >= 0x80 ? 1 : 0)
+#define IS_MFCV9_PLUS(dev)	(dev->variant->version >= 0x90 ? 1 : 0)
 #define IS_MFCV10(dev)		(dev->variant->version >= 0xA0 ? 1 : 0)
-#define FW_HAS_E_MIN_SCRATCH_BUF(dev) (IS_MFCV10(dev))
+#define FW_HAS_E_MIN_SCRATCH_BUF(dev) (IS_MFCV9_PLUS(dev))
 
 #define MFC_V5_BIT	BIT(0)
 #define MFC_V6_BIT	BIT(1)
 #define MFC_V7_BIT	BIT(2)
 #define MFC_V8_BIT	BIT(3)
+#define MFC_V9_BIT	BIT(4)
 #define MFC_V10_BIT	BIT(5)
 
 #define MFC_V5PLUS_BITS		(MFC_V5_BIT | MFC_V6_BIT | MFC_V7_BIT | \
-					MFC_V8_BIT | MFC_V10_BIT)
+					MFC_V8_BIT | MFC_V9_BIT | MFC_V10_BIT)
 #define MFC_V6PLUS_BITS		(MFC_V6_BIT | MFC_V7_BIT | MFC_V8_BIT | \
+					MFC_V9_BIT | MFC_V10_BIT)
+#define MFC_V7PLUS_BITS		(MFC_V7_BIT | MFC_V8_BIT | MFC_V9_BIT | \
 					MFC_V10_BIT)
-#define MFC_V7PLUS_BITS		(MFC_V7_BIT | MFC_V8_BIT | MFC_V10_BIT)
+#define MFC_V9PLUS_BITS		(MFC_V9_BIT | MFC_V10_BIT)
 
 #endif /* S5P_MFC_COMMON_H_ */

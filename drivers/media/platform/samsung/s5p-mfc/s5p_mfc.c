@@ -1210,8 +1210,22 @@ static int s5p_mfc_configure_common_memory(struct s5p_mfc_dev *mfc_dev)
 	if (!mfc_dev->mem_bitmap)
 		return -ENOMEM;
 
-	mfc_dev->mem_virt = dma_alloc_coherent(dev, mem_size,
-					       &mfc_dev->mem_base, GFP_KERNEL);
+	if (exynos_is_iommu_available(dev) && IS_MFCV9_PLUS(mfc_dev)) {
+		/*
+		 * The IOVA allocator works top-down; cap the limit so the
+		 * firmware block lands at S5P_MFC_IOMMU_FW_BASE and every
+		 * later buffer is allocated above the RISC base address.
+		 */
+		dev->bus_dma_limit = S5P_MFC_IOMMU_FW_BASE + mem_size - 1;
+		mfc_dev->mem_virt = dma_alloc_coherent(dev, mem_size,
+						       &mfc_dev->mem_base,
+						       GFP_KERNEL);
+		dev->bus_dma_limit = S5P_MFC_IOMMU_FW_BASE + SZ_256M - 1;
+	} else {
+		mfc_dev->mem_virt = dma_alloc_coherent(dev, mem_size,
+						       &mfc_dev->mem_base,
+						       GFP_KERNEL);
+	}
 	if (!mfc_dev->mem_virt) {
 		bitmap_free(mfc_dev->mem_bitmap);
 		dev_err(dev, "failed to preallocate %ld MiB for the firmware and context buffers\n",
@@ -1660,6 +1674,16 @@ static struct s5p_mfc_variant mfc_drvdata_v10 = {
 	.fw_name[0]     = "s5p-mfc-v10.fw",
 };
 
+static struct s5p_mfc_variant mfc_drvdata_v9 = {
+	.version	= MFC_VERSION_V9,
+	.version_bit	= MFC_V9_BIT,
+	.port_num	= MFC_NUM_PORTS_V10,
+	.buf_size	= &buf_size_v10,
+	.fw_name[0]	= "s5p-mfc-v9.fw",
+	.clk_names	= {"pclk", "aclk", "aclk_lh0", "aclk_lh1"},
+	.num_clocks	= 4,
+};
+
 static const struct of_device_id exynos_mfc_match[] = {
 	{
 		.compatible = "samsung,mfc-v5",
@@ -1679,6 +1703,9 @@ static const struct of_device_id exynos_mfc_match[] = {
 	}, {
 		.compatible = "samsung,exynos5433-mfc",
 		.data = &mfc_drvdata_v8_5433,
+	}, {
+		.compatible = "samsung,mfc-v9",
+		.data = &mfc_drvdata_v9,
 	}, {
 		.compatible = "samsung,mfc-v10",
 		.data = &mfc_drvdata_v10,
