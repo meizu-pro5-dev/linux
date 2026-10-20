@@ -13,6 +13,7 @@
 #define S5P_MFC_COMMON_H_
 
 #include <linux/platform_device.h>
+#include <linux/workqueue.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -578,6 +579,8 @@ struct s5p_mfc_codec_ops {
  *			completely or not
  * @bank1:		handle to memory allocated for temporary buffers from
  *			memory bank 1
+ * @enc_buf_work:	regrows bank1 once the encoder minimum scratch size
+ *			is known
  * @bank2:		handle to memory allocated for temporary buffers from
  *			memory bank 2
  * @capture_state:	state of the capture buffers queue
@@ -665,6 +668,7 @@ struct s5p_mfc_ctx {
 	unsigned int head_processed;
 
 	struct s5p_mfc_priv_buf bank1;
+	struct work_struct enc_buf_work;
 	struct s5p_mfc_priv_buf bank2;
 
 	enum s5p_mfc_queue_state capture_state;

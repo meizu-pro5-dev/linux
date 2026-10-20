@@ -1179,9 +1179,16 @@ static int enc_post_seq_start(struct s5p_mfc_ctx *ctx)
 		if (FW_HAS_E_MIN_SCRATCH_BUF(dev)) {
 			ctx->scratch_buf_size = s5p_mfc_hw_call(dev->mfc_ops,
 					get_e_min_scratch_buf_size, dev);
-			ctx->bank1.size += ctx->scratch_buf_size;
+			/*
+			 * bank1 was sized at REQBUFS without the scratch
+			 * buffer and the final DPB count; regrow it outside
+			 * of interrupt context before INIT_BUFS.
+			 */
+			ctx->state = MFCINST_HEAD_PARSED;
+			schedule_work(&ctx->enc_buf_work);
+		} else {
+			ctx->state = MFCINST_HEAD_PRODUCED;
 		}
-		ctx->state = MFCINST_HEAD_PRODUCED;
 	}
 
 	return 0;
@@ -2693,9 +2700,34 @@ void s5p_mfc_enc_ctrls_delete(struct s5p_mfc_ctx *ctx)
 		ctx->ctrls[i] = NULL;
 }
 
+static void s5p_mfc_enc_buf_work(struct work_struct *work)
+{
+	struct s5p_mfc_ctx *ctx = container_of(work, struct s5p_mfc_ctx,
+					       enc_buf_work);
+	struct s5p_mfc_dev *dev = ctx->dev;
+	int ret;
+
+	mutex_lock(&dev->mfc_mutex);
+	s5p_mfc_hw_call(dev->mfc_ops, release_codec_buffers, ctx);
+	ret = s5p_mfc_hw_call(dev->mfc_ops, alloc_codec_buffers, ctx);
+	mutex_unlock(&dev->mfc_mutex);
+	if (ret) {
+		mfc_err("Failed to reallocate encoding buffers\n");
+		ctx->state = MFCINST_ERROR;
+		return;
+	}
+
+	ctx->state = MFCINST_HEAD_PRODUCED;
+	if (s5p_mfc_ctx_ready(ctx))
+		set_work_bit_irqsave(ctx);
+	s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
+}
+
 void s5p_mfc_enc_init(struct s5p_mfc_ctx *ctx)
 {
 	struct v4l2_format f;
+
+	INIT_WORK(&ctx->enc_buf_work, s5p_mfc_enc_buf_work);
 	f.fmt.pix_mp.pixelformat = DEF_SRC_FMT_ENC;
 	ctx->src_fmt = find_format(&f, MFC_FMT_RAW);
 	f.fmt.pix_mp.pixelformat = DEF_DST_FMT_ENC;

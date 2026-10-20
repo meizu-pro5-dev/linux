@@ -955,6 +955,8 @@ static int s5p_mfc_release(struct file *file)
 
 	/* if dev is null, do cleanup that doesn't need dev */
 	mfc_debug_enter();
+	if (ctx->type == MFCINST_ENCODER)
+		cancel_work_sync(&ctx->enc_buf_work);
 	if (dev)
 		mutex_lock(&dev->mfc_mutex);
 	vb2_queue_release(&ctx->vq_src);
