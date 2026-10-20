@@ -94,6 +94,14 @@
 		decon_iova_resv: decon-iova-reserved {
 			iommu-addresses = <&decon 0xe0000000 0x04200000>;
 		};
+
+		/*
+		 * MFC buffers must sit above the firmware block (RISC base,
+		 * 0x20000000); keep the IOVA allocator out of the range below.
+		 */
+		mfc_iova_resv: mfc-iova-reserved {
+			iommu-addresses = <&mfc 0x0 0x20000000>;
+		};
 	};
 
 	reg_vsys: regulator-vsys {
@@ -1277,6 +1285,19 @@
  * line is not wired in this DT. RTCCON CLKOUTEN[9] stays owned by m86-audio;
  * rtc-s3c only read-modify-writes RTCEN/CNTSEL/CLKRST/TICEN.
  */
+&mfc {
+	memory-region = <&mfc_iova_resv>;
+	status = "okay";
+};
+
+&sysmmu_mfc_0 {
+	status = "okay";
+};
+
+&sysmmu_mfc_1 {
+	status = "okay";
+};
+
 &rtc {
 	clocks = <&clock_ccore PCLK_RTC>, <&m86_rtc_32k>;
 	clock-names = "rtc", "rtc_src";

@@ -739,6 +739,46 @@
 			power-domains = <&pd_mfc>;
 		};
 
+		sysmmu_mfc_0: sysmmu@15200000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x15200000 0x1000>;
+			interrupts = <GIC_SPI 312 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_mfc CLK_ACLK_SMMU_MFC_0>,
+				 <&clock_mfc CLK_PCLK_SMMU_MFC_0>,
+				 <&clock_mfc CLK_ACLK_MFC>;
+			clock-names = "aclk", "pclk", "master";
+			power-domains = <&pd_mfc>;
+			#iommu-cells = <0>;
+			status = "disabled";
+		};
+
+		sysmmu_mfc_1: sysmmu@15210000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x15210000 0x1000>;
+			interrupts = <GIC_SPI 315 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_mfc CLK_ACLK_SMMU_MFC_1>,
+				 <&clock_mfc CLK_PCLK_SMMU_MFC_1>,
+				 <&clock_mfc CLK_ACLK_MFC>;
+			clock-names = "aclk", "pclk", "master";
+			power-domains = <&pd_mfc>;
+			#iommu-cells = <0>;
+			status = "disabled";
+		};
+
+		mfc: video-codec@152e0000 {
+			compatible = "samsung,mfc-v9";
+			reg = <0x152e0000 0x10000>;
+			interrupts = <GIC_SPI 320 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_mfc CLK_PCLK_MFC>,
+				 <&clock_mfc CLK_ACLK_MFC>,
+				 <&clock_mfc CLK_ACLK_LH_MFC_0>,
+				 <&clock_mfc CLK_ACLK_LH_MFC_1>;
+			clock-names = "pclk", "aclk", "aclk_lh0", "aclk_lh1";
+			power-domains = <&pd_mfc>;
+			iommus = <&sysmmu_mfc_0>, <&sysmmu_mfc_1>;
+			status = "disabled";
+		};
+
 		clock_mscl: clock-controller@150d0000 {
 			compatible = "samsung,exynos7-clock-mscl";
 			reg = <0x150d0000 0x1000>;
