@@ -56,6 +56,20 @@
 			no-map;
 		};
 
+		/*
+		 * Stock 3.10 allocates seclog (512 KiB), reset_reason (1 MiB) and
+		 * ramoops (2 MiB) top-down below 0xf9800000; seclog was observed
+		 * at 0xf9780000, which places the stock ramoops at 0xf9480000.
+		 */
+		ramoops@f9480000 {
+			compatible = "ramoops";
+			reg = <0x0 0xf9480000 0x0 0x00200000>;
+			record-size = <0x40000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x40000>;
+			no-map;
+		};
+
 		/* Observed on 860BCMT226FG; matches the original Recovery SECLOG. */
 		seclog@f9780000 {
 			reg = <0x0 0xf9780000 0x0 0x00080000>;
