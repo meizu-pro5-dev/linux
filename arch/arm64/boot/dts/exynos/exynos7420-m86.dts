@@ -17,6 +17,9 @@
 	compatible = "meizu,m86", "samsung,exynos7420", "samsung,exynos7";
 
 	aliases {
+		/* PMIC RTC keeps rtc0 for hctosys; the SoC RTC only provides alarms. */
+		rtc0 = &m86_pmic;
+		rtc1 = &rtc;
 		serial0 = &serial_2;
 		serial4 = &serial_4;
 		i2c2 = &hsi2c_2;
@@ -27,9 +30,16 @@
 		i2c5 = &i2c_pmic;
 	};
 
+	m86_rtc_32k: clock-rtc-32k {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <32768>;
+		clock-output-names = "m86_rtc_32k";
+	};
+
 	chosen {
 		stdout-path = "serial0:115200n8";
-		bootargs = "earlycon=exynos4210,0x14c30000 console=ttySAC0,115200n8 rdinit=/init maxcpus=8 clk_ignore_unused pd_ignore_unused loglevel=4 nokaslr no_console_suspend panic=5 oops=panic";
+		bootargs = "earlycon=exynos4210,0x14c30000 console=ttySAC0,115200n8 rdinit=/init maxcpus=8 clk_ignore_unused pd_ignore_unused loglevel=4 nokaslr panic=5 oops=panic";
 	};
 
 	/*
@@ -110,7 +120,7 @@
 		i2c-gpio,timeout-ms = <100>;
 		status = "okay";
 
-		pmic@66 {
+		m86_pmic: pmic@66 {
 			compatible = "samsung,s2mps15-pmic";
 			reg = <0x66>;
 			/* No PMIC IRQ: RTC read/write only, no alarm or wakeup. */
@@ -1260,6 +1270,17 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
 	};
+};
+
+/*
+ * SoC RTC alarm (GIC SPI 355) is the only RTC wake source: the S2MPS15 IRQ
+ * line is not wired in this DT. RTCCON CLKOUTEN[9] stays owned by m86-audio;
+ * rtc-s3c only read-modify-writes RTCEN/CNTSEL/CLKRST/TICEN.
+ */
+&rtc {
+	clocks = <&clock_ccore PCLK_RTC>, <&m86_rtc_32k>;
+	clock-names = "rtc", "rtc_src";
+	status = "okay";
 };
 
 &spi_3 {
