@@ -138,6 +138,7 @@ struct bcm_device {
 	int			irq;
 	bool			irq_active_low;
 	bool			irq_acquired;
+	bool			irq_wake_enabled;
 
 #ifdef CONFIG_PM
 	struct hci_uart		*hu;
@@ -839,10 +840,18 @@ static int bcm_suspend(struct device *dev)
 	if (pm_runtime_active(dev))
 		bcm_suspend_device(dev);
 
-	if (device_may_wakeup(dev) && bdev->irq > 0) {
+	/*
+	 * Only arm host-wake while HCI is up. With HCI down (e.g. rfkill
+	 * blocked) the controller stays powered and can pulse host-wake when
+	 * device-wake is dropped, ending s2idle within a second.
+	 */
+	if (device_may_wakeup(dev) && bdev->irq > 0 && bdev->hu->hdev &&
+	    test_bit(HCI_UP, &bdev->hu->hdev->flags)) {
 		error = enable_irq_wake(bdev->irq);
-		if (!error)
+		if (!error) {
+			bdev->irq_wake_enabled = true;
 			bt_dev_dbg(bdev, "BCM irq: enabled");
+		}
 	}
 
 unlock:
@@ -870,8 +879,9 @@ static int bcm_resume(struct device *dev)
 	if (!bdev->hu)
 		goto unlock;
 
-	if (device_may_wakeup(dev) && bdev->irq > 0) {
+	if (bdev->irq_wake_enabled) {
 		disable_irq_wake(bdev->irq);
+		bdev->irq_wake_enabled = false;
 		bt_dev_dbg(bdev, "BCM irq: disabled");
 	}
 
