@@ -117,6 +117,11 @@ void s5p_mfc_release_generic_buf(struct s5p_mfc_dev *dev,
 			      struct s5p_mfc_priv_buf *b)
 {
 	struct device *mem_dev = dev->mem_dev[b->ctx];
+
+	/* Encoders closed before INIT_BUFS never allocated bank1 */
+	if (!b->virt)
+		return;
+
 	dma_free_coherent(mem_dev, b->size, b->virt, b->dma);
 	b->virt = NULL;
 	b->dma = 0;
