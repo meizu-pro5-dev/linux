@@ -498,7 +498,6 @@ static int s5p_mfc_set_dec_stream_buffer_v6(struct s5p_mfc_ctx *ctx,
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	const struct s5p_mfc_regs *mfc_regs = dev->mfc_regs;
-	struct s5p_mfc_buf_size *buf_size = dev->variant->buf_size;
 
 	mfc_debug_enter();
 	mfc_debug(2, "inst_no: %d, buf_addr: 0x%08x,\n"
@@ -506,7 +505,8 @@ static int s5p_mfc_set_dec_stream_buffer_v6(struct s5p_mfc_ctx *ctx,
 		ctx->inst_no, buf_addr, strm_size, strm_size);
 	writel(strm_size, mfc_regs->d_stream_data_size);
 	writel(buf_addr, mfc_regs->d_cpb_buffer_addr);
-	writel(buf_size->cpb, mfc_regs->d_cpb_buffer_size);
+	/* The OUTPUT buffer may be smaller than the variant's maximum CPB */
+	writel(ctx->dec_src_buf_size, mfc_regs->d_cpb_buffer_size);
 	writel(start_num_byte, mfc_regs->d_cpb_buffer_offset);
 
 	mfc_debug_leave();
