@@ -1435,6 +1435,9 @@ static int s5p_mfc_set_enc_params_vp8(struct s5p_mfc_ctx *ctx)
 	}
 	reg |= (val & 0xF) << 3;
 	reg |= (p_vp8->num_ref & 0x2);
+	/* V4L2 VP8 is raw frames; MFC v9 wraps them in IVF by default */
+	if (IS_MFCV9_PLUS(dev))
+		reg |= BIT(12);
 	writel(reg, mfc_regs->e_vp8_options);
 
 	mfc_debug_leave();
