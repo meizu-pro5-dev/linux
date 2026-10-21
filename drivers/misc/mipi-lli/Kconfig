@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config MIPI_LLI
+	tristate "Exynos MIPI LLI host controller"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select EXYNOS_MIPI_LLI_MPHY
+	help
+	  MIPI Low Latency Interface controller of Exynos 7420, used as the
+	  shared-memory link to the Shannon 333 modem.
+
+config EXYNOS_MIPI_LLI_MPHY
+	tristate

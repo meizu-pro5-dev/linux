@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config SEC_MODEM_IF_V1
+	tristate "Samsung Shannon 333 modem interface (LLI)"
+	depends on MIPI_LLI && SPI && NET
+	help
+	  Samsung modem interface driver for the Shannon 333 CP on Exynos 7420:
+	  SPI bootloader download, MIPI-LLI shared memory IPC, character
+	  io devices (umts_*) and rmnet network interfaces.

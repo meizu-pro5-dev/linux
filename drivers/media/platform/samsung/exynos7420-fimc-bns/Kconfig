@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_EXYNOS7420_FIMC_BNS
+	tristate "Samsung Exynos7420 FIMC-BNS raw capture"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on HAS_DMA && OF
+	depends on VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select V4L2_FWNODE
+	select VIDEO_V4L2_SUBDEV_API
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Raw Bayer DMA capture through the FIMC-BNS (FIMC-LITE) blocks that
+	  follow the MIPI CSIS receivers on Exynos7420.

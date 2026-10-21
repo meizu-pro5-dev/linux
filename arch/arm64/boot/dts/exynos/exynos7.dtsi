@@ -494,6 +494,22 @@
 			status = "disabled";
 		};
 
+		spi_1: spi@14d30000 {
+			compatible = "samsung,exynos7-spi";
+			reg = <0x14d30000 0x100>;
+			interrupts = <GIC_SPI 465 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			samsung,spi-src-clk = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi1_bus>;
+			clocks = <&clock_peric1 PCLK_SPI1>,
+				 <&clock_peric1 SCLK_SPI1>;
+			clock-names = "spi", "spi_busclk0";
+			num-cs = <1>;
+			status = "disabled";
+		};
+
 		spi_3: spi@14d50000 {
 			compatible = "samsung,exynos7-spi";
 			reg = <0x14d50000 0x100>;
@@ -776,6 +792,157 @@
 			clock-names = "aclk", "pclk", "master";
 			power-domains = <&pd_mfc>;
 			#iommu-cells = <0>;
+			status = "disabled";
+		};
+
+		mipi_lli: mipi-lli@10f24000 {
+			compatible = "samsung,exynos-mipi-lli";
+			reg = <0x10f24000 0x4000>,
+			      <0x10f34000 0x4000>,
+			      <0x10050000 0x2000>,
+			      <0x105c0724 0x4>;
+			interrupts = <GIC_SPI 208 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 209 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_fsys0 ACLK_XIU_LLISFRX>,
+				 <&clock_fsys0 ACLK_AXIUS_LLI_BE>,
+				 <&clock_fsys0 ACLK_AXIUS_LLI_LL>,
+				 <&clock_fsys0 ACLK_AXIUS_LLISFRX_LLILL>,
+				 <&clock_fsys0 ACLK_AXIUS_LLISFRX_LLIBE>,
+				 <&clock_fsys0 ACLK_LLI_LL_INIT>,
+				 <&clock_fsys0 ACLK_LLI_LL_TARG>,
+				 <&clock_fsys0 ACLK_LLI_BE_INIT>,
+				 <&clock_fsys0 ACLK_LLI_BE_TARG>,
+				 <&clock_fsys0 ACLK_LLI_SVC_LOC>,
+				 <&clock_fsys0 ACLK_LLI_SVC_REM>,
+				 <&clock_fsys0 PHYCLK_LLI_TX0_SYMBOL_USER>,
+				 <&clock_fsys0 PHYCLK_LLI_RX0_SYMBOL_USER>,
+				 <&clock_fsys0 ACLK_XIU_MODEMX>,
+				 <&clock_fsys0 ACLK_COMBO_PHY_MODEM_PCS_PCLK>,
+				 <&clock_fsys0 SCLK_PHY_FSYS0>,
+				 <&clock_fsys0 SCLK_COMBO_PHY_MODEM_26M>,
+				 <&clock_fsys0 PCLK_ASYNC_COMBO_PHY_MODEM>;
+			clock-names = "aclk_xiu_llisfrx",
+				      "aclk_axius_lli_be", "aclk_axius_lli_ll",
+				      "aclk_axius_llisfrx_llill",
+				      "aclk_axius_llisfrx_llibe",
+				      "aclk_lli_ll_init", "aclk_lli_ll_targ",
+				      "aclk_lli_be_init", "aclk_lli_be_targ",
+				      "aclk_lli_svc_loc", "aclk_lli_svc_rem",
+				      "user_phyclk_lli_tx0_symbol",
+				      "user_phyclk_lli_rx0_symbol",
+				      "aclk_xiu_modemx",
+				      "aclk_combo_phy_modem_pcs_pclk",
+				      "sclk_phy_fsys0", "sclk_combo_phy_modem_26m",
+				      "pclk_async_combo_phy_modem";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
+			status = "disabled";
+
+			mipi_lli_mphy: mphy@10f20000 {
+				compatible = "samsung,exynos-mipi-lli-combo-mphy";
+				reg = <0x10f20000 0x4000>,
+				      <0x10ed0000 0x200>;
+				has_pma;
+			};
+		};
+
+		clock_cam0: clock-controller@144d0000 {
+			compatible = "samsung,exynos7-clock-cam0";
+			reg = <0x144d0000 0x1000>;
+			#clock-cells = <1>;
+			clocks = <&fin_pll>,
+				 <&clock_top0 CLK_ACLK_CAM0_CSIS0_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_BNSA_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_BNSB_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_CSIS1_174>,
+				 <&clock_top0 CLK_ACLK_CAM0_TREX_532>,
+				 <&clock_top0 CLK_ACLK_CAM0_NOCP_133>;
+			clock-names = "fin_pll", "aclk_cam0_csis0_690",
+				      "aclk_cam0_bnsa_690", "aclk_cam0_bnsb_690",
+				      "aclk_cam0_csis1_174", "aclk_cam0_trex_532",
+				      "aclk_cam0_nocp_133";
+			assigned-clocks =
+				<&clock_cam0 CLK_MOUT_ACLK_CAM0_CSIS0_USER>,
+				<&clock_cam0 CLK_MOUT_ACLK_CAM0_BNSA_USER>,
+				<&clock_cam0 CLK_MOUT_ACLK_CAM0_BNSB_USER>,
+				<&clock_cam0 CLK_MOUT_ACLK_CAM0_CSIS1_USER>,
+				<&clock_cam0 CLK_MOUT_ACLK_CAM0_TREX_USER>,
+				<&clock_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S2A_USER>,
+				<&clock_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS0_S4_USER>,
+				<&clock_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS1_S4_USER>,
+				<&clock_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS2_S4_USER>,
+				<&clock_cam0 CLK_MOUT_PHYCLK_RXBYTECLKHS3_S4_USER>;
+			assigned-clock-parents =
+				<&clock_top0 CLK_ACLK_CAM0_CSIS0_690>,
+				<&clock_top0 CLK_ACLK_CAM0_BNSA_690>,
+				<&clock_top0 CLK_ACLK_CAM0_BNSB_690>,
+				<&clock_top0 CLK_ACLK_CAM0_CSIS1_174>,
+				<&clock_top0 CLK_ACLK_CAM0_TREX_532>,
+				<&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A_PHY>,
+				<&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4_PHY>,
+				<&clock_cam0 CLK_PHYCLK_RXBYTECLKHS1_S4_PHY>,
+				<&clock_cam0 CLK_PHYCLK_RXBYTECLKHS2_S4_PHY>,
+				<&clock_cam0 CLK_PHYCLK_RXBYTECLKHS3_S4_PHY>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		fimc_bns_a: fimc-bns@14000000 {
+			compatible = "samsung,exynos7420-fimc-bns";
+			reg = <0x14000000 0x1000>;
+			interrupts = <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_ACLK_FIMC_BNS_A>,
+				 <&clock_cam0 CLK_PCLK_FIMC_BNS_A>,
+				 <&clock_cam0 CLK_ACLK_TREX_BNS_A>,
+				 <&clock_cam0 CLK_PCLK_ASYNCAPB_SOCP_BNS_A>,
+				 <&clock_cam0 CLK_CCLK_ASYNCAPB_SOCP_BNS_A>,
+				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>,
+				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
+				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		fimc_bns_b: fimc-bns@14010000 {
+			compatible = "samsung,exynos7420-fimc-bns";
+			reg = <0x14010000 0x1000>;
+			interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_ACLK_FIMC_BNS_B>,
+				 <&clock_cam0 CLK_PCLK_FIMC_BNS_B>,
+				 <&clock_cam0 CLK_ACLK_TREX_BNS_B>,
+				 <&clock_cam0 CLK_PCLK_ASYNCAPB_SOCP_BNS_B>,
+				 <&clock_cam0 CLK_CCLK_ASYNCAPB_SOCP_BNS_B>,
+				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>,
+				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
+				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		mipi_csis_0: csis@14020000 {
+			compatible = "samsung,exynos7420-mipi-csis";
+			reg = <0x14020000 0x1000>;
+			interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_PCLK_CSIS0>,
+				 <&clock_cam0 CLK_ACLK_CSIS0>,
+				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
+			clock-names = "pclk", "wrap", "phy";
+			clock-frequency = <532000000>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		mipi_csis_1: csis@14030000 {
+			compatible = "samsung,exynos7420-mipi-csis";
+			reg = <0x14030000 0x1000>;
+			interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_PCLK_CSIS1>,
+				 <&clock_cam0 CLK_ACLK_CSIS1>,
+				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
+			clock-names = "pclk", "wrap", "phy";
+			clock-frequency = <266000000>;
+			power-domains = <&pd_cam0>;
 			status = "disabled";
 		};
 

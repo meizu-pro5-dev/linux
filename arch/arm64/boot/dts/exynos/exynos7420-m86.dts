@@ -61,12 +61,18 @@
 		#size-cells = <2>;
 		ranges;
 
+		/* MIPI-LLI AP<->CP shared IPC memory (stock 3.10 mipi_lli_reserved) */
+		modem_shmem: mipi-lli@e1000000 {
+			reg = <0x0 0xe1000000 0x0 0x00800000>;
+			no-map;
+		};
+
 		/*
 		 * Preserves only the bootloader display handoff buffer (through 0xe4800000).
-		 * Reclaimed: vendor-log (32 MiB) and legacy modem/media/video (335.5 MiB).
+		 * Reclaimed: vendor-log (32 MiB) and legacy media/video (335.5 MiB).
 		 */
-		vendor-reserved@e1000000 {
-			reg = <0x0 0xe1000000 0x0 0x03800000>;
+		vendor-reserved@e1800000 {
+			reg = <0x0 0xe1800000 0x0 0x03000000>;
 			no-map;
 		};
 
@@ -543,7 +549,7 @@
 		status = "okay";
 	};
 
-	i2c-vl6180 {
+	i2c_fcam: i2c-vl6180 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpc2 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&gpc2 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -1019,6 +1025,21 @@
 				regulator-max-microvolt = <1800000>;
 				regulator-boot-on;
 				regulator-always-on;
+			};
+			ldo15_reg: LDO15 {
+				regulator-name = "vdd18_bcam";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+			ldo20_reg: LDO20 {
+				regulator-name = "vdd18_fcam";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+			ldo26_reg: LDO26 {
+				regulator-name = "vdd11_bcam";
+				regulator-min-microvolt = <1150000>;
+				regulator-max-microvolt = <1150000>;
 			};
 		};
 	};
@@ -1722,4 +1743,567 @@
 
 &watchdog {
 	status = "okay";
+};
+
+/*
+ * Cameras: rear Sony IMX230 (4-lane CSIS0 -> FIMC-BNS-A) and front OmniVision
+ * OV5670 (2-lane CSIS1 -> FIMC-BNS-B). Raw Bayer only; the FIMC-IS ISP and its
+ * Cortex-A5 firmware are not used. Rails, resets and buses follow the vendor
+ * 3.10 fimc-is-device-imx230.c/ov5670.c power tables.
+ */
+/ {
+	bcam_vana: regulator-vcc25-bcam {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc25_bcam";
+		regulator-min-microvolt = <2500000>;
+		regulator-max-microvolt = <2500000>;
+		gpio = <&gpc0 5 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	fcam_vana: regulator-vcc28-fcam {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc28_fcam";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&gpc0 6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	fcam_vdig: regulator-vdd12-fcam {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd12_fcam";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&gpc3 5 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	i2c_bcam: i2c-bcam {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpc2 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpc2 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bcam_i2c_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		camera@1a {
+			compatible = "sony,imx230";
+			reg = <0x1a>;
+			clocks = <&clock_top0 CLK_SCLK_ISP_SENSOR0>;
+			clock-frequency = <24000000>;
+			vana-supply = <&bcam_vana>;
+			vdig-supply = <&ldo26_reg>;
+			vif-supply = <&ldo15_reg>;
+			reset-gpios = <&gpc1 1 GPIO_ACTIVE_LOW>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&bcam_mclk_pin &bcam_ctrl_pins>;
+
+			port {
+				imx230_out: endpoint {
+					remote-endpoint = <&csis0_in>;
+					data-lanes = <1 2 3 4>;
+					link-frequencies = /bits/ 64 <240000000 699428571
+									 360000000 199714286>;
+				};
+			};
+		};
+	};
+};
+
+&i2c_fcam {
+	camera@36 {
+		compatible = "ovti,ov5670";
+		reg = <0x36>;
+		clocks = <&clock_top0 CLK_SCLK_ISP_SENSOR1>;
+		clock-frequency = <24000000>;
+		avdd-supply = <&fcam_vana>;
+		dvdd-supply = <&fcam_vdig>;
+		dovdd-supply = <&ldo20_reg>;
+		reset-gpios = <&gpc0 7 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fcam_mclk_pin &fcam_ctrl_pins>;
+
+		port {
+			ov5670_out: endpoint {
+				remote-endpoint = <&csis1_in>;
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <432000000>;
+			};
+		};
+	};
+};
+
+&pinctrl_bus0 {
+	bcam_i2c_pins: bcam-i2c-pins {
+		samsung,pins = "gpc2-0", "gpc2-1";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	bcam_mclk_pin: bcam-mclk-pin {
+		samsung,pins = "gpd7-0";
+		samsung,pin-function = <2>;	/* CIS_CLK0 */
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	fcam_mclk_pin: fcam-mclk-pin {
+		samsung,pins = "gpd7-1";
+		samsung,pin-function = <2>;	/* CIS_CLK1 */
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	bcam_ctrl_pins: bcam-ctrl-pins {
+		samsung,pins = "gpc1-1";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	fcam_ctrl_pins: fcam-ctrl-pins {
+		samsung,pins = "gpc0-7";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+/*
+ * Feed the CAM0 aclks from the running CC_PLL/2 (532 MHz, as CAM0 TREX)
+ * instead of ISP_PLL/CAM_PLL, which are disabled at boot.
+ */
+&clock_top0 {
+	assigned-clocks = <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS0_690>,
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSA_690>,
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSB_690>,
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS1_174>;
+	assigned-clock-parents = <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>;
+};
+
+&clock_cam0 {
+	status = "okay";
+};
+
+&mipi_csis_0 {
+	phys = <&m86_dsim_phy 1>;
+	phy-names = "csis";
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			csis0_in: endpoint {
+				remote-endpoint = <&imx230_out>;
+				data-lanes = <1 2 3 4>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			csis0_out: endpoint {
+				remote-endpoint = <&bns_a_in>;
+			};
+		};
+	};
+};
+
+&mipi_csis_1 {
+	phys = <&m86_dsim_phy 2>;
+	phy-names = "csis";
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			csis1_in: endpoint {
+				remote-endpoint = <&ov5670_out>;
+				data-lanes = <1 2>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			csis1_out: endpoint {
+				remote-endpoint = <&bns_b_in>;
+			};
+		};
+	};
+};
+
+&fimc_bns_a {
+	status = "okay";
+
+	port {
+		bns_a_in: endpoint {
+			remote-endpoint = <&csis0_out>;
+		};
+	};
+};
+
+&fimc_bns_b {
+	status = "okay";
+
+	port {
+		bns_b_in: endpoint {
+			remote-endpoint = <&csis1_out>;
+		};
+	};
+};
+
+/*
+ * Shannon 333 (SS333) modem: CP bootloader over spi_1, IPC over MIPI-LLI
+ * shared memory at 0xe1000000. Values follow the stock m86-modem-s333.dtsi.
+ */
+&mipi_lli {
+	memory-region = <&modem_shmem>;
+	modem-name = "ss333";
+	status = "okay";
+
+	modems {
+		ss333 {
+			scrambler = <0>;
+			automode = <0>;
+		};
+	};
+};
+
+&mipi_lli_mphy {
+	modem-name = "ss333";
+
+	modems {
+		ss333 {
+			init-gear = <2 2 1>;
+			shd-refclk = <1>;
+		};
+	};
+};
+
+&spi_1 {
+	status = "okay";
+
+	modem-boot@0 {
+		compatible = "spi_boot_link";
+		reg = <0>;
+		spi-max-frequency = <100000>;
+
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+		};
+	};
+};
+
+/ {
+	modem-if {
+		compatible = "sec_modem,modem_pdata";
+		pinctrl-names = "default";
+		pinctrl-0 = <&m86_cp_on &m86_cp_reset &m86_cp_wakeup &m86_ap_status
+			     &m86_pda_active &m86_phone_active &m86_ap_wakeup
+			     &m86_cp_status &m86_ap_dump_noti>;
+
+		mif,name = "ss333";
+		mif,modem_net = <0>;
+		mif,modem_type = <8>;
+		mif,modem_attr = <0x01>;
+		mif,link_types = <0x200>;
+		mif,link_name = "lli";
+		mif,link_attrs = <0x39>;
+		mif,use_handover = <0>;
+		mif,ipc_version = <50>;
+		mif,num_iodevs = <16>;
+
+		mif,gpio_cp_on = <&gpg0 0 GPIO_ACTIVE_HIGH>;
+		mif,gpio_cp_reset = <&gpg1 2 GPIO_ACTIVE_HIGH>;
+		mif,gpio_cp_wakeup = <&gpr3 7 GPIO_ACTIVE_HIGH>;
+		mif,gpio_ap_status = <&gpr3 1 GPIO_ACTIVE_HIGH>;
+		mif,gpio_pda_active = <&gpc0 2 GPIO_ACTIVE_HIGH>;
+		mif,gpio_ap_dump_noti = <&gpc1 0 GPIO_ACTIVE_HIGH>;
+		mif,gpio_phone_active = <&gpa1 4 GPIO_ACTIVE_HIGH>;
+		mif,gpio_ap_wakeup = <&gpa0 6 GPIO_ACTIVE_HIGH>;
+		mif,gpio_cp_status = <&gpa0 4 GPIO_ACTIVE_HIGH>;
+
+		iodevs {
+			io_device_0 {
+				iod,name = "umts_ipc0";
+				iod,id = <245>;
+				iod,format = <0>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "RIL";
+				iod,ul_num_buffers = <16>;
+				iod,ul_buffer_size = <4096>;
+				iod,dl_num_buffers = <16>;
+				iod,dl_buffer_size = <4096>;
+			};
+			io_device_1 {
+				iod,name = "umts_ipc1";
+				iod,id = <246>;
+				iod,format = <0>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "RIL";
+				iod,ul_num_buffers = <16>;
+				iod,ul_buffer_size = <4096>;
+				iod,dl_num_buffers = <16>;
+				iod,dl_buffer_size = <4096>;
+			};
+			io_device_2 {
+				iod,name = "umts_rfs0";
+				iod,id = <41>;
+				iod,format = <1>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "RFS";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <32>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_3 {
+				iod,name = "umts_router";
+				iod,id = <21>;
+				iod,format = <1>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "Data Router";
+				iod,ul_num_buffers = <16>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <16>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_4 {
+				iod,name = "umts_dm0";
+				iod,id = <81>;
+				iod,format = <1>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "DIAG";
+				iod,ul_num_buffers = <4>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <128>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_5 {
+				iod,name = "umts_loopback";
+				iod,id = <82>;
+				iod,format = <1>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "LOOPBACK";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_6 {
+				iod,name = "rmnet0";
+				iod,id = <1>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_7 {
+				iod,name = "rmnet1";
+				iod,id = <2>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_8 {
+				iod,name = "rmnet2";
+				iod,id = <3>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_9 {
+				iod,name = "rmnet3";
+				iod,id = <4>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_10 {
+				iod,name = "rmnet4";
+				iod,id = <5>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_11 {
+				iod,name = "rmnet5";
+				iod,id = <6>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_12 {
+				iod,name = "rmnet6";
+				iod,id = <7>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_13 {
+				iod,name = "rmnet7";
+				iod,id = <8>;
+				iod,format = <1>;
+				iod,io_type = <1>;
+				iod,links = <0x200>;
+				iod,attrs = <0x82>;
+				iod,app = "NET";
+				iod,ul_num_buffers = <32>;
+				iod,ul_buffer_size = <2048>;
+				iod,dl_num_buffers = <256>;
+				iod,dl_buffer_size = <2048>;
+			};
+			io_device_14 {
+				iod,name = "multipdp";
+				iod,id = <0>;
+				iod,format = <3>;
+				iod,io_type = <2>;
+				iod,links = <0x200>;
+				iod,attrs = <0x02>;
+				iod,app = "RIL";
+			};
+			io_device_15 {
+				iod,name = "umts_boot0";
+				iod,id = <241>;
+				iod,format = <4>;
+				iod,io_type = <0>;
+				iod,links = <0x200>;
+				iod,attrs = <0x02>;
+				iod,app = "CBD";
+			};
+		};
+	};
+};
+
+&pinctrl_alive {
+	m86_cp_status: cp-status-pins {
+		samsung,pins = "gpa0-4";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	m86_ap_wakeup: ap-wakeup-pins {
+		samsung,pins = "gpa0-6";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	m86_phone_active: phone-active-pins {
+		samsung,pins = "gpa1-4";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_bus0 {
+	m86_pda_active: pda-active-pins {
+		samsung,pins = "gpc0-2";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-val = <0>;
+	};
+
+	m86_ap_dump_noti: ap-dump-noti-pins {
+		samsung,pins = "gpc1-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+
+	/* CP_ON and CP_RESET stay low until the modem driver powers the CP. */
+	m86_cp_on: cp-on-pins {
+		samsung,pins = "gpg0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-val = <0>;
+	};
+};
+
+&pinctrl_bus1 {
+	m86_cp_reset: cp-reset-pins {
+		samsung,pins = "gpg1-2";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-val = <0>;
+	};
+};
+
+&pinctrl_fsys1 {
+	m86_ap_status: ap-status-pins {
+		samsung,pins = "gpr3-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-val = <0>;
+	};
+
+	m86_cp_wakeup: cp-wakeup-pins {
+		samsung,pins = "gpr3-7";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-val = <0>;
+	};
 };

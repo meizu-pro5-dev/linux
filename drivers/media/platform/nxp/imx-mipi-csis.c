@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
@@ -300,6 +301,7 @@ static const char * const mipi_csis_clk_id[] = {
 
 enum mipi_csis_version {
 	MIPI_CSIS_V3_3,
+	MIPI_CSIS_V3_4,		/* Samsung Exynos7420 CSIS0..3 */
 	MIPI_CSIS_V3_6_3,
 };
 
@@ -314,6 +316,7 @@ struct mipi_csis_device {
 	struct clk_bulk_data *clks;
 	struct reset_control *mrst;
 	struct regulator *mipi_phy_regulator;
+	struct phy *phy;
 	const struct mipi_csis_info *info;
 
 	struct v4l2_subdev sd;
@@ -522,7 +525,8 @@ static inline void mipi_csis_write(struct mipi_csis_device *csis, u32 reg,
 static void mipi_csis_enable_interrupts(struct mipi_csis_device *csis, bool on)
 {
 	mipi_csis_write(csis, MIPI_CSIS_INT_MSK, on ? 0xffffffff : 0);
-	mipi_csis_write(csis, MIPI_CSIS_DBG_INTR_MSK, on ? 0xffffffff : 0);
+	if (csis->info->version != MIPI_CSIS_V3_4)
+		mipi_csis_write(csis, MIPI_CSIS_DBG_INTR_MSK, on ? 0xffffffff : 0);
 }
 
 static void mipi_csis_sw_reset(struct mipi_csis_device *csis)
@@ -670,6 +674,10 @@ static void mipi_csis_set_params(struct mipi_csis_device *csis,
 	val &= ~MIPI_CSIS_CLK_CTRL_CLKGATE_EN_MSK;
 	mipi_csis_write(csis, MIPI_CSIS_CLK_CTRL, val);
 
+	/* The Exynos D-PHY keeps its reset-default bias/LP-RX tuning. */
+	if (csis->info->version == MIPI_CSIS_V3_4)
+		goto update_shadow;
+
 	mipi_csis_write(csis, MIPI_CSIS_DPHY_BCTRL_L,
 			MIPI_CSIS_DPHY_BCTRL_L_BIAS_REF_VOLT_715MV |
 			MIPI_CSIS_DPHY_BCTRL_L_BGR_CHOPPER_FREQ_3MHZ |
@@ -680,6 +688,7 @@ static void mipi_csis_set_params(struct mipi_csis_device *csis,
 			MIPI_CSIS_DPHY_BCTRL_L_B_DPHYCTRL(20000000));
 	mipi_csis_write(csis, MIPI_CSIS_DPHY_BCTRL_H, 0);
 
+update_shadow:
 	/* Update the shadow register. */
 	val = mipi_csis_read(csis, MIPI_CSIS_CMN_CTRL);
 	mipi_csis_write(csis, MIPI_CSIS_CMN_CTRL,
@@ -751,7 +760,8 @@ static irqreturn_t mipi_csis_irq_handler(int irq, void *dev_id)
 	u32 dbg_status;
 
 	status = mipi_csis_read(csis, MIPI_CSIS_INT_SRC);
-	dbg_status = mipi_csis_read(csis, MIPI_CSIS_DBG_INTR_SRC);
+	dbg_status = csis->info->version == MIPI_CSIS_V3_4 ? 0 :
+		     mipi_csis_read(csis, MIPI_CSIS_DBG_INTR_SRC);
 
 	spin_lock_irqsave(&csis->slock, flags);
 
@@ -768,7 +778,8 @@ static irqreturn_t mipi_csis_irq_handler(int irq, void *dev_id)
 	spin_unlock_irqrestore(&csis->slock, flags);
 
 	mipi_csis_write(csis, MIPI_CSIS_INT_SRC, status);
-	mipi_csis_write(csis, MIPI_CSIS_DBG_INTR_SRC, dbg_status);
+	if (csis->info->version != MIPI_CSIS_V3_4)
+		mipi_csis_write(csis, MIPI_CSIS_DBG_INTR_SRC, dbg_status);
 
 	return IRQ_HANDLED;
 }
@@ -779,6 +790,9 @@ static irqreturn_t mipi_csis_irq_handler(int irq, void *dev_id)
 
 static int mipi_csis_phy_enable(struct mipi_csis_device *csis)
 {
+	if (csis->info->version == MIPI_CSIS_V3_4)
+		return phy_power_on(csis->phy);
+
 	if (csis->info->version != MIPI_CSIS_V3_3)
 		return 0;
 
@@ -787,6 +801,9 @@ static int mipi_csis_phy_enable(struct mipi_csis_device *csis)
 
 static int mipi_csis_phy_disable(struct mipi_csis_device *csis)
 {
+	if (csis->info->version == MIPI_CSIS_V3_4)
+		return phy_power_off(csis->phy);
+
 	if (csis->info->version != MIPI_CSIS_V3_3)
 		return 0;
 
@@ -805,6 +822,11 @@ static void mipi_csis_phy_reset(struct mipi_csis_device *csis)
 
 static int mipi_csis_phy_init(struct mipi_csis_device *csis)
 {
+	if (csis->info->version == MIPI_CSIS_V3_4) {
+		csis->phy = devm_phy_get(csis->dev, "csis");
+		return PTR_ERR_OR_ZERO(csis->phy);
+	}
+
 	if (csis->info->version != MIPI_CSIS_V3_3)
 		return 0;
 
@@ -874,6 +896,9 @@ static int mipi_csis_dump_regs(struct mipi_csis_device *csis)
 		{ MIPI_CSIS_DBG_CTRL, "DBG_CTRL" },
 		{ MIPI_CSIS_FRAME_COUNTER_CH(0), "FRAME_COUNTER_CH0" },
 	};
+	/* Only the vendor-documented window up to ISP_RESOL_CH0 on Exynos. */
+	unsigned int num = csis->info->version == MIPI_CSIS_V3_4 ?
+			   9 : ARRAY_SIZE(registers);
 
 	unsigned int i;
 	u32 cfg;
@@ -883,7 +908,7 @@ static int mipi_csis_dump_regs(struct mipi_csis_device *csis)
 
 	dev_info(csis->dev, "--- REGISTERS ---\n");
 
-	for (i = 0; i < ARRAY_SIZE(registers); i++) {
+	for (i = 0; i < num; i++) {
 		cfg = mipi_csis_read(csis, registers[i].offset);
 		dev_info(csis->dev, "%14s: 0x%08x\n", registers[i].name, cfg);
 	}
@@ -1475,6 +1500,13 @@ static int mipi_csis_probe(struct platform_device *pdev)
 			goto err_unregister_all;
 	}
 
+	/*
+	 * Runtime PM owns the clocks from here on, so the CAM power domain can
+	 * be turned off while the receiver is idle.
+	 */
+	if (csis->info->version == MIPI_CSIS_V3_4 && pm_runtime_enabled(dev))
+		mipi_csis_clk_disable(csis);
+
 	dev_info(dev, "lanes: %d, freq: %u\n",
 		 csis->bus.num_data_lanes, csis->clk_frequency);
 
@@ -1517,6 +1549,12 @@ static const struct of_device_id mipi_csis_of_match[] = {
 		.compatible = "fsl,imx7-mipi-csi2",
 		.data = &(const struct mipi_csis_info){
 			.version = MIPI_CSIS_V3_3,
+			.num_clocks = 3,
+		},
+	}, {
+		.compatible = "samsung,exynos7420-mipi-csis",
+		.data = &(const struct mipi_csis_info){
+			.version = MIPI_CSIS_V3_4,
 			.num_clocks = 3,
 		},
 	}, {

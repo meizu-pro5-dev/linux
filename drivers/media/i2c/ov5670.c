@@ -18,6 +18,7 @@
 #include <media/v4l2-fwnode.h>
 
 #define OV5670_XVCLK_FREQ		19200000
+#define OV5670_XVCLK_FREQ_24MHZ		24000000
 
 #define OV5670_REG_CHIP_ID		0x300a
 #define OV5670_CHIP_ID			0x005670
@@ -156,6 +157,25 @@ static const struct ov5670_reg mipi_data_rate_840mbps[] = {
 	{0x030b, 0x00},
 	{0x030c, 0x00},
 	{0x030d, 0x26},
+	{0x030e, 0x00},
+	{0x030f, 0x06},
+	{0x0312, 0x01},
+	{0x3031, 0x0a},
+};
+
+/* PLL1/PLL2 for a 24 MHz XVCLK, as used by the Meizu PRO 5 front camera. */
+static const struct ov5670_reg mipi_data_rate_864mbps_24mhz[] = {
+	{0x0300, 0x04},
+	{0x0301, 0x00},
+	{0x0302, 0x6c},
+	{0x0303, 0x00},
+	{0x0304, 0x03},
+	{0x0305, 0x01},
+	{0x0306, 0x01},
+	{0x030a, 0x00},
+	{0x030b, 0x00},
+	{0x030c, 0x00},
+	{0x030d, 0x1e},
 	{0x030e, 0x00},
 	{0x030f, 0x06},
 	{0x0312, 0x01},
@@ -1772,6 +1792,20 @@ static const s64 link_freq_menu_items[] = {
 	OV5670_LINK_FREQ_422MHZ
 };
 
+#define OV5670_LINK_FREQ_432MHZ		432000000
+static const struct ov5670_link_freq_config link_freq_configs_24mhz[] = {
+	{
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mipi_data_rate_864mbps_24mhz),
+			.regs = mipi_data_rate_864mbps_24mhz,
+		}
+	}
+};
+
+static const s64 link_freq_menu_items_24mhz[] = {
+	OV5670_LINK_FREQ_432MHZ
+};
+
 /*
  * OV5670 sensor supports following resolutions with full FOV:
  * 4:3  ==> {2592x1944, 1296x972, 648x486}
@@ -1871,6 +1905,9 @@ struct ov5670 {
 
 	/* xvclk input clock */
 	struct clk *xvclk;
+	/* PLL settings and link frequencies for the xvclk rate */
+	const struct ov5670_link_freq_config *link_freq_configs;
+	const s64 *link_freq_menu_items;
 
 	/* Regulators */
 	struct regulator_bulk_data supplies[OV5670_NUM_SUPPLIES];
@@ -2121,13 +2158,13 @@ static int ov5670_init_controls(struct ov5670 *ov5670)
 	ov5670->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
 						   &ov5670_ctrl_ops,
 						   V4L2_CID_LINK_FREQ,
-						   0, 0, link_freq_menu_items);
+						   0, 0, ov5670->link_freq_menu_items);
 	if (ov5670->link_freq)
 		ov5670->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	/* By default, V4L2_CID_PIXEL_RATE is read only */
 	lanes_count = bus_mipi_csi2->num_data_lanes;
-	mipi_pixel_rate = OV5670_LINK_FREQ_422MHZ * 2 * lanes_count / 10;
+	mipi_pixel_rate = ov5670->link_freq_menu_items[0] * 2 * lanes_count / 10;
 
 	ov5670->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &ov5670_ctrl_ops,
 					       V4L2_CID_PIXEL_RATE,
@@ -2318,7 +2355,7 @@ static int ov5670_set_pad_format(struct v4l2_subdev *sd,
 		__v4l2_ctrl_s_ctrl(ov5670->link_freq, mode->link_freq_index);
 
 		lanes_count = bus_mipi_csi2->num_data_lanes;
-		link_freq = link_freq_menu_items[mode->link_freq_index];
+		link_freq = ov5670->link_freq_menu_items[mode->link_freq_index];
 		/* pixel_rate = link_freq * 2 * nr_of_lanes / bits_per_sample */
 		mipi_pixel_rate = div_s64(link_freq * 2 * lanes_count, 10);
 		__v4l2_ctrl_s_ctrl_int64(
@@ -2412,7 +2449,7 @@ static int ov5670_start_streaming(struct ov5670 *ov5670)
 
 	/* Setup PLL */
 	link_freq_index = ov5670->cur_mode->link_freq_index;
-	reg_list = &link_freq_configs[link_freq_index].reg_list;
+	reg_list = &ov5670->link_freq_configs[link_freq_index].reg_list;
 	ret = ov5670_write_reg_list(ov5670, reg_list);
 	if (ret) {
 		dev_err(&client->dev, "%s failed to set plls\n", __func__);
@@ -2701,7 +2738,13 @@ static int ov5670_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(ov5670->xvclk),
 				     "error getting clock\n");
 
-	if (input_clk != OV5670_XVCLK_FREQ) {
+	if (input_clk == OV5670_XVCLK_FREQ) {
+		ov5670->link_freq_configs = link_freq_configs;
+		ov5670->link_freq_menu_items = link_freq_menu_items;
+	} else if (input_clk == OV5670_XVCLK_FREQ_24MHZ) {
+		ov5670->link_freq_configs = link_freq_configs_24mhz;
+		ov5670->link_freq_menu_items = link_freq_menu_items_24mhz;
+	} else {
 		dev_err(&client->dev,
 			"Unsupported clock frequency %u\n", input_clk);
 		return -EINVAL;

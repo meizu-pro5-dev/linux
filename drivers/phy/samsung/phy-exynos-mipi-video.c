@@ -214,12 +214,40 @@ static const struct mipi_phy_device_desc exynos5433_mipi_phy = {
 	},
 };
 
-/* 7420 vendor helper enables both DSIM PHYs, never uses 5433 sysreg. */
+/*
+ * 7420 vendor helper enables both DSIM PHYs, never uses 5433 sysreg.
+ * PHY 0 is that DSIM pair. PHY 1 is CSIS0 on the M4S4 combo PHY shared with
+ * DSIM0 (PMU 0x70c), PHY 2 is CSIS1 on its own S2A PHY (PMU 0x714) released
+ * from reset through SYSREG 0x2930 bit 8.
+ */
+#define EXYNOS7420_SYSREG_MIPI_PHY_CON		0x2930
+
 static const struct mipi_phy_device_desc exynos7420_mipi_phy = {
 	.num_regmaps = 2,
 	.regmap_names = { "samsung,pmu-syscon", "samsung,disp-sysreg" },
-	.num_phys = 1,
+	.num_phys = 3,
 	.exynos7420_dsim_pair = true,
+	.phys = {
+		{
+			/* DSIM0 + DSIM1 pair, handled by exynos7420_dsim_pair_enable() */
+			.coupled_phy_id = EXYNOS_MIPI_PHY_ID_NONE,
+		}, {
+			/* CSIS0: M4S4 shared with DSIM0, never reset or powered off */
+			.coupled_phy_id = EXYNOS_MIPI_PHY_ID_DSIM0,
+			.enable_val = EXYNOS4_PHY_ENABLE,
+			.enable_reg = 0x070c,
+			.enable_map = EXYNOS_MIPI_REGMAP_PMU,
+		}, {
+			/* CSIS1 */
+			.coupled_phy_id = EXYNOS_MIPI_PHY_ID_NONE,
+			.enable_val = EXYNOS4_PHY_ENABLE,
+			.enable_reg = 0x0714,
+			.enable_map = EXYNOS_MIPI_REGMAP_PMU,
+			.resetn_val = BIT(8),
+			.resetn_reg = EXYNOS7420_SYSREG_MIPI_PHY_CON,
+			.resetn_map = EXYNOS_MIPI_REGMAP_DISP,
+		},
+	},
 };
 
 struct exynos_mipi_video_phy {
@@ -262,17 +290,48 @@ static int exynos7420_dsim_pair_enable(struct exynos_mipi_video_phy *state)
 	return 0;
 }
 
+static int exynos7420_csis_set_state(const struct exynos_mipi_phy_desc *data,
+				     struct exynos_mipi_video_phy *state,
+				     unsigned int on)
+{
+	struct regmap *pmu = state->regmaps[data->enable_map];
+	struct regmap *sysreg = state->regmaps[data->resetn_map];
+	int ret = 0;
+
+	spin_lock(&state->slock);
+	if (on) {
+		ret = regmap_update_bits(pmu, data->enable_reg,
+					 data->enable_val, data->enable_val);
+		if (!ret && data->resetn_val) {
+			regmap_update_bits(sysreg, data->resetn_reg,
+					   data->resetn_val, 0);
+			ret = regmap_update_bits(sysreg, data->resetn_reg,
+						 data->resetn_val,
+						 data->resetn_val);
+		}
+	} else if (data->coupled_phy_id == EXYNOS_MIPI_PHY_ID_NONE) {
+		ret = regmap_update_bits(pmu, data->enable_reg,
+					 data->enable_val, 0);
+	}
+	spin_unlock(&state->slock);
+
+	return ret;
+}
+
 static int __set_phy_state(const struct exynos_mipi_phy_desc *data,
 			   struct exynos_mipi_video_phy *state, unsigned int on)
 {
 	struct regmap *enable_map = state->regmaps[data->enable_map];
 	struct regmap *resetn_map = state->regmaps[data->resetn_map];
 
-	/* No CSI consumer is registered by this display-only provider. Keep the
-	 * shared bootloader PHY powered on off; ownership is not transferred.
+	/* Keep the shared bootloader DSIM PHY powered on off; ownership is not
+	 * transferred.
 	 */
-	if (state->exynos7420_dsim_pair)
+	if (state->exynos7420_dsim_pair && data == state->phys[0].data)
 		return on ? exynos7420_dsim_pair_enable(state) : 0;
+
+	if (state->exynos7420_dsim_pair)
+		return exynos7420_csis_set_state(data, state, on);
 
 	spin_lock(&state->slock);
 

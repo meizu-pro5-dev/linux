@@ -106,6 +106,16 @@ config VIDEO_IMX219
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx219.
 
+config VIDEO_IMX230
+	tristate "Sony IMX230 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Sony
+	  IMX230 21 Mpixel camera found on the Meizu PRO 5.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx230.
+
 config VIDEO_IMX258
 	tristate "Sony IMX258 sensor support"
 	help

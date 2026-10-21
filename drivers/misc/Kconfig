@@ -586,4 +586,6 @@ config M86_TSU6721
 	help
 	  Say Y here to enable TI TSU6721 MUIC USB routing for Meizu PRO 5.
 
+source "drivers/misc/mipi-lli/Kconfig"
+source "drivers/misc/modem_v1/Kconfig"
 endmenu
