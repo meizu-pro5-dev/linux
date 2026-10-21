@@ -92,22 +92,22 @@ static int s5p_mfc_alloc_codec_buffers_v6(struct s5p_mfc_ctx *ctx)
 			lcu_height = S5P_MFC_LCU_HEIGHT(ctx->img_height);
 			if (ctx->codec_mode != S5P_FIMV_CODEC_HEVC_ENC) {
 				ctx->luma_dpb_size =
-					ALIGN((mb_width * 16), 64)
+					ALIGN(ALIGN((mb_width * 16), 64)
 					* ALIGN((mb_height * 16), 32)
-						+ 64;
+						+ 64, 256);
 				ctx->chroma_dpb_size =
-					ALIGN((mb_width * 16), 64)
+					ALIGN(ALIGN((mb_width * 16), 64)
 							* (mb_height * 8)
-							+ 64;
+							+ 64, 256);
 			} else {
 				ctx->luma_dpb_size =
-					ALIGN((lcu_width * 32), 64)
+					ALIGN(ALIGN((lcu_width * 32), 64)
 					* ALIGN((lcu_height * 32), 32)
-						+ 64;
+						+ 64, 256);
 				ctx->chroma_dpb_size =
-					ALIGN((lcu_width * 32), 64)
+					ALIGN(ALIGN((lcu_width * 32), 64)
 							* (lcu_height * 16)
-							+ 64;
+							+ 64, 256);
 			}
 		} else {
 			ctx->luma_dpb_size = ALIGN((mb_width * mb_height) *
