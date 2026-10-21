@@ -1822,10 +1822,12 @@ static inline int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx)
 	/* Get the next source buffer */
 	temp_vb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
 	temp_vb->flags |= MFC_BUF_FLAG_USED;
+	/* D_STREAM_DATA_SIZE counts from D_CPB_BUFFER_OFFSET, not from 0 */
 	s5p_mfc_set_dec_stream_buffer_v6(ctx,
 		vb2_dma_contig_plane_dma_addr(&temp_vb->b->vb2_buf, 0),
 			ctx->consumed_stream,
-			temp_vb->b->vb2_buf.planes[0].bytesused);
+			temp_vb->b->vb2_buf.planes[0].bytesused -
+			ctx->consumed_stream);
 
 	dev->curr_ctx = ctx->num;
 	if (temp_vb->b->vb2_buf.planes[0].bytesused == 0) {
