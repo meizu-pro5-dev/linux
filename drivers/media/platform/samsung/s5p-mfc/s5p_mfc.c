@@ -600,6 +600,13 @@ static void s5p_mfc_handle_init_buffers(struct s5p_mfc_ctx *ctx,
 		} else {
 			ctx->dpb_flush_flag = 0;
 		}
+		/*
+		 * An encoder may already hold every buffer userspace will queue
+		 * before it sees output; nothing else would reschedule it.
+		 */
+		if (ctx->type == MFCINST_ENCODER && ctx->src_queue_cnt &&
+		    ctx->dst_queue_cnt)
+			set_work_bit_irqsave(ctx);
 		WARN_ON(test_and_clear_bit(0, &dev->hw_lock) == 0);
 
 		s5p_mfc_clock_off();
