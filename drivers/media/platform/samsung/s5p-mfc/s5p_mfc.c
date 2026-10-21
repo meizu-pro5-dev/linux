@@ -559,6 +559,11 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 				ctx->head_processed = 0;
 			else
 				ctx->head_processed = 1;
+		} else if ((ctx->codec_mode == S5P_MFC_CODEC_VP8_DEC ||
+			    ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC) &&
+			   !list_empty(&ctx->src_queue)) {
+			/* The header is the key frame: decode it, don't drop it */
+			ctx->head_processed = 0;
 		} else {
 			ctx->head_processed = 1;
 		}
