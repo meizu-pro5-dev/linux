@@ -1563,11 +1563,14 @@ static int s5p_mfc_set_enc_params_hevc(struct s5p_mfc_ctx *ctx)
 	writel(reg, mfc_regs->e_rc_config);
 
 	/* frame rate */
-	if (p->rc_frame) {
+	if (p->rc_frame && p->rc_framerate_num && p->rc_framerate_denom) {
 		reg = 0;
-		reg &= ~(0xFFFF << 16);
+		reg |= ((p->rc_framerate_num & 0xFFFF) << 16);
+		reg |= p->rc_framerate_denom & 0xFFFF;
+		writel(reg, mfc_regs->e_rc_frame_rate);
+	} else if (p->rc_frame) {
+		reg = 0;
 		reg |= ((p_hevc->rc_framerate) << 16);
-		reg &= ~(0xFFFF);
 		reg |= FRAME_DELTA_DEFAULT;
 		writel(reg, mfc_regs->e_rc_frame_rate);
 	}
