@@ -1719,3 +1719,7 @@
 &usbdrd_phy {
 	status = "okay";
 };
+
+&watchdog {
+	status = "okay";
+};
