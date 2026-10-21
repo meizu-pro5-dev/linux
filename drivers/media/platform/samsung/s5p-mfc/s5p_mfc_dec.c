@@ -427,6 +427,7 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	int ret = 0;
 	struct v4l2_pix_format_mplane *pix_mp;
 	struct s5p_mfc_buf_size *buf_size = dev->variant->buf_size;
+	unsigned int min_size;
 
 	mfc_debug_enter();
 	ret = vidioc_try_fmt(file, priv, f);
@@ -448,11 +449,15 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		ctx->src_fmt = find_format(f, MFC_FMT_DEC);
 		ctx->codec_mode = ctx->src_fmt->codec_mode;
 		mfc_debug(2, "The codec number is: %d\n", ctx->codec_mode);
+		/* A key frame larger than the buffer would be truncated */
+		min_size = max_t(unsigned int, DEF_CPB_SIZE,
+				 pix_mp->width * pix_mp->height * 3 / 4);
+		min_size = min_t(unsigned int, min_size, buf_size->cpb);
 		pix_mp->height = 0;
 		pix_mp->width = 0;
-		if (pix_mp->plane_fmt[0].sizeimage == 0)
+		if (pix_mp->plane_fmt[0].sizeimage < min_size)
 			pix_mp->plane_fmt[0].sizeimage = ctx->dec_src_buf_size =
-								DEF_CPB_SIZE;
+								min_size;
 		else if (pix_mp->plane_fmt[0].sizeimage > buf_size->cpb)
 			ctx->dec_src_buf_size = buf_size->cpb;
 		else
