@@ -2712,18 +2712,24 @@ static void s5p_mfc_enc_buf_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&dev->mfc_mutex);
+	/* STREAMOFF or close may have run since the header was parsed */
+	if (ctx->state != MFCINST_HEAD_PARSED) {
+		mutex_unlock(&dev->mfc_mutex);
+		return;
+	}
 	s5p_mfc_hw_call(dev->mfc_ops, release_codec_buffers, ctx);
 	ret = s5p_mfc_hw_call(dev->mfc_ops, alloc_codec_buffers, ctx);
-	mutex_unlock(&dev->mfc_mutex);
 	if (ret) {
 		mfc_err("Failed to reallocate encoding buffers\n");
 		ctx->state = MFCINST_ERROR;
+		mutex_unlock(&dev->mfc_mutex);
 		return;
 	}
 
 	ctx->state = MFCINST_HEAD_PRODUCED;
 	if (s5p_mfc_ctx_ready(ctx))
 		set_work_bit_irqsave(ctx);
+	mutex_unlock(&dev->mfc_mutex);
 	s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
 }
 
