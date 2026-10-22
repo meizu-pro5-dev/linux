@@ -983,7 +983,6 @@ PNAME(mout_sclk_uart1_user_p)	= { "fin_pll", "sclk_uart1" };
 PNAME(mout_sclk_uart2_user_p)	= { "fin_pll", "sclk_uart2" };
 PNAME(mout_sclk_uart3_user_p)	= { "fin_pll", "sclk_uart3" };
 PNAME(mout_sclk_spi0_user_p)		= { "fin_pll", "sclk_spi0" };
-PNAME(mout_sclk_spi1_user_p)		= { "fin_pll", "sclk_spi1" };
 PNAME(mout_sclk_spi2_user_p)		= { "fin_pll", "sclk_spi2" };
 PNAME(mout_sclk_spi3_user_p)		= { "fin_pll", "sclk_spi3" };
 PNAME(mout_sclk_spi4_user_p)		= { "fin_pll", "sclk_spi4" };
@@ -1002,8 +1001,6 @@ static const struct samsung_mux_clock peric1_mux_clks[] __initconst = {
 
 	MUX_F(0, "mout_sclk_spi0_user", mout_sclk_spi0_user_p,
 		MUX_SEL_PERIC11, 0, 1, CLK_SET_RATE_PARENT, 0),
-	MUX_F(0, "mout_sclk_spi1_user", mout_sclk_spi1_user_p,
-		MUX_SEL_PERIC11, 4, 1, CLK_SET_RATE_PARENT, 0),
 	MUX_F(0, "mout_sclk_spi2_user", mout_sclk_spi2_user_p,
 		MUX_SEL_PERIC11, 8, 1, CLK_SET_RATE_PARENT, 0),
 	MUX_F(0, "mout_sclk_spi3_user", mout_sclk_spi3_user_p,
@@ -1060,6 +1057,9 @@ static const struct samsung_gate_clock peric1_gate_clks[] __initconst = {
 		ENABLE_SCLK_PERIC10, 11, 0, 0),
 	GATE(SCLK_SPI0, "sclk_spi0_user", "mout_sclk_spi0_user",
 		ENABLE_SCLK_PERIC10, 12, CLK_SET_RATE_PARENT, 0),
+	/* USERMUX: MUX_SEL_PERIC11[4] selects sclk_spi1 while enabled. */
+	GATE(0, "mout_sclk_spi1_user", "sclk_spi1", MUX_SEL_PERIC11, 4,
+		CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_SPI1, "sclk_spi1_user", "mout_sclk_spi1_user",
 		ENABLE_SCLK_PERIC10, 13, CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_SPI2, "sclk_spi2_user", "mout_sclk_spi2_user",
@@ -1177,8 +1177,6 @@ PNAME(mout_phyclk_usbdrd300_udrd30_phyclk_user_p)	= { "fin_pll",
 				"phyclk_usbdrd300_udrd30_phyclock" };
 PNAME(mout_phyclk_usbdrd300_udrd30_pipe_pclk_user_p)	= { "fin_pll",
 				"phyclk_usbdrd300_udrd30_pipe_pclk" };
-PNAME(mout_phyclk_lli_tx0_user_p)	= { "fin_pll", "phyclk_lli_tx0" };
-PNAME(mout_phyclk_lli_rx0_user_p)	= { "fin_pll", "phyclk_lli_rx0" };
 
 /* fixed rate clocks used in the FSYS0 block */
 static const struct samsung_fixed_rate_clock fixed_rate_clks_fsys0[] __initconst = {
@@ -1220,10 +1218,6 @@ static const struct samsung_mux_clock fsys0_mux_clks[] __initconst = {
 		mout_phyclk_usbdrd300_udrd30_phyclk_user_p,
 		MUX_SEL_FSYS02, 28, 1),
 
-	MUX(0, "mout_phyclk_lli_rx0_user", mout_phyclk_lli_rx0_user_p,
-		MUX_SEL_FSYS03, 16, 1),
-	MUX(0, "mout_phyclk_lli_tx0_user", mout_phyclk_lli_tx0_user_p,
-		MUX_SEL_FSYS03, 20, 1),
 };
 
 static const struct samsung_div_clock fsys0_div_clks[] __initconst = {
@@ -1297,6 +1291,11 @@ static const struct samsung_gate_clock fsys0_gate_clks[] __initconst = {
 		ENABLE_SCLK_FSYS01, 16, 0, 0),
 	GATE(SCLK_COMBO_PHY_MODEM_26M, "sclk_combo_phy_modem_26m", "fin_pll",
 		ENABLE_SCLK_FSYS04, 8, 0, 0),
+	/* USERMUX: MUX_SEL_FSYS03[16]/[20] select the M-PHY symbol clocks. */
+	GATE(0, "mout_phyclk_lli_rx0_user", "phyclk_lli_rx0", MUX_SEL_FSYS03, 16,
+		0, 0),
+	GATE(0, "mout_phyclk_lli_tx0_user", "phyclk_lli_tx0", MUX_SEL_FSYS03, 20,
+		0, 0),
 	GATE(PHYCLK_LLI_RX0_SYMBOL_USER, "phyclk_lli_rx0_symbol_user",
 		"mout_phyclk_lli_rx0_user", ENABLE_SCLK_FSYS03, 16, 0, 0),
 	GATE(PHYCLK_LLI_TX0_SYMBOL_USER, "phyclk_lli_tx0_symbol_user",
@@ -1713,7 +1712,6 @@ static const char * const mout_aclk_cam0_bnsa_user_p[] = { "fin_pll", "aclk_cam0
 static const char * const mout_aclk_cam0_bnsb_user_p[] = { "fin_pll", "aclk_cam0_bnsb_690" };
 static const char * const mout_aclk_cam0_csis1_user_p[] = { "fin_pll", "aclk_cam0_csis1_174" };
 static const char * const mout_aclk_cam0_trex_user_p[] = { "fin_pll", "aclk_cam0_trex_532" };
-static const char * const mout_aclk_cam0_nocp_user_p[] = { "fin_pll", "aclk_cam0_nocp_133" };
 static const char * const mout_phyclk_hs0_s2a_user_p[] = { "fin_pll", "phyclk_rxbyteclkhs0_s2a" };
 static const char * const mout_phyclk_hs0_s4_user_p[] = { "fin_pll", "phyclk_rxbyteclkhs0_s4" };
 static const char * const mout_phyclk_hs1_s4_user_p[] = { "fin_pll", "phyclk_rxbyteclkhs1_s4" };
@@ -1731,8 +1729,6 @@ static const struct samsung_mux_clock cam0_mux_clks[] = {
 		mout_aclk_cam0_csis1_user_p, MUX_SEL_CAM00, 16, 1),
 	MUX(CLK_MOUT_ACLK_CAM0_TREX_USER, "mout_aclk_cam0_trex_user",
 		mout_aclk_cam0_trex_user_p, MUX_SEL_CAM00, 28, 1),
-	MUX(0, "mout_aclk_cam0_nocp_user", mout_aclk_cam0_nocp_user_p,
-		MUX_SEL_CAM01, 0, 1),
 	MUX(CLK_MOUT_PHYCLK_RXBYTECLKHS0_S2A_USER,
 		"mout_phyclk_rxbyteclkhs0_s2a_user", mout_phyclk_hs0_s2a_user_p,
 		MUX_SEL_CAM02, 0, 1),
@@ -1776,6 +1772,12 @@ static const struct samsung_gate_clock cam0_gate_clks[] = {
 		"mout_aclk_cam0_bnsa_user", ENABLE_ACLK_CAM00, 23, 0, 0),
 	GATE(CLK_ACLK_TREX_BNS_B, "aclk_trex_a_5x1_bns_b",
 		"mout_aclk_cam0_bnsb_user", ENABLE_ACLK_CAM00, 24, 0, 0),
+	/* USERMUX: MUX_SEL_CAM01[0] selects aclk_cam0_nocp_133 while enabled. */
+	GATE(0, "mout_aclk_cam0_nocp_user", "aclk_cam0_nocp_133", MUX_SEL_CAM01,
+		0, 0, 0),
+	/* CAM0 NoC-P: register path to the CSIS/BNS SFRs. */
+	GATE(0, "aclk_200_cam0_noc_p_cam0", "mout_aclk_cam0_nocp_user",
+		ENABLE_ACLK_CAM01, 28, CLK_IS_CRITICAL, 0),
 	GATE(CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0, "aclk_axi_lh_async_si_top_cam0",
 		"mout_aclk_cam0_trex_user", ENABLE_ACLK_CAM01, 10, 0, 0),
 	GATE(CLK_CCLK_ASYNCAPB_SOCP_BNS_A, "cclk_asyncapb_socp_fimc_bns_a",
