@@ -27,6 +27,7 @@
 		pinctrl8 = &pinctrl_bus1;
 		pinctrl9 = &pinctrl_aud;
 		spi0 = &spi_0;
+		spi1 = &spi_1;
 		spi3 = &spi_3;
 		spi4 = &spi_4;
 		tmuctrl0 = &tmuctrl_0;
