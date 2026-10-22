@@ -76,8 +76,8 @@ static int exynos_lli_get_clk_info(struct mipi_lli *lli)
 		IS_ERR(clks->sclk_combo_phy_modem_26m) ||
 		IS_ERR(clks->pclk_async_combo_phy_modem)) {
 		dev_err(lli->dev, "exynos_lli_get_clks - failed \
-			%lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx \
-			%lx %lx %lx %lx %lx %lx\n",
+			%d %d %d %d %d %d %d %d %d %d %d %d \
+			%d %d %d %d %d %d\n",
 			IS_ERR(clks->aclk_xiu_llisfrx),
 			IS_ERR(clks->aclk_axius_lli_be),
 			IS_ERR(clks->aclk_axius_lli_ll),

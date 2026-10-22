@@ -342,7 +342,7 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
 	pdata->gpio_cp_on = of_get_named_gpio(np, "mif,gpio_cp_on", 0);
 	if (!gpio_is_valid(pdata->gpio_cp_on)) {
 		mif_err("cp_on: Invalied gpio pins\n");
-		return -EINVAL;
+		return (int)pdata->gpio_cp_on;
 	}
 
 	mif_err("gpio_cp_on: %d\n", pdata->gpio_cp_on);
@@ -355,7 +355,7 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
 	pdata->gpio_cp_reset = of_get_named_gpio(np, "mif,gpio_cp_reset", 0);
 	if (!gpio_is_valid(pdata->gpio_cp_reset)) {
 		mif_err("cp_rst: Invalied gpio pins\n");
-		return -EINVAL;
+		return (int)pdata->gpio_cp_reset;
 	}
 
 	mif_err("gpio_cp_reset: %d\n", pdata->gpio_cp_reset);
@@ -368,7 +368,7 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
 	pdata->gpio_pda_active = of_get_named_gpio(np, "mif,gpio_pda_active", 0);
 	if (!gpio_is_valid(pdata->gpio_pda_active)) {
 		mif_err("pda_active: Invalied gpio pins\n");
-		return -EINVAL;
+		return (int)pdata->gpio_pda_active;
 	}
 
 	mif_err("gpio_pda_active: %d\n", pdata->gpio_pda_active);
@@ -381,7 +381,7 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
 	pdata->gpio_phone_active = of_get_named_gpio(np, "mif,gpio_phone_active", 0);
 	if (!gpio_is_valid(pdata->gpio_phone_active)) {
 		mif_err("phone_active: Invalied gpio pins\n");
-		return -EINVAL;
+		return (int)pdata->gpio_phone_active;
 	}
 
 	mif_err("gpio_phone_active: %d\n", pdata->gpio_phone_active);
@@ -397,7 +397,7 @@ static int __parse_dt_mandatory_gpio_pdata(struct device_node *np,
 	pdata->gpio_dump_noti = of_get_named_gpio(np, "mif,gpio_ap_dump_noti", 0);
 	if (!gpio_is_valid(pdata->gpio_dump_noti)) {
 		printk("phone_active: Invalied gpio pins\n");
-		return -EINVAL;
+		return (int)pdata->gpio_dump_noti;
 	}
 
 	mif_err("gpio_dump_noti: %d\n", pdata->gpio_dump_noti);
@@ -416,7 +416,9 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
 
 	/* GPIO_CP_OFF */
 	pdata->gpio_cp_off = of_get_named_gpio(np, "mif,gpio_cp_off", 0);
-	if (gpio_is_valid(pdata->gpio_cp_off)) {
+	if (!gpio_is_valid(pdata->gpio_cp_off))
+		pdata->gpio_cp_off = 0;
+	else {
 		mif_err("gpio_cp_off: %d\n", pdata->gpio_cp_off);
 		ret = gpio_request(pdata->gpio_cp_off, "CP_OFF");
 		if (ret)
@@ -428,7 +430,9 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
 	/* GPIO_CP_WAKEUP */
 	pdata->gpio_cp_wakeup = of_get_named_gpio(np,
 					"mif,gpio_cp_wakeup", 0);
-	if (gpio_is_valid(pdata->gpio_cp_wakeup)) {
+	if (!gpio_is_valid(pdata->gpio_cp_wakeup))
+		pdata->gpio_cp_wakeup = 0;
+	else {
 		mif_err("gpio_cp_wakeup: %d\n", pdata->gpio_cp_wakeup);
 		ret = gpio_request(pdata->gpio_cp_wakeup, "CP_WAKEUP");
 		if (ret)
@@ -441,7 +445,9 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
 	/* GPIO_AP_STATUS */
 	pdata->gpio_ap_status = of_get_named_gpio(np,
 					"mif,gpio_ap_status", 0);
-	if (gpio_is_valid(pdata->gpio_ap_status)) {
+	if (!gpio_is_valid(pdata->gpio_ap_status))
+		pdata->gpio_ap_status = 0;
+	else {
 		mif_err("gpio_ap_status: %d\n", pdata->gpio_ap_status);
 		ret = gpio_request(pdata->gpio_ap_status, "AP_STATUS");
 		if (ret)
@@ -453,7 +459,9 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
 	/* GPIO_AP_WAKEUP */
 	pdata->gpio_ap_wakeup = of_get_named_gpio(np,
 					"mif,gpio_ap_wakeup", 0);
-	if (gpio_is_valid(pdata->gpio_ap_wakeup)) {
+	if (!gpio_is_valid(pdata->gpio_ap_wakeup))
+		pdata->gpio_ap_wakeup = 0;
+	else {
 		mif_err("gpio_ap_wakeup: %d\n", pdata->gpio_ap_wakeup);
 		ret = gpio_request(pdata->gpio_ap_wakeup, "AP_WAKEUP");
 		if (ret)
@@ -465,7 +473,9 @@ static void __parse_dt_optional_gpio_pdata(struct device_node *np,
 	/* GPIO_CP_STATUS */
 	pdata->gpio_cp_status = of_get_named_gpio(np,
 					"mif,gpio_cp_status", 0);
-	if (gpio_is_valid(pdata->gpio_cp_status)) {
+	if (!gpio_is_valid(pdata->gpio_cp_status))
+		pdata->gpio_cp_status = 0;
+	else {
 		mif_err("gpio_cp_status: %d\n", pdata->gpio_cp_status);
 		ret = gpio_request(pdata->gpio_cp_status, "CP_STATUS");
 		if (ret)

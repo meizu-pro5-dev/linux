@@ -1120,7 +1120,9 @@ static int exynos_mipi_lli_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	exynos_lli_get_clk_info(lli);
+	ret = exynos_lli_get_clk_info(lli);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to get clocks\n");
 
 	exynos_lli_system_config(lli);
 
