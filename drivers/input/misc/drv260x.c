@@ -71,6 +71,7 @@
 #define DRV260X_LIB_SEL_HIZ_DIS		0
 
 /* Mode register */
+#define DRV260X_DEV_RESET			(1 << 7)
 #define DRV260X_STANDBY				(1 << 6)
 #define DRV260X_STANDBY_MASK		0x40
 #define DRV260X_INTERNAL_TRIGGER	0x00
@@ -628,6 +629,34 @@ out:
 	return ret;
 }
 
+/*
+ * The DRV260x is typically supplied from the battery and keeps its registers
+ * across a reboot. Return it to power-on defaults so that firmware or another
+ * OS which does not reset the chip does not inherit this driver's setup.
+ */
+static void drv260x_shutdown(struct i2c_client *client)
+{
+	struct drv260x_data *haptics = i2c_get_clientdata(client);
+	unsigned int val;
+	int error;
+
+	cancel_work_sync(&haptics->work);
+
+	gpiod_set_value(haptics->enable_gpio, 1);
+	/* Give the chip time to wake up */
+	usleep_range(1000, 1100);
+
+	error = regmap_write(haptics->regmap, DRV260X_MODE, DRV260X_DEV_RESET);
+	if (!error)
+		error = regmap_read_poll_timeout(haptics->regmap, DRV260X_MODE,
+						 val, !(val & DRV260X_DEV_RESET),
+						 1000, 20000);
+	if (error)
+		dev_warn(&client->dev, "device reset failed: %d\n", error);
+
+	gpiod_set_value(haptics->enable_gpio, 0);
+}
+
 static DEFINE_SIMPLE_DEV_PM_OPS(drv260x_pm_ops, drv260x_suspend, drv260x_resume);
 
 static const struct i2c_device_id drv260x_id[] = {
@@ -647,6 +676,7 @@ MODULE_DEVICE_TABLE(of, drv260x_of_match);
 
 static struct i2c_driver drv260x_driver = {
 	.probe		= drv260x_probe,
+	.shutdown	= drv260x_shutdown,
 	.driver		= {
 		.name	= "drv260x-haptics",
 		.of_match_table = drv260x_of_match,
