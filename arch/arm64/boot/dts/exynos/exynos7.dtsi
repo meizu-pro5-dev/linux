@@ -645,6 +645,7 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4040 0x20>;
 			#power-domain-cells = <0>;
+			power-domains = <&pd_cam1>;
 			label = "CAM0";
 		};
 
@@ -674,6 +675,7 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4140 0x20>;
 			#power-domain-cells = <0>;
+			power-domains = <&pd_isp1>, <&pd_cam0>, <&pd_cam1>;
 			label = "ISP0";
 		};
 
@@ -681,6 +683,7 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4180 0x20>;
 			#power-domain-cells = <0>;
+			power-domains = <&pd_cam1>;
 			label = "ISP1";
 		};
 
