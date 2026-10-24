@@ -667,6 +667,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&m86_hw_te_on>;
 		compatible = "samsung,exynos7420-mipi-dsi";
+		power-domains = <&pd_disp>;
 		reg = <0x0 0x13900000 0x0 0x1000>;
 		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 196 IRQ_TYPE_LEVEL_HIGH>;

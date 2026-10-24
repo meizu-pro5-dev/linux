@@ -352,6 +352,7 @@
 
 		serial_4: serial@11460000 {
 			compatible = "samsung,exynos4210-uart";
+			power-domains = <&pd_aud>;
 			reg = <0x11460000 0x100>;
 			interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&cmu_aud PCLK_UART>,
@@ -664,9 +665,10 @@
 			status = "okay";
 		};
 
-		pd_g3d: power-domain@105c40c0 {
+		/* G3D PMU block, as in the vendor DT and m86-gpu-dvfs (0x4100). */
+		pd_g3d: power-domain@105c4100 {
 			compatible = "samsung,exynos5433-pd";
-			reg = <0x105c40c0 0x20>;
+			reg = <0x105c4100 0x20>;
 			#power-domain-cells = <0>;
 			label = "G3D";
 		};
@@ -699,6 +701,13 @@
 			reg = <0x105c41c0 0x20>;
 			#power-domain-cells = <0>;
 			label = "MSCL";
+		};
+
+		pd_vpp: power-domain@105c41e0 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c41e0 0x20>;
+			#power-domain-cells = <0>;
+			label = "VPP";
 		};
 
 		rtc: rtc@10590000 {
@@ -793,6 +802,7 @@
 
 		adma: dma-controller@11420000 {
 			compatible = "arm,pl330", "arm,primecell";
+			power-domains = <&pd_aud>;
 			reg = <0x11420000 0x1000>;
 			interrupts = <GIC_SPI 97 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&cmu_aud ACLK_ADMA>;
@@ -802,6 +812,7 @@
 
 		i2s0: i2s@11440000 {
 			compatible = "samsung,exynos7-i2s";
+			power-domains = <&pd_aud>;
 			reg = <0x11440000 0x100>;
 			dmas = <&adma 0>, <&adma 2>;
 			dma-names = "tx", "rx";
@@ -842,6 +853,7 @@
 
 		sysmmu_disp_ro: sysmmu@13a00000 {
 			compatible = "samsung,exynos-sysmmu";
+			power-domains = <&pd_disp>;
 			reg = <0x13a00000 0x1000>;
 			interrupts = <GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&cmu_disp CLK_ACLK_DISP_RO_SYSMMU>,
@@ -853,6 +865,7 @@
 
 		sysmmu_disp_rw: sysmmu@13a10000 {
 			compatible = "samsung,exynos-sysmmu";
+			power-domains = <&pd_disp>;
 			reg = <0x13a10000 0x1000>;
 			interrupts = <GIC_SPI 179 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&cmu_disp CLK_ACLK_DISP_RW_SYSMMU>,
@@ -864,6 +877,7 @@
 
 		decon: decon@13930000 {
 			compatible = "samsung,exynos7-decon";
+			power-domains = <&pd_disp>;
 			reg = <0x13930000 0x10000>;
 			clocks = <&cmu_disp CLK_PCLK_DECON0>,
 				 <&cmu_disp CLK_ACLK_DECON0>,
