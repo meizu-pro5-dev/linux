@@ -262,6 +262,10 @@ CLK_OF_DECLARE(exynos7_clk_topc, "samsung,exynos7-clock-topc",
 	exynos7_clk_topc_init);
 
 /* Register Offset definitions for CMU_TOP0 (0x105D0000) */
+#define ISP_PLL_LOCK			0x0004
+#define CAM_PLL_LOCK			0x0008
+#define ISP_PLL_CON0			0x0110
+#define CAM_PLL_CON0			0x0120
 #define MUX_SEL_TOP00			0x0200
 #define MUX_SEL_TOP01			0x0204
 #define MUX_SEL_TOP03			0x020C
@@ -319,6 +323,10 @@ PNAME(mout_aclk_disp_400_p) = {"mout_top0_bus0_pll_user",
 	"ffac_top0_mfc_pll_div2"};
 
 static const unsigned long top0_clk_regs[] __initconst = {
+	ISP_PLL_LOCK,
+	CAM_PLL_LOCK,
+	ISP_PLL_CON0,
+	CAM_PLL_CON0,
 	MUX_SEL_TOP00,
 	MUX_SEL_TOP01,
 	MUX_SEL_TOP03,
@@ -482,7 +490,37 @@ static const struct samsung_fixed_factor_clock top0_fixed_factor_clks[] __initco
 	FFACTOR(0, "ffac_top0_mfc_pll_div2", "mout_top0_mfc_pll_user", 1, 2, 0),
 };
 
+/*
+ * ISP_PLL and CAM_PLL feed the camera block only. The bootloader leaves them
+ * running; with no consumer, clk_disable_unused() turns them off. Rates from
+ * the vendor exynos7420 clock driver.
+ */
+static const struct samsung_pll_rate_table isp_pll_24mhz_tbl[] __initconst = {
+	PLL_35XX_RATE(24 * MHZ, 590000000U, 295, 6, 1),
+	PLL_35XX_RATE(24 * MHZ, 588000000U, 98, 2, 1),
+	PLL_35XX_RATE(24 * MHZ, 558000000U, 93, 2, 1),
+	PLL_35XX_RATE(24 * MHZ, 552000000U, 92, 2, 1),
+	PLL_35XX_RATE(24 * MHZ, 432000000U, 144, 2, 2),
+	{},
+};
+
+static const struct samsung_pll_rate_table cam_pll_24mhz_tbl[] __initconst = {
+	PLL_35XX_RATE(24 * MHZ, 690000000U, 115, 2, 1),
+	PLL_35XX_RATE(24 * MHZ, 660000000U, 165, 3, 1),
+	PLL_35XX_RATE(24 * MHZ, 532000000U, 133, 3, 1),
+	{},
+};
+
+static const struct samsung_pll_clock top0_pll_clks[] __initconst = {
+	PLL(pll_1451x, 0, "fout_isp_pll", "fin_pll", ISP_PLL_LOCK,
+		ISP_PLL_CON0, isp_pll_24mhz_tbl),
+	PLL(pll_1451x, 0, "fout_cam_pll", "fin_pll", CAM_PLL_LOCK,
+		CAM_PLL_CON0, cam_pll_24mhz_tbl),
+};
+
 static const struct samsung_cmu_info top0_cmu_info __initconst = {
+	.pll_clks		= top0_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(top0_pll_clks),
 	.mux_clks		= top0_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(top0_mux_clks),
 	.div_clks		= top0_div_clks,
