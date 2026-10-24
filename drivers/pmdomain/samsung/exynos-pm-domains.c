@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/pm_domain.h>
 #include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
@@ -55,9 +56,6 @@ struct exynos7420_reg_bits {
 struct exynos7420_unused_pd {
 	const char *name;
 	u32 pmu_off;
-	/* Partner domain whose CMU registers are touched by async_clks. */
-	u32 dep_pmu_off;
-	const char *dep_name;
 	phys_addr_t lpi_busmaster_pa;
 	bool clear_a7is_option;
 	bool is_aud;
@@ -218,8 +216,6 @@ static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
 	{
 		.name = "pd-isp0",
 		.pmu_off = 0x4140,
-		.dep_pmu_off = 0x4040,
-		.dep_name = "CAM0",
 		.lpi_busmaster_pa = 0x146e0000,
 		.top_clks = exynos7420_top_clks_isp0,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
@@ -233,8 +229,6 @@ static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
 	{
 		.name = "pd-isp1",
 		.pmu_off = 0x4180,
-		.dep_pmu_off = 0x4060,
-		.dep_name = "CAM1",
 		.lpi_busmaster_pa = 0x147e0000,
 		.top_clks = exynos7420_top_clks_isp1,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
@@ -307,35 +301,60 @@ static int exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
 }
 
 /*
- * The ISP async clock registers live in CMU_CAM0/CMU_CAM1. Touching them while
- * the partner CAM power domain is off raises a fatal AXI SError, so only
- * program them when the partner PMU STATUS field reports all four power
- * switches on (STATUS[3:0] == 0xf).
+ * Serialises every CAM/ISP/MFC/MSCL power sequence: the async_clks of one
+ * domain sit in the CMU of another, so the owner's PMU STATUS must not change
+ * between the check in exynos7420_apply_async_clks() and the register write.
  */
-static bool exynos7420_dep_powered(void __iomem *pmu_base,
-				   const struct exynos7420_unused_pd *pd)
-{
-	if (!pd->dep_pmu_off)
-		return true;
+static DEFINE_MUTEX(exynos7420_pd_lock);
 
-	return (readl_relaxed(pmu_base + pd->dep_pmu_off + 0x4) & 0xf) == 0xf;
-}
+/* CMU blocks inside a gated power domain, keyed by their 64 KiB window. */
+static const struct {
+	phys_addr_t base;
+	u32 pmu_off;
+} exynos7420_cmu_owners[] = {
+	{ 0x140f0000, 0x4040 },	/* CMU_CAM0_LOCAL */
+	{ 0x144d0000, 0x4040 },	/* CMU_CAM0 */
+	{ 0x141f0000, 0x4060 },	/* CMU_CAM1_LOCAL */
+	{ 0x145d0000, 0x4060 },	/* CMU_CAM1 */
+	{ 0x14290000, 0x4140 },	/* CMU_ISP0_LOCAL */
+	{ 0x146d0000, 0x4140 },	/* CMU_ISP0 */
+	{ 0x142f0000, 0x4180 },	/* CMU_ISP1_LOCAL */
+	{ 0x147d0000, 0x4180 },	/* CMU_ISP1 */
+};
 
+/*
+ * The ISP0 and ISP1 async_clks sit in both CMU_CAM0 and CMU_CAM1, the CAM0
+ * ones in CMU_CAM1. Accessing a CMU whose domain is off raises a fatal AXI
+ * SError, so, as the vendor exynos5_pd_enable_asyncbridge_clks() does, set
+ * each gate only while its owning domain reports STATUS[3:0] == 0xf.
+ * Called with exynos7420_pd_lock held.
+ */
 static void exynos7420_apply_async_clks(void __iomem *pmu_base,
-					const struct exynos7420_unused_pd *pd,
-					bool set)
+					const struct exynos7420_unused_pd *pd)
 {
-	if (!pd->num_async_clks)
-		return;
+	size_t i, j;
 
-	if (!exynos7420_dep_powered(pmu_base, pd)) {
-		pr_debug("exynos-pd: skip %s async_clks, partner %s is off (stat=%#x)\n",
-			 pd->name, pd->dep_name,
-			 readl_relaxed(pmu_base + pd->dep_pmu_off + 0x4));
-		return;
+	for (i = 0; i < pd->num_async_clks; i++) {
+		phys_addr_t pa = pd->async_clks[i].pa;
+		u32 stat;
+
+		for (j = 0; j < ARRAY_SIZE(exynos7420_cmu_owners); j++)
+			if ((pa & ~(phys_addr_t)0xffff) ==
+			    exynos7420_cmu_owners[j].base)
+				break;
+
+		if (j < ARRAY_SIZE(exynos7420_cmu_owners)) {
+			stat = readl_relaxed(pmu_base +
+					     exynos7420_cmu_owners[j].pmu_off + 0x4);
+			if ((stat & 0xf) != 0xf) {
+				pr_debug("exynos-pd: %s skips async gate %pa, owner off (stat=%#x)\n",
+					 pd->name, &pa, stat);
+				continue;
+			}
+		}
+
+		exynos7420_rmw_phys(pa, pd->async_clks[i].mask, 0);
 	}
-
-	exynos7420_apply_reg_list(pd->async_clks, pd->num_async_clks, set);
 }
 
 static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
@@ -352,7 +371,7 @@ static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
 	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
 	if (pd->is_aud)
 		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
-	exynos7420_apply_async_clks(pmu_base, pd, true);
+	exynos7420_apply_async_clks(pmu_base, pd);
 	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
 
 	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
@@ -424,18 +443,13 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 		return -ETIMEDOUT;
 	}
 
-	/* 4. Restore busmaster handshake and A7IS option before clocks. */
-	if (cfg->lpi_busmaster_pa)
-		exynos7420_rmw_phys(cfg->lpi_busmaster_pa, 0xffffffff, 0);
-	if (cfg->clear_a7is_option) {
-		u32 a7is = readl_relaxed(pmu_base + 0x2588);
-
-		writel_relaxed(a7is | (0x7 << 15), pmu_base + 0x2588);
-	}
-
-	/* 5. Enable local clocks and async clocks (partner CAM must be on). */
+	/*
+	 * 5. Enable local clocks and the async clocks of powered owners. The
+	 * LPI busmaster masks and the A7IS option are only written on the
+	 * forced power-off path, as in the vendor exynos_pd_power_forced_off_pre().
+	 */
 	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
-	exynos7420_apply_async_clks(pmu_base, cfg, true);
+	exynos7420_apply_async_clks(pmu_base, cfg);
 
 	pr_info("exynos-pd: powered on %s (stat=%#x)\n",
 		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
@@ -499,9 +513,15 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 
 	pd = container_of(domain, struct exynos_pm_domain, pd);
 
-	if (pd->e7420_cfg && pd->pmu_base)
-		return power_on ? exynos7420_power_on_one(pd->pmu_base, pd->e7420_cfg)
-				: exynos7420_power_off_one_unused(pd->pmu_base, pd->e7420_cfg);
+	if (pd->e7420_cfg && pd->pmu_base) {
+		int ret;
+
+		mutex_lock(&exynos7420_pd_lock);
+		ret = power_on ? exynos7420_power_on_one(pd->pmu_base, pd->e7420_cfg)
+			       : exynos7420_power_off_one_unused(pd->pmu_base, pd->e7420_cfg);
+		mutex_unlock(&exynos7420_pd_lock);
+		return ret;
+	}
 
 	base = pd->base;
 
@@ -619,7 +639,7 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	struct exynos_pm_domain *pd;
 	struct resource res;
 	u32 pmu_off = 0;
-	int on, ret;
+	int i, on, ret;
 
 	pm_domain_cfg = of_device_get_match_data(dev);
 	pd = devm_kzalloc(dev, sizeof(*pd), GFP_KERNEL);
@@ -652,8 +672,6 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		pmu_off = res.start & 0xffff;
 
 	if (of_device_is_compatible(np, "samsung,exynos7420-pd") && pmu_off != 0x4080) {
-		int i;
-
 		pd->n_pre = 0;
 		pd->n_post = 0;
 		pd->local_pwr_cfg = 0xf;
@@ -671,8 +689,6 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	/* Exynos7420: map the clock/PMU register windows used by the seqs */
 	if (pd->n_pre || pd->n_post) {
-		int i;
-
 		for (i = 0; i < PD_NUM_BLKS; i++) {
 			pd->blk[i] = devm_ioremap(dev,
 						  exynos7420_pd_blk_addr[i],
@@ -691,17 +707,19 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	if (of_parse_phandle_with_args(np, "power-domains",
-				      "#power-domain-cells", 0, &parent) == 0) {
-		child.np = np;
-		child.args_count = 0;
-
+	/* Exynos7420 ISP0 has three parents (ISP1, CAM0, CAM1), as in the vendor DT. */
+	child.np = np;
+	child.args_count = 0;
+	for (i = 0; !of_parse_phandle_with_args(np, "power-domains",
+						"#power-domain-cells", i,
+						&parent); i++) {
 		if (of_genpd_add_subdomain(&parent, &child))
 			pr_warn("%pOF failed to add subdomain: %pOF\n",
 				parent.np, child.np);
 		else
 			pr_info("%pOF has as child subdomain: %pOF.\n",
 				parent.np, child.np);
+		of_node_put(parent.np);
 	}
 
 	pm_runtime_enable(dev);
@@ -900,10 +918,27 @@ static __init int exynos7420_power_off_unused_domains(void)
 	if (!pmu_base)
 		return -ENOMEM;
 
+	/*
+	 * Children are listed before parents. A domain registered with genpd is
+	 * powered off through genpd's own power_off_work, which takes the genpd
+	 * lock, refuses while a device is runtime-active or a subdomain is on,
+	 * and drops the parents' subdomain counts. Writing the PMU directly here
+	 * would race the work genpd queues from genpd_dev_pm_sync() after every
+	 * consumer probe (and from genpd_power_off_unused() without
+	 * pd_ignore_unused), and leave genpd status and sd_count stale.
+	 */
 	for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++) {
+		struct exynos_pm_domain *pd = e7420_genpd[i];
+
+		if (pd) {
+			queue_work(pm_wq, &pd->pd.power_off_work);
+			flush_work(&pd->pd.power_off_work);
+			continue;
+		}
+
+		mutex_lock(&exynos7420_pd_lock);
 		exynos7420_power_off_one_unused(pmu_base, &exynos7420_unused_pds[i]);
-		if (e7420_genpd[i])
-			e7420_genpd[i]->pd.status = GENPD_STATE_OFF;
+		mutex_unlock(&exynos7420_pd_lock);
 	}
 
 	exynos7420_disable_unused_plls();
