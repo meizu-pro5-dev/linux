@@ -212,16 +212,22 @@ static const struct samsung_gate_clock topc_gate_clks[] __initconst = {
 		ENABLE_SCLK_TOPC1, 5, 0, 0),
 	GATE(SCLK_BUS0_PLL_A, "sclk_bus0_pll_a", "dout_sclk_bus0_pll",
 		ENABLE_SCLK_TOPC1, 4, 0, 0),
+	/*
+	 * CC_PLL feeds TOP0/TOP1 bus muxes that are not modelled here, e.g.
+	 * aclk_cam0_trex_532/aclk_cam0_nocp_133 (MUX_SEL_TOP06[22:16] = 2,
+	 * cc_pll_half), the bus behind every CMU_CAM0 SFR access.
+	 */
 	GATE(SCLK_CC_PLL_B, "sclk_cc_pll_b", "dout_sclk_cc_pll",
-		ENABLE_SCLK_TOPC1, 1, 0, 0),
+		ENABLE_SCLK_TOPC1, 1, CLK_IS_CRITICAL, 0),
 	GATE(SCLK_CC_PLL_A, "sclk_cc_pll_a", "dout_sclk_cc_pll",
-		ENABLE_SCLK_TOPC1, 0, 0, 0),
+		ENABLE_SCLK_TOPC1, 0, CLK_IS_CRITICAL, 0),
 };
 
 static const struct samsung_pll_clock topc_pll_clks[] __initconst = {
 	PLL(pll_1451x, 0, "fout_bus0_pll", "fin_pll", BUS0_PLL_LOCK,
 		BUS0_PLL_CON0, NULL),
-	PLL(pll_1452x, 0, "fout_cc_pll", "fin_pll", CC_PLL_LOCK,
+	__PLL(pll_1452x, 0, "fout_cc_pll", "fin_pll",
+		CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL, CC_PLL_LOCK,
 		CC_PLL_CON0, NULL),
 	PLL(pll_1452x, 0, "fout_bus1_pll", "fin_pll", BUS1_DPLL_LOCK,
 		BUS1_DPLL_CON0, NULL),
@@ -957,10 +963,11 @@ static const struct samsung_gate_clock peris_gate_clks[] __initconst = {
 	GATE(PCLK_TMU, "pclk_tmu_apbif", "mout_aclk_peris_66_user",
 		ENABLE_PCLK_PERIS, 10, 0, 0),
 
+	/* CHIPID 0x10000000 readers outside Linux (secure firmware) unaudited. */
 	GATE(PCLK_CHIPID, "pclk_chipid", "mout_aclk_peris_66_user",
-		ENABLE_PCLK_PERIS_SECURE_CHIPID, 0, 0, 0),
+		ENABLE_PCLK_PERIS_SECURE_CHIPID, 0, CLK_IGNORE_UNUSED, 0),
 	GATE(SCLK_CHIPID, "sclk_chipid", "fin_pll",
-		ENABLE_SCLK_PERIS_SECURE_CHIPID, 0, 0, 0),
+		ENABLE_SCLK_PERIS_SECURE_CHIPID, 0, CLK_IGNORE_UNUSED, 0),
 
 	GATE(SCLK_TMU, "sclk_tmu", "fin_pll", ENABLE_SCLK_PERIS, 10, 0, 0),
 };
@@ -1046,7 +1053,7 @@ static const struct samsung_gate_clock fsys0_gate_clks[] __initconst = {
 			ENABLE_ACLK_FSYS00, 4, 0, 0),
 	GATE(ACLK_AXIUS_USBDRD30X_FSYS0X, "aclk_axius_usbdrd30x_fsys0x",
 		"mout_aclk_fsys0_200_user",
-		ENABLE_ACLK_FSYS00, 19, 0, 0),
+		ENABLE_ACLK_FSYS00, 19, CLK_IGNORE_UNUSED, 0),
 
 	GATE(ACLK_USBDRD300, "aclk_usbdrd300", "mout_aclk_fsys0_200_user",
 		ENABLE_ACLK_FSYS01, 29, 0, 0),
@@ -1183,7 +1190,7 @@ static const struct samsung_div_clock fsys1_div_clks[] __initconst = {
 
 static const struct samsung_gate_clock fsys1_gate_clks[] __initconst = {
 	GATE(ACLK_XIU_WIFI1X, "aclk_xiu_wifi1x", "mout_aclk_fsys1_200_user",
-		ENABLE_ACLK_FSYS1, 24, 0, 0),
+		ENABLE_ACLK_FSYS1, 24, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_AHB2AXI_PCIE_WIFI1, "aclk_ahb2axi_pcie_wifi1", "mout_aclk_fsys1_200_user",
 		ENABLE_ACLK_FSYS1, 13, 0, 0),
 	GATE(ACLK_PCIE_WIFI1_MSTR, "aclk_pcie_wifi1_mstr_aclk", "mout_aclk_fsys1_200_user",
@@ -1195,7 +1202,7 @@ static const struct samsung_gate_clock fsys1_gate_clks[] __initconst = {
 	GATE(ACLK_COMBO_PHY_PCS_WIFI1, "aclk_combo_phy_pcs_pclk_wifi1", "mout_aclk_fsys1_200_user",
 		ENABLE_ACLK_FSYS1, 9, 0, 0),
 	GATE(PCLK_ASYNC_COMBO_PHY_WIFI1, "pclk_async_combo_phy_wifi1", "dout_pclk_combo_phy_wifi1",
-		ENABLE_PCLK_FSYS1, 22, 0, 0),
+		ENABLE_PCLK_FSYS1, 22, CLK_IGNORE_UNUSED, 0),
 	GATE(SCLK_PCIE_LINK_WIFI1, "sclk_pcie_link_wifi1_gated", "fin_pll",
 		ENABLE_SCLK_FSYS11, 0, 0, 0),
 	GATE(SCLK_COMBO_PHY_WIFI1_26M, "sclk_combo_phy_wifi1_26m_gated", "mout_fsys1_phyclk_sel0",
@@ -1218,8 +1225,9 @@ static const struct samsung_gate_clock fsys1_gate_clks[] __initconst = {
 
 	GATE(ACLK_UFS20_LINK, "aclk_ufs20_link", "dout_pclk_fsys1",
 		ENABLE_ACLK_FSYS1, 31, 0, 0),
+	/* APB clock of pinctrl@15690000; pinctrl-samsung takes no bus clock. */
 	GATE(PCLK_GPIO_FSYS1, "pclk_gpio_fsys1", "mout_aclk_fsys1_200_user",
-		ENABLE_PCLK_FSYS1, 30, 0, 0),
+		ENABLE_PCLK_FSYS1, 30, CLK_IS_CRITICAL, 0),
 
 	GATE(PHYCLK_UFS20_RX1_SYMBOL_USER, "phyclk_ufs20_rx1_symbol_user",
 		"mout_phyclk_ufs20_rx1_symbol_user",
@@ -1287,6 +1295,12 @@ static const struct samsung_div_clock mscl_div_clks[] __initconst = {
 			DIV_MSCL, 0, 3),
 };
 static const struct samsung_gate_clock mscl_gate_clks[] __initconst = {
+	/*
+	 * Bus infrastructure (AHB2APB bridges, NoC, XIU, async bridges, PPMU,
+	 * PMU interface) is CLK_IGNORE_UNUSED here and in the other CMUs, as in
+	 * clk-exynos5433.c: gating aclk_ahb2apb_mscl0p cuts the APB path to
+	 * the CMU_MSCL registers and the next access hangs the bus.
+	 */
 
 	GATE(ACLK_MSCL_0, "aclk_mscl_0", "usermux_aclk_mscl_532",
 			ENABLE_ACLK_MSCL, 31, 0, 0),
@@ -1298,17 +1312,17 @@ static const struct samsung_gate_clock mscl_gate_clks[] __initconst = {
 			ENABLE_ACLK_MSCL, 28, 0, 0),
 	GATE(ACLK_LH_ASYNC_SI_MSCL_0, "aclk_lh_async_si_mscl_0",
 			"usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 27, 0, 0),
+			ENABLE_ACLK_MSCL, 27, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_LH_ASYNC_SI_MSCL_1, "aclk_lh_async_si_mscl_1",
 			"usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 26, 0, 0),
+			ENABLE_ACLK_MSCL, 26, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_XIU_MSCLX_0, "aclk_xiu_msclx_0", "usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 25, 0, 0),
+			ENABLE_ACLK_MSCL, 25, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_XIU_MSCLX_1, "aclk_xiu_msclx_1", "usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 24, 0, 0),
+			ENABLE_ACLK_MSCL, 24, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_AXI2ACEL_BRIDGE, "aclk_axi2acel_bridge",
 			"usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 23, 0, 0),
+			ENABLE_ACLK_MSCL, 23, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_QE_MSCL_0, "aclk_qe_mscl_0", "usermux_aclk_mscl_532",
 			ENABLE_ACLK_MSCL, 22, 0, 0),
 	GATE(ACLK_QE_MSCL_1, "aclk_qe_mscl_1", "usermux_aclk_mscl_532",
@@ -1318,17 +1332,17 @@ static const struct samsung_gate_clock mscl_gate_clks[] __initconst = {
 	GATE(ACLK_QE_G2D, "aclk_qe_g2d", "usermux_aclk_mscl_532",
 			ENABLE_ACLK_MSCL, 19, 0, 0),
 	GATE(ACLK_PPMU_MSCL_0, "aclk_ppmu_mscl_0", "usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 18, 0, 0),
+			ENABLE_ACLK_MSCL, 18, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_PPMU_MSCL_1, "aclk_ppmu_mscl_1", "usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 17, 0, 0),
+			ENABLE_ACLK_MSCL, 17, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_MSCLNP_133, "aclk_msclnp_133", "usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 16, 0, 0),
+			ENABLE_ACLK_MSCL, 16, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_AHB2APB_MSCL0P, "aclk_ahb2apb_mscl0p",
 			"usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 15, 0, 0),
+			ENABLE_ACLK_MSCL, 15, CLK_IGNORE_UNUSED, 0),
 	GATE(ACLK_AHB2APB_MSCL1P, "aclk_ahb2apb_mscl1p",
 			"usermux_aclk_mscl_532",
-			ENABLE_ACLK_MSCL, 14, 0, 0),
+			ENABLE_ACLK_MSCL, 14, CLK_IGNORE_UNUSED, 0),
 
 	GATE(PCLK_MSCL_0, "pclk_mscl_0", "dout_pclk_mscl",
 			ENABLE_PCLK_MSCL, 31, 0, 0),
@@ -1347,13 +1361,13 @@ static const struct samsung_gate_clock mscl_gate_clks[] __initconst = {
 	GATE(PCLK_QE_G2D, "pclk_qe_g2d", "dout_pclk_mscl",
 			ENABLE_PCLK_MSCL, 24, 0, 0),
 	GATE(PCLK_PPMU_MSCL_0, "pclk_ppmu_mscl_0", "dout_pclk_mscl",
-			ENABLE_PCLK_MSCL, 23, 0, 0),
+			ENABLE_PCLK_MSCL, 23, CLK_IGNORE_UNUSED, 0),
 	GATE(PCLK_PPMU_MSCL_1, "pclk_ppmu_mscl_1", "dout_pclk_mscl",
-			ENABLE_PCLK_MSCL, 22, 0, 0),
+			ENABLE_PCLK_MSCL, 22, CLK_IGNORE_UNUSED, 0),
 	GATE(PCLK_AXI2ACEL_BRIDGE, "pclk_axi2acel_bridge", "dout_pclk_mscl",
-			ENABLE_PCLK_MSCL, 21, 0, 0),
+			ENABLE_PCLK_MSCL, 21, CLK_IGNORE_UNUSED, 0),
 	GATE(PCLK_PMU_MSCL, "pclk_pmu_mscl", "dout_pclk_mscl",
-			ENABLE_PCLK_MSCL, 20, 0, 0),
+			ENABLE_PCLK_MSCL, 20, CLK_IGNORE_UNUSED, 0),
 };
 
 static const struct samsung_cmu_info mscl_cmu_info = {
@@ -1833,10 +1847,11 @@ static const struct samsung_div_clock disp_div_clks[] __initconst = {
 static const struct samsung_gate_clock disp_gate_clks[] __initconst = {
 	GATE(CLK_SCLK_DSD, "user_sclk_dsd", "usermux_sclk_dsd",
 		ENABLE_SCLK_DISP1, 16, 0, 0),
+	/* DISP -> TOP write path of sysmmu_disp_rw; BLK_DISP is always on. */
 	GATE(0, "aclk_lh_async_si_top_disp", "usermux_aclk_disp_400",
-		ENABLE_ACLK_DISP, 28, 0, 0),
+		ENABLE_ACLK_DISP, 28, CLK_IS_CRITICAL, 0),
 	GATE(CLK_ACLK_XIU_DISP_RW, "aclk_xiu_disp_rw", "aclk_lh_async_si_top_disp",
-		ENABLE_ACLK_DISP, 26, 0, 0),
+		ENABLE_ACLK_DISP, 26, CLK_IS_CRITICAL, 0),
 	GATE(CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8, "mipidphy0_bit",
 		"usermux_mipidphy0_bit", ENABLE_SCLK_DISP2, 8, CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_MIPIDPHY0_RXCLKESC0, "mipidphy0_rx",
@@ -1960,10 +1975,15 @@ static const struct samsung_gate_clock bus0_gate_clks[] __initconst = {
 		ENABLE_ACLK_BUS0, 0, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk_noc_bus0_nrt", "usermux_aclk_bus0_532",
 		ENABLE_ACLK_BUS0, 7, CLK_IS_CRITICAL, 0),
+	/*
+	 * BUS0 -> DISP bridges carrying every CPU access to DECON 0x13930000
+	 * and DSIM 0x13900000; BLK_DISP is always on and neither driver
+	 * references them.
+	 */
 	GATE(CLK_ACLK_LH_DISP0, "aclk_lh_disp0", "usermux_aclk_bus0_532",
-		ENABLE_ACLK_BUS0, 3, 0, 0),
+		ENABLE_ACLK_BUS0, 3, CLK_IS_CRITICAL, 0),
 	GATE(CLK_ACLK_LH_DISP1, "aclk_lh_disp1", "usermux_aclk_bus0_532",
-		ENABLE_ACLK_BUS0, 4, 0, 0),
+		ENABLE_ACLK_BUS0, 4, CLK_IS_CRITICAL, 0),
 };
 static const unsigned long bus0_clk_regs[] __initconst = {
 	MUX_SEL_BUS0, ENABLE_ACLK_BUS0,
