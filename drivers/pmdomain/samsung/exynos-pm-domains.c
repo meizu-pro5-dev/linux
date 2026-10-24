@@ -13,6 +13,7 @@
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/pm_domain.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
@@ -53,7 +54,7 @@ struct exynos7420_reg_bits {
 	u32 mask;
 };
 
-struct exynos7420_unused_pd {
+struct exynos7420_pd_cfg {
 	const char *name;
 	u32 pmu_off;
 	phys_addr_t lpi_busmaster_pa;
@@ -192,7 +193,7 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] = {
 	{ 0x105c158c, BIT(0) },
 };
 
-static const struct exynos7420_unused_pd exynos7420_unused_pds[] = {
+static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-mfc",
 		.pmu_off = 0x41a0,
@@ -330,7 +331,7 @@ static const struct {
  * Called with exynos7420_pd_lock held.
  */
 static void exynos7420_apply_async_clks(void __iomem *pmu_base,
-					const struct exynos7420_unused_pd *pd)
+					const struct exynos7420_pd_cfg *pd)
 {
 	size_t i, j;
 
@@ -357,8 +358,8 @@ static void exynos7420_apply_async_clks(void __iomem *pmu_base,
 	}
 }
 
-static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
-					  const struct exynos7420_unused_pd *pd)
+static int exynos7420_power_off_one(void __iomem *pmu_base,
+					  const struct exynos7420_pd_cfg *pd)
 {
 	u32 stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
 	int timeout;
@@ -403,19 +404,19 @@ static int exynos7420_power_off_one_unused(void __iomem *pmu_base,
 
 	stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
 	if (stat != 0) {
-		pr_err("exynos-pd: failed to power off unused %s (stat=%#x)\n",
+		pr_err("exynos-pd: failed to power off %s (stat=%#x)\n",
 		       pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
 		return -EBUSY;
 	}
 
 	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, false);
-	pr_info("exynos-pd: powered off unused %s (stat=%#x, top_clks gated)\n",
+	pr_info("exynos-pd: powered off %s (stat=%#x, top_clks gated)\n",
 		pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
 	return 0;
 }
 
 static int exynos7420_power_on_one(void __iomem *pmu_base,
-				   const struct exynos7420_unused_pd *cfg)
+				   const struct exynos7420_pd_cfg *cfg)
 {
 	int timeout = 200;
 
@@ -469,11 +470,9 @@ struct exynos_pm_domain {
 	unsigned int n_pre;
 	const struct exynos_pd_seq *post;
 	unsigned int n_post;
-	const struct exynos7420_unused_pd *e7420_cfg;
+	const struct exynos7420_pd_cfg *e7420_cfg;
 	void __iomem *pmu_base;
 };
-
-static struct exynos_pm_domain *e7420_genpd[ARRAY_SIZE(exynos7420_unused_pds)];
 
 static const resource_size_t exynos7420_pd_blk_addr[PD_NUM_BLKS] = {
 	[PD_BLK_TOP0] = 0x105d0000,
@@ -518,7 +517,7 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 
 		mutex_lock(&exynos7420_pd_lock);
 		ret = power_on ? exynos7420_power_on_one(pd->pmu_base, pd->e7420_cfg)
-			       : exynos7420_power_off_one_unused(pd->pmu_base, pd->e7420_cfg);
+			       : exynos7420_power_off_one(pd->pmu_base, pd->e7420_cfg);
 		mutex_unlock(&exynos7420_pd_lock);
 		return ret;
 	}
@@ -620,6 +619,19 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 	{ },
 };
 
+/*
+ * Domains genpd must never power off. Every other Exynos7420 domain (CAM0,
+ * CAM1, ISP0, ISP1, MFC, MSCL) is powered on by genpd for its consumers and
+ * off when unused, including by genpd_power_off_unused() at late_initcall.
+ *  AUD  - LPASS, I2S0, ADMA and the BT UART; LPASS is set up once by
+ *         exynos7420_init_aud_lpass() and the gpz pads lose state when off.
+ *  DISP - DECON/DSIM path initialised by the bootloader; powering it off
+ *         hangs the first DECON commit.
+ *  VPP  - DECON scan-out source, coupled to DISP (vendor pd-vpp).
+ *  G3D  - GPU power is owned by m86-gpu-dvfs.
+ */
+static const char * const exynos_pd_always_on[] = { "AUD", "DISP", "VPP", "G3D" };
+
 static const char *exynos_get_domain_name(struct device *dev,
 					  struct device_node *node)
 {
@@ -656,10 +668,8 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
-	/* BLK_AUD feeds LPASS/Bluetooth and BLK_G3D must stay powered while the
-	 * GPU driver owns the domain; never let the generic PM core gate them.
-	 */
-	if (!strcmp(pd->pd.name, "AUD") || !strcmp(pd->pd.name, "G3D"))
+	if (match_string(exynos_pd_always_on, ARRAY_SIZE(exynos_pd_always_on),
+			 pd->pd.name) >= 0)
 		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
 	pd->local_pwr_option = pm_domain_cfg->local_pwr_option;
@@ -677,11 +687,10 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		pd->local_pwr_cfg = 0xf;
 		pd->local_pwr_option = 0x0102;
 
-		for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++) {
-			if (exynos7420_unused_pds[i].pmu_off == pmu_off) {
-				pd->e7420_cfg = &exynos7420_unused_pds[i];
+		for (i = 0; i < ARRAY_SIZE(exynos7420_pds); i++) {
+			if (exynos7420_pds[i].pmu_off == pmu_off) {
+				pd->e7420_cfg = &exynos7420_pds[i];
 				pd->pmu_base = devm_ioremap(dev, 0x105c0000, 0x5000);
-				e7420_genpd[i] = pd;
 				break;
 			}
 		}
@@ -700,9 +709,14 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
 
-	pm_genpd_init(&pd->pd, NULL, !on);
+	ret = pm_genpd_init(&pd->pd, NULL, !on);
+	if (ret) {
+		iounmap(pd->base);
+		return ret;
+	}
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
 	if (ret) {
+		pm_genpd_remove(&pd->pd);
 		iounmap(pd->base);
 		return ret;
 	}
@@ -822,132 +836,4 @@ static int __init exynos7420_init_aud_lpass(void)
 	return 0;
 }
 core_initcall(exynos7420_init_aud_lpass);
-
-struct exynos7420_unused_pll {
-	const char *name;
-	phys_addr_t con_pa;
-	phys_addr_t sel_pa;
-	u32 sel_bit;
-	phys_addr_t stat_pa;
-	u32 stat_bit;
-};
-
-static const struct exynos7420_unused_pll exynos7420_unused_plls[] __initconst = {
-	{ "aud_pll", 0x10570140, 0x10570204, 0,  0x10570404, 0  },
-	{ "isp_pll", 0x105d0110, 0x105d0200, 24, 0x105d0400, 24 },
-	{ "cam_pll", 0x105d0120, 0x105d0200, 20, 0x105d0400, 20 },
-};
-
-static void __init exynos7420_disable_unused_plls(void)
-{
-	size_t i;
-
-	exynos7420_rmw_phys(0x105d0200, 0, BIT(0));
-	udelay(5);
-	exynos7420_rmw_phys(0x10570a04, 0, BIT(20));
-
-	for (i = 0; i < ARRAY_SIZE(exynos7420_unused_plls); i++) {
-		const struct exynos7420_unused_pll *p = &exynos7420_unused_plls[i];
-		void __iomem *con_base = ioremap(p->con_pa & PAGE_MASK, PAGE_SIZE);
-		u32 con_off = p->con_pa & ~PAGE_MASK;
-		u32 sel_off = p->sel_pa & ~PAGE_MASK;
-		u32 stat_off = p->stat_pa & ~PAGE_MASK;
-		u32 con, sel, stat;
-		int timeout = 1000;
-
-		if (!con_base)
-			continue;
-
-		con = readl_relaxed(con_base + con_off);
-		if (!(con & BIT(31))) {
-			iounmap(con_base);
-			continue;
-		}
-
-		sel = readl_relaxed(con_base + sel_off);
-		sel &= ~BIT(p->sel_bit);
-		writel_relaxed(sel, con_base + sel_off);
-
-		while (--timeout > 0) {
-			stat = (readl_relaxed(con_base + stat_off) >> p->stat_bit) & 0x7;
-			if (stat == 0x1 || stat == 0x0)
-				break;
-			udelay(1);
-		}
-
-		con = readl_relaxed(con_base + con_off);
-		con &= ~BIT(31);
-		writel_relaxed(con, con_base + con_off);
-
-		pr_info("exynos-pd: disabled unused %s (con=%#x)\n",
-			p->name, readl_relaxed(con_base + con_off));
-		iounmap(con_base);
-	}
-}
-
-static const struct exynos7420_reg_bits exynos7420_unused_periph_clks[] __initconst = {
-	/* CMU_PERIC0 (0x13610000): unused uart0, adcif, pwm (hsi2c0/9/10 active) */
-	{ 0x13610900, BIT(21) | BIT(20) | BIT(16) },
-	{ 0x13610a00, BIT(21) | BIT(16) },
-	/* CMU_PERIC1 (0x14c80000): unused hsi2c3, uart1/3, spi0/1/2, pcm1, spdif (hsi2c2, spi4 active) */
-	{ 0x14c80900, BIT(19) | BIT(18) | BIT(14) | BIT(13) | BIT(12) |
-		      BIT(11) | BIT(9) | BIT(5) },
-	{ 0x14c80a00, BIT(19) | BIT(18) | BIT(14) | BIT(13) | BIT(12) |
-		      BIT(11) | BIT(9) },
-	/* CMU_FSYS0 (0x10e90000) & CMU_FSYS1 (0x156e0000): unused mmc0/1 (mmc2 active) */
-	{ 0x156e0800, BIT(30) | BIT(29) },
-	/* CMU_TOP0 (0x105d0000): upstream sclk for unused peric0/1 blocks */
-	{ 0x105d0a30, BIT(8) | BIT(4) },
-	{ 0x105d0a34, BIT(20) | BIT(8) },
-	{ 0x105d0a38, BIT(20) },
-	{ 0x105d0a3c, BIT(16) | BIT(12) | BIT(4) },
-	/* CMU_TOP1 (0x105e0000): upstream sclk for unused mmc0/1 */
-	{ 0x105e0a2c, BIT(12) | BIT(0) },
-};
-
-static __init int exynos7420_power_off_unused_domains(void)
-{
-	void __iomem *pmu_base;
-	size_t i;
-
-	if (!of_machine_is_compatible("meizu,m86") &&
-	    !of_machine_is_compatible("samsung,exynos7"))
-		return 0;
-
-	pmu_base = ioremap(0x105c0000, 0x5000);
-	if (!pmu_base)
-		return -ENOMEM;
-
-	/*
-	 * Children are listed before parents. A domain registered with genpd is
-	 * powered off through genpd's own power_off_work, which takes the genpd
-	 * lock, refuses while a device is runtime-active or a subdomain is on,
-	 * and drops the parents' subdomain counts. Writing the PMU directly here
-	 * would race the work genpd queues from genpd_dev_pm_sync() after every
-	 * consumer probe (and from genpd_power_off_unused() without
-	 * pd_ignore_unused), and leave genpd status and sd_count stale.
-	 */
-	for (i = 0; i < ARRAY_SIZE(exynos7420_unused_pds); i++) {
-		struct exynos_pm_domain *pd = e7420_genpd[i];
-
-		if (pd) {
-			queue_work(pm_wq, &pd->pd.power_off_work);
-			flush_work(&pd->pd.power_off_work);
-			continue;
-		}
-
-		mutex_lock(&exynos7420_pd_lock);
-		exynos7420_power_off_one_unused(pmu_base, &exynos7420_unused_pds[i]);
-		mutex_unlock(&exynos7420_pd_lock);
-	}
-
-	exynos7420_disable_unused_plls();
-	exynos7420_apply_reg_list(exynos7420_unused_periph_clks,
-				  ARRAY_SIZE(exynos7420_unused_periph_clks), false);
-	pr_info("exynos-pd: gated unused PERIC0/PERIC1/FSYS0/FSYS1/TOP0/TOP1 peripheral clocks\n");
-
-	iounmap(pmu_base);
-	return 0;
-}
-late_initcall_sync(exynos7420_power_off_unused_domains);
 
