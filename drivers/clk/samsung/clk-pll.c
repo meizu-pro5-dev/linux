@@ -135,6 +135,13 @@ static void samsung_pll3xxx_disable(struct clk_hw *hw)
 	writel_relaxed(tmp, pll->con_reg);
 }
 
+static int samsung_pll3xxx_is_enabled(struct clk_hw *hw)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+
+	return !!(readl_relaxed(pll->con_reg) & BIT(pll->enable_offs));
+}
+
 /*
  * PLL2126 Clock Type
  */
@@ -297,6 +304,7 @@ static const struct clk_ops samsung_pll35xx_clk_ops = {
 	.set_rate = samsung_pll35xx_set_rate,
 	.enable = samsung_pll3xxx_enable,
 	.disable = samsung_pll3xxx_disable,
+	.is_enabled = samsung_pll3xxx_is_enabled,
 };
 
 static const struct clk_ops samsung_pll35xx_clk_min_ops = {
@@ -880,6 +888,22 @@ static const struct clk_ops samsung_pll46xx_clk_min_ops = {
 	.recalc_rate = samsung_pll46xx_recalc_rate,
 };
 
+static const struct clk_ops samsung_pll1460x_clk_ops = {
+	.recalc_rate = samsung_pll46xx_recalc_rate,
+	.round_rate = samsung_pll_round_rate,
+	.set_rate = samsung_pll46xx_set_rate,
+	.enable = samsung_pll3xxx_enable,
+	.disable = samsung_pll3xxx_disable,
+	.is_enabled = samsung_pll3xxx_is_enabled,
+};
+
+static const struct clk_ops samsung_pll1460x_clk_min_ops = {
+	.recalc_rate = samsung_pll46xx_recalc_rate,
+	.enable = samsung_pll3xxx_enable,
+	.disable = samsung_pll3xxx_disable,
+	.is_enabled = samsung_pll3xxx_is_enabled,
+};
+
 /*
  * PLL6552 Clock Type
  */
@@ -1379,12 +1403,19 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 	case pll_4600:
 	case pll_4650:
 	case pll_4650c:
-	case pll_1460x:
-	case pll_1460x_signed:
 		if (!pll->rate_table)
 			init.ops = &samsung_pll46xx_clk_min_ops;
 		else
 			init.ops = &samsung_pll46xx_clk_ops;
+		break;
+	case pll_1460x:
+	case pll_1460x_signed:
+		pll->enable_offs = __ffs(PLL46XX_ENABLE);
+		pll->lock_offs = __ffs(PLL46XX_LOCKED);
+		if (!pll->rate_table)
+			init.ops = &samsung_pll1460x_clk_min_ops;
+		else
+			init.ops = &samsung_pll1460x_clk_ops;
 		break;
 	case pll_2550x:
 		init.ops = &samsung_pll2550x_clk_ops;
