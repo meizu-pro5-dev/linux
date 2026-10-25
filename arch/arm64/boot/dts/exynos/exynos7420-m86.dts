@@ -308,6 +308,21 @@
 	};
 };
 
+&pmu_system_controller {
+	/*
+	 * S-Boot reads SYSIP_DAT0 after SWRESET (vendor common.c
+	 * exynos_restart()). Only the modes S-Boot was seen to honour are
+	 * listed; 0xfe ("bootloader") leaves it stuck at the boot logo.
+	 */
+	reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x810>; /* SYSIP_DAT0 */
+		mode-normal = <0x00>;
+		mode-fastboot = <0xfc>;
+		mode-recovery = <0xff>;
+	};
+};
+
 /* Avoid unneeded first-boot accesses and the S6 display/audio sequences. */
 &pdma0 { status = "okay"; };
 &pdma1 { status = "okay"; };
