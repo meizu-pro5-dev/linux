@@ -636,6 +636,14 @@
 	clocks = <&cmu_disp CLK_PCLK_DECON0>, <&cmu_disp CLK_ACLK_DECON0>,
 	         <&cmu_disp CLK_SCLK_DECON0_ECLK>, <&cmu_disp CLK_SCLK_DECON0_VCLK>;
 	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
+	/*
+	 * The bootloader leaves VCLK at 33.5 MHz, which needs ~21 ms per
+	 * command-mode frame, so every other 60 Hz frame is dropped. The
+	 * vendor driver sets 60 MHz for this 1080p MIC panel at probe; from
+	 * the 134 MHz DISP PLL that gives 44.7 MHz and ~15.7 ms per frame.
+	 */
+	assigned-clocks = <&cmu_disp CLK_DOUT_SUB_SCLK_DECON_INT_VCLK>;
+	assigned-clock-rates = <60000000>;
 	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
 	samsung,bus = <&bus_mif>;
 	interconnects = <&bus_int &bus_mif>;
