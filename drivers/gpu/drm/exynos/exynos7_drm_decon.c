@@ -846,9 +846,13 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 
 	decon_init(ctx);
 
-	if (ctx->i80_if)
+	if (ctx->i80_if) {
 		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
 		       VIDINTCON0_INT_I80_EN, ctx->regs + VIDINTCON0);
+		/* Let ECLK gate itself while idle, as vendor decon_reg_init() does. */
+		writel(readl(ctx->regs + VCLKCON0) | VCLKCON0_ECLK_IDLE_GATE_EN,
+		       ctx->regs + VCLKCON0);
+	}
 
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))

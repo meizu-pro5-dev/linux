@@ -37,6 +37,7 @@
 
 /* VCLKCON0 */
 #define VCLKCON0				0x10
+#define VCLKCON0_ECLK_IDLE_GATE_EN		(1 << 12)
 #define VCLKCON0_CLKVALUP			(1 << 8)
 #define VCLKCON0_VCLKFREE			(1 << 0)
 
