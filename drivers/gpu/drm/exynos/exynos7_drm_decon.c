@@ -14,6 +14,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interconnect.h>
 #include <linux/interrupt.h>
+#include <linux/iommu.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
@@ -72,6 +73,7 @@ struct decon_context {
 	unsigned long			irq_flags;
 	bool				i80_if;
 	bool				i80_handoff_processed;
+	bool				scanout_iova;
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
 	struct gpio_desc		*te_gpio;
@@ -662,6 +664,9 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_shadow_protect_win(ctx, i, false);
 
+	/* From here on the windows only scan IOVA-mapped framebuffers. */
+	ctx->scanout_iova = true;
+
 	writel(readl(ctx->regs + DECON_UPDATE) |
 	       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
 
@@ -921,11 +926,44 @@ out:
 	return IRQ_HANDLED;
 }
 
+/*
+ * SYSMMU fault on the window DMA, called from the SYSMMU interrupt. Before
+ * the first commit the windows may still scan the bootloader framebuffer,
+ * which only the identity map covers: report it and wait for the commit to
+ * move them. Afterwards a fault means a window scans an unmapped IOVA; stop
+ * the window DMA so it does not fault again every frame. The next commit
+ * re-enables the windows with valid buffers.
+ */
+static int decon_iommu_fault(struct iommu_domain *domain, struct device *dev,
+			     unsigned long iova, int flags, void *token)
+{
+	struct decon_context *ctx = token;
+	unsigned int win;
+
+	if (!ctx->scanout_iova) {
+		dev_warn_ratelimited(ctx->dev,
+				     "SYSMMU fault at %#lx during handover\n",
+				     iova);
+		return 0;
+	}
+
+	dev_err_ratelimited(ctx->dev,
+			    "SYSMMU fault at %#lx, disabling windows\n", iova);
+	for (win = 0; win < WINDOWS_NR; win++)
+		writel(readl(ctx->regs + WINCON(win)) & ~WINCONx_ENWIN,
+		       ctx->regs + WINCON(win));
+	writel(readl(ctx->regs + DECON_UPDATE) | DECON_UPDATE_STANDALONE_F,
+	       ctx->regs + DECON_UPDATE);
+
+	return 0;
+}
+
 static int decon_bind(struct device *dev, struct device *master, void *data)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
 	struct drm_device *drm_dev = data;
 	struct exynos_drm_plane *exynos_plane;
+	struct iommu_domain *domain;
 	unsigned int i;
 	int ret;
 
@@ -934,6 +972,10 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 		DRM_DEV_ERROR(dev, "decon_ctx_initialize failed.\n");
 		return ret;
 	}
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (domain)
+		iommu_set_fault_handler(domain, decon_iommu_fault, ctx);
 
 	for (i = 0; i < WINDOWS_NR; i++) {
 		ctx->configs[i].pixel_formats = decon_formats;
@@ -968,8 +1010,12 @@ static void decon_unbind(struct device *dev, struct device *master,
 			void *data)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
 
 	decon_atomic_disable(ctx->crtc);
+
+	if (domain)
+		iommu_set_fault_handler(domain, NULL, NULL);
 
 	if (ctx->encoder)
 		exynos_dpi_remove(ctx->encoder);
