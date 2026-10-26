@@ -752,7 +752,7 @@
 		};
 
 		sysmmu_mfc_0: sysmmu@15200000 {
-			compatible = "samsung,exynos-sysmmu";
+			compatible = "samsung,exynos7420-sysmmu", "samsung,exynos-sysmmu";
 			reg = <0x15200000 0x1000>;
 			interrupts = <GIC_SPI 312 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clock_mfc CLK_ACLK_SMMU_MFC_0>,
@@ -765,7 +765,7 @@
 		};
 
 		sysmmu_mfc_1: sysmmu@15210000 {
-			compatible = "samsung,exynos-sysmmu";
+			compatible = "samsung,exynos7420-sysmmu", "samsung,exynos-sysmmu";
 			reg = <0x15210000 0x1000>;
 			interrupts = <GIC_SPI 315 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clock_mfc CLK_ACLK_SMMU_MFC_1>,
@@ -852,7 +852,7 @@
 		};
 
 		sysmmu_disp_ro: sysmmu@13a00000 {
-			compatible = "samsung,exynos-sysmmu";
+			compatible = "samsung,exynos7420-sysmmu", "samsung,exynos-sysmmu";
 			power-domains = <&pd_disp>;
 			reg = <0x13a00000 0x1000>;
 			interrupts = <GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>;
@@ -864,7 +864,7 @@
 		};
 
 		sysmmu_disp_rw: sysmmu@13a10000 {
-			compatible = "samsung,exynos-sysmmu";
+			compatible = "samsung,exynos7420-sysmmu", "samsung,exynos-sysmmu";
 			power-domains = <&pd_disp>;
 			reg = <0x13a10000 0x1000>;
 			interrupts = <GIC_SPI 179 IRQ_TYPE_LEVEL_HIGH>;
