@@ -767,7 +767,7 @@ core_initcall(exynos4_pm_init_power_domain);
 static int __init exynos7420_init_aud_lpass(void)
 {
 	void __iomem *pmu_base, *lpass_base, *smmu_base, *ccore_base, *rtc_base;
-	u32 sw_reset, intr_mask;
+	u32 sw_reset, intr_mask, aud_status;
 
 	if (!of_machine_is_compatible("meizu,m86") &&
 	    !of_machine_is_compatible("samsung,exynos7"))
@@ -786,6 +786,7 @@ static int __init exynos7420_init_aud_lpass(void)
 		while ((readl_relaxed(pmu_base + 0x4004) & 0xf) != 0xf && --timeout > 0)
 			udelay(10);
 	}
+	aud_status = readl_relaxed(pmu_base + 0x4004);
 
 	writel_relaxed(0x1, pmu_base + 0x1340);
 	writel_relaxed(BIT(28), pmu_base + 0x3028);
@@ -809,6 +810,13 @@ static int __init exynos7420_init_aud_lpass(void)
 		iounmap(rtc_base);
 	if (ccore_base)
 		iounmap(ccore_base);
+
+	/* LPASS and sysmmu_aud live in BLK_AUD: never touch them powered off */
+	if ((aud_status & 0xf) != 0xf) {
+		pr_err("exynos-pd: BLK_AUD power-on timed out (status %#x), skipping LPASS init\n",
+		       aud_status);
+		return -ETIMEDOUT;
+	}
 
 	lpass_base = ioremap(0x11400000, 0x100);
 	if (lpass_base) {
