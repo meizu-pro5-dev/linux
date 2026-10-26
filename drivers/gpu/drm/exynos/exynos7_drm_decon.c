@@ -57,6 +57,9 @@
 #define WINDOWS_NR	2
 #define HW_WINDOWS_MAX	5
 
+/* A frame in flight must finish within this (vendor decon_reg_stop()). */
+#define DECON_FRAME_TIMEOUT_MS	50
+
 struct decon_context {
 	struct device			*dev;
 	struct drm_device		*drm_dev;
@@ -80,6 +83,11 @@ struct decon_context {
 	spinlock_t			te_lock;
 	bool				te_irq_enabled;
 	atomic_t			frame_pending;
+	/* Command mode: flip event held until its frame is triggered. */
+	struct drm_pending_vblank_event	*event;
+	/* Start of the frame in flight (0 if none), under te_lock. */
+	ktime_t				xfer_start;
+	bool				xfer_retried;
 
 	struct drm_encoder *encoder;
 	struct device			*bus_dev;
@@ -289,17 +297,13 @@ static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
 	if (!test_and_set_bit(0, &ctx->irq_flags)) {
 		val = readl(ctx->regs + VIDINTCON0);
 
-		val |= VIDINTCON0_INT_ENABLE;
-
-		if (ctx->i80_if) {
-			val |= VIDINTCON0_INT_I80_EN;
-		} else {
-			val |= VIDINTCON0_INT_FRAME;
+		/* Command mode keeps frame done on while active, see enable. */
+		if (!ctx->i80_if) {
+			val |= VIDINTCON0_INT_ENABLE | VIDINTCON0_INT_FRAME;
 			val &= ~VIDINTCON0_FRAMESEL0_MASK;
 			val |= VIDINTCON0_FRAMESEL0_VSYNC;
+			writel(val, ctx->regs + VIDINTCON0);
 		}
-
-		writel(val, ctx->regs + VIDINTCON0);
 	}
 
 	decon_enable_te_irq(ctx);
@@ -312,20 +316,14 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	u32 val;
 
-	if (test_and_clear_bit(0, &ctx->irq_flags)) {
+	if (test_and_clear_bit(0, &ctx->irq_flags) && !ctx->i80_if) {
 		val = readl(ctx->regs + VIDINTCON0);
-
-		val &= ~VIDINTCON0_INT_ENABLE;
-		if (ctx->i80_if)
-			val &= ~VIDINTCON0_INT_I80_EN;
-		else
-			val &= ~VIDINTCON0_INT_FRAME;
-
+		val &= ~(VIDINTCON0_INT_ENABLE | VIDINTCON0_INT_FRAME);
 		writel(val, ctx->regs + VIDINTCON0);
 	}
 
 	if (!atomic_read(&ctx->frame_pending) &&
-	    !atomic_read(&ctx->wait_vsync_event))
+	    !atomic_read(&ctx->wait_vsync_event) && !ctx->xfer_start)
 		decon_disable_te_irq_nosync(ctx);
 }
 
@@ -594,6 +592,70 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	writel(val, ctx->regs + DECON_UPDATE);
 }
 
+/* Send the flip event held for the frame that was just triggered. */
+static void decon_send_event(struct decon_context *ctx)
+{
+	struct drm_crtc *crtc = &ctx->crtc->base;
+	struct drm_pending_vblank_event *event;
+	unsigned long flags;
+
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	event = ctx->event;
+	ctx->event = NULL;
+	if (event)
+		drm_crtc_send_vblank_event(crtc, event);
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+
+	if (event)
+		drm_crtc_vblank_put(crtc);
+}
+
+/*
+ * Whether the frame triggered last is still being sent. Frame done may
+ * still be pending when the next TE arrives, which also ends the
+ * transfer; an idle DECON without it means the trigger was lost. A lost
+ * or timed out frame is reported and sent once more; if that fails too,
+ * wait for the next commit.
+ */
+static bool decon_i80_frame_busy(struct decon_context *ctx)
+{
+	unsigned long flags;
+	bool busy = false;
+	s64 ms;
+	u32 val;
+
+	spin_lock_irqsave(&ctx->te_lock, flags);
+	if (!ctx->xfer_start)
+		goto out;
+
+	ms = ktime_ms_delta(ktime_get(), ctx->xfer_start);
+	val = readl(ctx->regs + VIDCON1(0));
+	if (!VIDCON1_LINECNT_GET(val) &&
+	    (val & VIDCON1_VSTATUS_MASK) == VIDCON1_VSTATUS_IDLE) {
+		if (readl(ctx->regs + VIDINTCON1) & VIDINTCON1_INT_I80) {
+			ctx->xfer_start = 0;
+			ctx->xfer_retried = false;
+			goto out;
+		}
+	} else if (ms < DECON_FRAME_TIMEOUT_MS) {
+		busy = true;
+		goto out;
+	}
+
+	dev_warn_ratelimited(ctx->dev,
+			     "frame not done after %lld ms (VIDCON1 0x%08x TRIGCON 0x%08x)%s\n",
+			     ms, val, readl(ctx->regs + TRIGCON),
+			     ctx->xfer_retried ? ", giving up" : ", resending");
+	ctx->xfer_start = 0;
+	if (!ctx->xfer_retried) {
+		ctx->xfer_retried = true;
+		atomic_set(&ctx->frame_pending, 1);
+	}
+out:
+	spin_unlock_irqrestore(&ctx->te_lock, flags);
+	return busy;
+}
+
 static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 {
 	struct decon_context *ctx = dev_id;
@@ -618,10 +680,11 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	}
 
 	/*
-	 * If a new frame is pending from atomic_flush, trigger DECON transmission
-	 * during this V-Blank interval.
+	 * Trigger a pending frame on this TE edge, unless the previous frame
+	 * is still being sent: a trigger during a transfer is dropped by the
+	 * hardware, so wait for the next edge instead.
 	 */
-	if (atomic_xchg(&ctx->frame_pending, 0)) {
+	if (!decon_i80_frame_busy(ctx) && atomic_xchg(&ctx->frame_pending, 0)) {
 		u32 val = readl(ctx->regs + TRIGCON);
 
 		val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
@@ -635,6 +698,11 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 		       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
 		writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
 		       ctx->regs + TRIGCON);
+
+		spin_lock_irqsave(&ctx->te_lock, flags);
+		ctx->xfer_start = ktime_get();
+		spin_unlock_irqrestore(&ctx->te_lock, flags);
+		decon_send_event(ctx);
 	}
 
 	/*
@@ -646,7 +714,8 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	    (!pm_runtime_active(ctx->dev) ||
 	     (!test_bit(0, &ctx->irq_flags) &&
 	      !atomic_read(&ctx->frame_pending) &&
-	      !atomic_read(&ctx->wait_vsync_event)))) {
+	      !atomic_read(&ctx->wait_vsync_event) &&
+	      !ctx->xfer_start))) {
 		disable_irq_nosync(ctx->te_irq);
 		ctx->te_irq_enabled = false;
 	}
@@ -677,6 +746,19 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	 */
 	if (ctx->i80_if) {
 		if (ctx->te_irq > 0) {
+			struct drm_crtc *drm_crtc = &crtc->base;
+			struct drm_pending_vblank_event *event;
+			unsigned long flags;
+
+			event = drm_crtc->state->event;
+			drm_crtc->state->event = NULL;
+			if (event) {
+				WARN_ON(drm_crtc_vblank_get(drm_crtc) != 0);
+				spin_lock_irqsave(&drm_crtc->dev->event_lock, flags);
+				WARN_ON(ctx->event);
+				ctx->event = event;
+				spin_unlock_irqrestore(&drm_crtc->dev->event_lock, flags);
+			}
 			atomic_set(&ctx->frame_pending, 1);
 			decon_enable_te_irq(ctx);
 		} else {
@@ -763,6 +845,10 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	exynos_iommu_master_ready(ctx->dev);
 
 	decon_init(ctx);
+
+	if (ctx->i80_if)
+		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
+		       VIDINTCON0_INT_I80_EN, ctx->regs + VIDINTCON0);
 
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
@@ -862,8 +948,14 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	if (ctx->te_irq > 0)
 		synchronize_irq(ctx->te_irq);
 
-	if (ctx->i80_if)
+	if (ctx->i80_if) {
 		decon_i80_stop(ctx);
+		writel(readl(ctx->regs + VIDINTCON0) & ~(VIDINTCON0_INT_ENABLE |
+		       VIDINTCON0_INT_I80_EN), ctx->regs + VIDINTCON0);
+		ctx->xfer_start = 0;
+		ctx->xfer_retried = false;
+		decon_send_event(ctx);
+	}
 
 	pm_runtime_put_sync(ctx->dev);
 
@@ -892,11 +984,17 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	struct decon_context *ctx = (struct decon_context *)dev_id;
 	u32 val, clear_bit;
 
+	/* Ack and end the transfer together, see decon_i80_frame_busy(). */
+	spin_lock(&ctx->te_lock);
 	val = readl(ctx->regs + VIDINTCON1);
 
 	clear_bit = ctx->i80_if ? VIDINTCON1_INT_I80 : VIDINTCON1_INT_FRAME;
-	if (val & clear_bit)
+	if (val & clear_bit) {
 		writel(clear_bit, ctx->regs + VIDINTCON1);
+		ctx->xfer_start = 0;
+		ctx->xfer_retried = false;
+	}
+	spin_unlock(&ctx->te_lock);
 
 	/* check the crtc is detached already from encoder */
 	if (!ctx->drm_dev)
