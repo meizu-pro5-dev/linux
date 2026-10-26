@@ -27,6 +27,7 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
+#include <sound/jack.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
@@ -98,6 +99,13 @@ struct m86_machine_priv {
 	bool bus_qos_active;
 	atomic_t active_streams;
 	struct mutex qos_lock;
+	/* 3.5 mm jack, detected by the WM8998 JD1/MICDET accessory logic */
+	struct snd_soc_jack jack;
+};
+
+static struct snd_soc_jack_pin m86_jack_pins[] = {
+	{ .pin = "Headphone",	.mask = SND_JACK_HEADPHONE },
+	{ .pin = "Headset Mic",	.mask = SND_JACK_MICROPHONE },
 };
 
 static void m86_enable_32khz(struct m86_machine_priv *priv, bool on)
@@ -955,12 +963,33 @@ static int m86_late_probe(struct snd_soc_card *card)
 		return ret;
 	}
 
-	/* Enable Headphone output by default; keep other endpoints disabled until selected */
-	snd_soc_dapm_enable_pin(&card->dapm, "Headphone");
+	/* Keep endpoints disabled until selected; the jack drives the 3.5 mm pins */
 	snd_soc_dapm_disable_pin(&card->dapm, "Earpiece");
 	snd_soc_dapm_disable_pin(&card->dapm, "Speaker");
-	snd_soc_dapm_disable_pin(&card->dapm, "Headset Mic");
 	snd_soc_dapm_disable_pin(&card->dapm, "Main Mic");
+
+	/*
+	 * Arizona accessory detection (JD1 + MICDET, wlf,micd-* in DT) reports
+	 * insertion, headphone vs. line-out impedance, the headset mic and the
+	 * three in-line buttons. Holding JD1_ENA also keeps the codec out of
+	 * full power-off in runtime suspend.
+	 */
+	ret = snd_soc_card_jack_new_pins(card, "Headset",
+					 SND_JACK_HEADSET | SND_JACK_LINEOUT |
+					 SND_JACK_MECHANICAL | SND_JACK_BTN_0 |
+					 SND_JACK_BTN_1 | SND_JACK_BTN_2,
+					 &priv->jack, m86_jack_pins,
+					 ARRAY_SIZE(m86_jack_pins));
+	if (ret) {
+		dev_err(card->dev, "Failed to create headset jack: %d\n", ret);
+		return ret;
+	}
+
+	ret = snd_soc_component_set_jack(priv->component, &priv->jack, NULL);
+	if (ret) {
+		dev_err(card->dev, "Failed to enable jack detection: %d\n", ret);
+		return ret;
+	}
 	snd_soc_dapm_sync(&card->dapm);
 
 	/*
@@ -1015,6 +1044,16 @@ static int m86_late_probe(struct snd_soc_card *card)
 	 */
 	if (!priv->es705_booted)
 		m86_enable_mclk(priv, false);
+
+	return 0;
+}
+
+static int m86_card_remove(struct snd_soc_card *card)
+{
+	struct m86_machine_priv *priv = snd_soc_card_get_drvdata(card);
+
+	if (priv->component)
+		snd_soc_component_set_jack(priv->component, NULL, NULL);
 
 	return 0;
 }
@@ -1131,6 +1170,7 @@ static int m86_audio_probe(struct platform_device *pdev)
 	snd_soc_card_set_drvdata(card, priv);
 	card->dev = dev;
 	card->late_probe = m86_late_probe;
+	card->remove = m86_card_remove;
 	card->aux_dev = NULL;
 	card->num_aux_devs = 0;
 
