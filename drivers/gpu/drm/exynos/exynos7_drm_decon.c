@@ -592,6 +592,25 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	writel(val, ctx->regs + DECON_UPDATE);
 }
 
+/*
+ * Send one command-mode frame with the software trigger (vendor
+ * DECON_SW_TRIG, decon_reg_7420.c:253-267, :703-713). HWTRIGMASK_DISPIF0
+ * gates every trigger, not only the hardware one, so it stays set. The
+ * hardware TE trigger stays off: armed, it resends the current frame on
+ * each TE edge that finds DECON idle.
+ */
+static void decon_i80_trigger(struct decon_context *ctx)
+{
+	u32 val = readl(ctx->regs + TRIGCON);
+
+	val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
+		 TRIGCON_TRIG_SAVE_DISABLE_SYNCMGR);
+	val |= TRIGCON_SWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
+	       TRIGCON_HWTRIGMASK_DISPIF1;
+	writel(val, ctx->regs + TRIGCON);
+	writel(val | TRIGCON_SWTRIGCMD_I80_RGB, ctx->regs + TRIGCON);
+}
+
 /* Send the flip event held for the frame that was just triggered. */
 static void decon_send_event(struct decon_context *ctx)
 {
@@ -685,19 +704,9 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	 * hardware, so wait for the next edge instead.
 	 */
 	if (!decon_i80_frame_busy(ctx) && atomic_xchg(&ctx->frame_pending, 0)) {
-		u32 val = readl(ctx->regs + TRIGCON);
-
-		val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
-			 TRIGCON_HWTRIGMASK_DISPIF0 |
-			 TRIGCON_HWTRIGMASK_DISPIF1);
-		val |= TRIGCON_SWTRIGEN_I80_RGB | TRIGCON_SWTRIGCMD_I80_RGB |
-		       TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
-		       TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_HWTRIG_AUTO_MASK;
-		writel(val, ctx->regs + TRIGCON);
 		writel(readl(ctx->regs + DECON_UPDATE) |
 		       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
-		writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
-		       ctx->regs + TRIGCON);
+		decon_i80_trigger(ctx);
 
 		spin_lock_irqsave(&ctx->te_lock, flags);
 		ctx->xfer_start = ktime_get();
@@ -762,17 +771,7 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 			atomic_set(&ctx->frame_pending, 1);
 			decon_enable_te_irq(ctx);
 		} else {
-			u32 val = readl(ctx->regs + TRIGCON);
-
-			val &= ~(TRIGCON_HWTRIG_INV_I80_RGB | TRIGCON_HWTRIGEN_I80_RGB |
-				 TRIGCON_HWTRIGMASK_DISPIF0 |
-				 TRIGCON_HWTRIGMASK_DISPIF1);
-			val |= TRIGCON_SWTRIGEN_I80_RGB | TRIGCON_SWTRIGCMD_I80_RGB |
-			       TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
-			       TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_HWTRIG_AUTO_MASK;
-			writel(val, ctx->regs + TRIGCON);
-			writel(readl(ctx->regs + TRIGCON) | TRIGCON_SWTRIGCMD_I80_RGB,
-			       ctx->regs + TRIGCON);
+			decon_i80_trigger(ctx);
 		}
 	}
 
