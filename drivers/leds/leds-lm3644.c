@@ -549,6 +549,19 @@ static const struct {
 	},
 };
 
+static void lm3644_shutdown(void *data)
+{
+	struct lm3644_chip *chip = data;
+
+	cancel_delayed_work_sync(&chip->strobe_work);
+	mutex_lock(&chip->lock);
+	if (chip->hw_enabled) {
+		regmap_write(chip->regmap, LM3644_REG_ENABLE, LM3644_MODE_STANDBY);
+		lm3644_set_hw_power(chip, false);
+	}
+	mutex_unlock(&chip->lock);
+}
+
 static int lm3644_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -618,6 +631,15 @@ static int lm3644_probe(struct i2c_client *client)
 		chip->hw_enabled = true;
 	}
 
+	/*
+	 * Added before the LED class devices so devres runs it after they are
+	 * unregistered: only then can no sysfs or trigger path requeue
+	 * strobe_work. Covers unbind and a failed LED registration alike.
+	 */
+	ret = devm_add_action_or_reset(dev, lm3644_shutdown, chip);
+	if (ret)
+		return ret;
+
 	dev_info(dev, "TI LM3644 Flash/Torch driver probed (dev_id=0x%02x)\n", dev_id);
 
 	/* Register LEDs: torch0/1 as led_classdev, flash0/1 as led_classdev_flash */
@@ -668,19 +690,6 @@ static int lm3644_probe(struct i2c_client *client)
 	return 0;
 }
 
-static void lm3644_remove(struct i2c_client *client)
-{
-	struct lm3644_chip *chip = i2c_get_clientdata(client);
-
-	cancel_delayed_work_sync(&chip->strobe_work);
-	mutex_lock(&chip->lock);
-	if (chip->hw_enabled) {
-		regmap_write(chip->regmap, LM3644_REG_ENABLE, LM3644_MODE_STANDBY);
-		lm3644_set_hw_power(chip, false);
-	}
-	mutex_unlock(&chip->lock);
-}
-
 static const struct of_device_id lm3644_of_match[] = {
 	{ .compatible = "ti,leds-lm3644" },
 	{ .compatible = "ti,lm3644" },
@@ -701,7 +710,6 @@ static struct i2c_driver lm3644_driver = {
 		.dev_groups = lm3644_groups,
 	},
 	.probe = lm3644_probe,
-	.remove = lm3644_remove,
 	.id_table = lm3644_id,
 };
 
