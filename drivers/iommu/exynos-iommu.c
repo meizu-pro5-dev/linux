@@ -804,8 +804,7 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	 * v6 here, so set it statically and defer any register access to the
 	 * first __sysmmu_enable() when the master has powered the block.
 	 */
-	if (IS_ENABLED(CONFIG_ARM64) &&
-	    of_device_is_compatible(dev->of_node, "samsung,exynos-sysmmu")) {
+	if (of_device_is_compatible(dev->of_node, "samsung,exynos7420-sysmmu")) {
 		data->version = MAKE_MMU_VER(6, 0);
 		data->variant = &sysmmu_v5_variant;
 	} else {
