@@ -677,12 +677,9 @@ static const struct drm_ioctl_desc drm_ioctls[] = {
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_RMFB, drm_mode_rmfb_ioctl, 0),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_PAGE_FLIP, drm_mode_page_flip_ioctl, DRM_MASTER),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_DIRTYFB, drm_mode_dirtyfb_ioctl, DRM_MASTER),
-	DRM_IOCTL_DEF(DRM_IOCTL_MODE_CREATE_DUMB, drm_mode_create_dumb_ioctl,
-		      DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF(DRM_IOCTL_MODE_MAP_DUMB, drm_mode_mmap_dumb_ioctl,
-		      DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF(DRM_IOCTL_MODE_DESTROY_DUMB, drm_mode_destroy_dumb_ioctl,
-		      DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF(DRM_IOCTL_MODE_CREATE_DUMB, drm_mode_create_dumb_ioctl, 0),
+	DRM_IOCTL_DEF(DRM_IOCTL_MODE_MAP_DUMB, drm_mode_mmap_dumb_ioctl, 0),
+	DRM_IOCTL_DEF(DRM_IOCTL_MODE_DESTROY_DUMB, drm_mode_destroy_dumb_ioctl, 0),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, drm_mode_obj_get_properties_ioctl, 0),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_OBJ_SETPROPERTY, drm_mode_obj_set_property_ioctl, DRM_MASTER),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_CURSOR2, drm_mode_cursor2_ioctl, DRM_MASTER),
@@ -812,6 +809,29 @@ EXPORT_SYMBOL(drm_ioctl_kernel);
  * Returns:
  * Zero on success, negative error code on failure.
  */
+/*
+ * A display-only KMS device paired with a separate GPU (e.g. Exynos DECON with
+ * Panfrost) is reached by Wayland clients through its render node, where
+ * Mesa's kmsro allocates scanout buffers with the dumb buffer ioctls. Opt-in,
+ * so the default render node permissions stay unchanged.
+ */
+static bool drm_dumb_render_allow;
+module_param_named(dumb_render_allow, drm_dumb_render_allow, bool, 0444);
+MODULE_PARM_DESC(dumb_render_allow, "Allow dumb buffer ioctls on render nodes");
+
+static u32 drm_ioctl_eff_flags(const struct drm_ioctl_desc *ioctl)
+{
+	u32 flags = ioctl->flags;
+
+	if (drm_dumb_render_allow &&
+	    (ioctl->func == drm_mode_create_dumb_ioctl ||
+	     ioctl->func == drm_mode_mmap_dumb_ioctl ||
+	     ioctl->func == drm_mode_destroy_dumb_ioctl))
+		flags |= DRM_RENDER_ALLOW;
+
+	return flags;
+}
+
 long drm_ioctl(struct file *filp,
 	      unsigned int cmd, unsigned long arg)
 {
@@ -892,7 +912,7 @@ long drm_ioctl(struct file *filp,
 	if (ksize > in_size)
 		memset(kdata + in_size, 0, ksize - in_size);
 
-	retcode = drm_ioctl_kernel(filp, func, kdata, ioctl->flags);
+	retcode = drm_ioctl_kernel(filp, func, kdata, drm_ioctl_eff_flags(ioctl));
 	if (copy_to_user((void __user *)arg, kdata, out_size) != 0)
 		retcode = -EFAULT;
 
