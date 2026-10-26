@@ -922,6 +922,7 @@ static int bq25890_m86_charge_current(const char *cell, int temp, int voltage)
 	/* Native 64-mA DAC rounds down the OEM per-channel values. Unknown
 	 * cell uses the intersection of both tables, never assumes ATL. */
 	if (temp < 100) return 450000;
+	if (!cell) cell = "";
 	if (!strcmp(cell, "Sony")) return temp < 150 ? 1500000 : 2250000;
 	if (!strcmp(cell, "ATL"))
 		return temp < 250 && voltage > 4200000 ? 750000 : 2250000;
@@ -987,9 +988,10 @@ static void bq25890_m86_poll(struct work_struct *work)
 	struct bq25890_device *bq = container_of(to_delayed_work(work),
 					struct bq25890_device, m86_work);
 	struct bq25890_device *aux = power_supply_get_drvdata(bq->secondary_chrg);
-	union power_supply_propval temp, present, online, voltage, capacity, type, maximum, cell, pd_volt;
+	union power_supply_propval temp = {}, present = {}, online = {}, voltage = {}, capacity = {},
+				   type = {}, maximum = {}, cell = {}, pd_volt = {};
 	bool enable = false, terminate = false, is_pd = false;
-	int ret, vbus, optimized, idpm, budget = 500000, charge = 450000, aux_input = 0;
+	int ret, bat_ret, src_ret, vbus, optimized, idpm, budget = 500000, charge = 450000, aux_input = 0;
 
 	mutex_lock(&bq->lock);
 	mutex_lock(&aux->lock);
@@ -1000,35 +1002,42 @@ static void bq25890_m86_poll(struct work_struct *work)
 	}
 	/* All decisions use valid current measurements, not fallback 30 C or
 	 * uninitialized voltage from the old driver. Fail closed on errors. */
-	ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_TEMP, &temp);
-	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_PRESENT, &present);
-	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_VOLTAGE_NOW, &voltage);
-	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_CAPACITY, &capacity);
-	if (!ret) ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_MANUFACTURER, &cell);
+	bat_ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_TEMP, &temp);
+	if (!bat_ret) bat_ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_PRESENT, &present);
+	if (!bat_ret) bat_ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_VOLTAGE_NOW, &voltage);
+	if (!bat_ret) bat_ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_CAPACITY, &capacity);
+	if (!bat_ret) bat_ret = power_supply_get_property(bq->m86_battery, POWER_SUPPLY_PROP_MANUFACTURER, &cell);
 	if (!bq->m86_source_psy) {
 		struct power_supply *psy = power_supply_get_by_phandle(bq->dev->of_node, "meizu,usb-source");
 		if (IS_ERR_OR_NULL(psy))
 			goto out;
 		bq->m86_source_psy = psy;
 	}
-	ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_ONLINE, &online);
-	if (!ret) ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_USB_TYPE, &type);
-	if (!ret) ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_CURRENT_MAX, &maximum);
+	src_ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_ONLINE, &online);
+	if (!src_ret) src_ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_USB_TYPE, &type);
+	if (!src_ret) src_ret = power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_CURRENT_MAX, &maximum);
 	pd_volt.intval = 5000000;
-	if (!ret) {
+	if (!src_ret) {
 		if (power_supply_get_property(bq->m86_source_psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &pd_volt))
 			pd_volt.intval = 5000000;
 	}
-	is_pd = (type.intval == POWER_SUPPLY_USB_TYPE_PD ||
-		 type.intval == POWER_SUPPLY_USB_TYPE_PD_PPS ||
-		 pd_volt.intval >= 8000000);
-	if (bq->m86_temp_tripped) {
-		if (temp.intval <= 420)
-			bq->m86_temp_tripped = false;
-	} else if (temp.intval > 450) {
-		bq->m86_temp_tripped = true;
-	}
-	if (!ret) {
+	/* Keep gauge and source results apart so a good source read can never
+	 * mask a failed gauge read; any failure takes the stop path below and
+	 * leaves the temperature hysteresis untouched. */
+	ret = bat_ret ?: src_ret;
+	if (ret) {
+		dev_warn_ratelimited(bq->dev, "m86 telemetry unavailable (battery %d, source %d); charging off\n",
+				     bat_ret, src_ret);
+	} else {
+		is_pd = (type.intval == POWER_SUPPLY_USB_TYPE_PD ||
+			 type.intval == POWER_SUPPLY_USB_TYPE_PD_PPS ||
+			 pd_volt.intval >= 8000000);
+		if (bq->m86_temp_tripped) {
+			if (temp.intval <= 420)
+				bq->m86_temp_tripped = false;
+		} else if (temp.intval > 450) {
+			bq->m86_temp_tripped = true;
+		}
 		enable = present.intval && online.intval && temp.intval >= 0 && !bq->m86_temp_tripped &&
 			 voltage.intval >= 2500000 && voltage.intval <= 4500000 &&
 			 capacity.intval < 100 && !terminate;
