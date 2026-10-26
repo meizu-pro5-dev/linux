@@ -24,7 +24,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/pm_qos.h>
 #include <linux/m86-bus-qos.h>
-#include <linux/m86-fts.h>
 
 #include <video/of_display_timing.h>
 #include <video/of_videomode.h>
@@ -787,7 +786,6 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 				dev_info(ctx->dev, "m86-panel: display unblanked on DPMS enable\n");
 			put_device(&bd->dev);
 		}
-		m86_fts_set_blank(false);
 	}
 }
 
@@ -848,7 +846,6 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	if (ctx->i80_if) {
 		struct backlight_device *bd = backlight_device_get_by_name("m86-panel");
 
-		m86_fts_set_blank(true);
 		if (bd) {
 			int ret_bl = backlight_disable(bd);
 
