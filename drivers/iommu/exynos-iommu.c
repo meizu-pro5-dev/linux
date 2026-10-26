@@ -594,15 +594,8 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
 		ret = report_iommu_fault(&data->domain->domain, data->master,
 					 fault.addr, fault.type);
 	}
-	/*
-	 * The vendor display driver installs a fault handler that dumps the
-	 * DECON state and keeps running.  Do not panic here: a transient
-	 * fault during the bootloader->DRM framebuffer handover should not
-	 * wedge the whole system.
-	 */
 	if (ret)
-		dev_err_ratelimited(data->sysmmu,
-				    "Unrecoverable System MMU Fault! (ignored)\n");
+		panic("Unrecoverable System MMU Fault!");
 
 out:
 	writel(1 << itype, SYSMMU_REG(data, int_clear));
