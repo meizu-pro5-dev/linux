@@ -39,7 +39,11 @@ description: |+
 
 properties:
   compatible:
-    const: samsung,exynos-sysmmu
+    oneOf:
+      - const: samsung,exynos-sysmmu
+      - items:
+          - const: samsung,exynos7420-sysmmu
+          - const: samsung,exynos-sysmmu
 
   reg:
     maxItems: 1
