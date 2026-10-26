@@ -849,9 +849,12 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	if (ctx->i80_if) {
 		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
 		       VIDINTCON0_INT_I80_EN, ctx->regs + VIDINTCON0);
-		/* Let ECLK gate itself while idle, as vendor decon_reg_init() does. */
-		writel(readl(ctx->regs + VCLKCON0) | VCLKCON0_ECLK_IDLE_GATE_EN,
-		       ctx->regs + VCLKCON0);
+		/*
+		 * As vendor decon_reg_init() does: ECLK gates itself while idle
+		 * and VCLK only runs while a frame is sent (no free run).
+		 */
+		writel((readl(ctx->regs + VCLKCON0) | VCLKCON0_ECLK_IDLE_GATE_EN) &
+		       ~VCLKCON0_VCLKFREE, ctx->regs + VCLKCON0);
 	}
 
 	/* if vblank was enabled status, enable it again. */
