@@ -188,7 +188,7 @@ static int fixed_bus_floor(struct m86_coord *d)
 	sel = readl(d->topc + 0x214);
 	con2 = readl(d->topc + 0x150);
 	sel2 = readl(d->topc + 0x214);
-	req_khz = exynos7420_mif_effective_floor_khz(READ_ONCE(d->required_bus_qos));
+	req_khz = READ_ONCE(d->required_bus_qos);
 	exynos7420_bus_dvfs_read_unlock();
 
 	m = (con >> 16) & 0x3ff;

@@ -604,18 +604,6 @@ void exynos7420_bus_dvfs_read_unlock(void)
 }
 EXPORT_SYMBOL_GPL(exynos7420_bus_dvfs_read_unlock);
 
-u32 exynos7420_mif_effective_floor_khz(u32 requested_khz)
-{
-	return requested_khz;
-}
-EXPORT_SYMBOL_GPL(exynos7420_mif_effective_floor_khz);
-
-u32 exynos7420_int_effective_floor_khz(u32 requested_khz)
-{
-	return requested_khz;
-}
-EXPORT_SYMBOL_GPL(exynos7420_int_effective_floor_khz);
-
 /*
  * Exact physical base addresses from exynos7420_bus.c lines 4368-4371, 5307-5350:
  * - DREX[0..3]:    0x10800000, 0x10900000, 0x10a00000, 0x10b00000

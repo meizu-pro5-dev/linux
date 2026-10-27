@@ -481,16 +481,15 @@ static int set_clock(struct gpu_dvfs *d,unsigned long rate)
 }
 static int bus_floor(struct gpu_dvfs *d,u32 floor)
 {
- u32 con,sel,con2,sel2,p,m,s,eff_floor;
+ u32 con,sel,con2,sel2,p,m,s;
  exynos7420_bus_dvfs_read_lock();
  con=readl(d->topc+0x150);sel=readl(d->topc+0x214);
  con2=readl(d->topc+0x150);sel2=readl(d->topc+0x214);
- eff_floor=exynos7420_mif_effective_floor_khz(floor);
  exynos7420_bus_dvfs_read_unlock();
  p=(con>>8)&63;m=(con>>16)&1023;s=con&7;
  if(!p || !m || (con&(BIT(31)|BIT(29)))!=(BIT(31)|BIT(29)) ||
     !(sel&BIT(16)) || !(sel&BIT(20)) || con!=con2 || sel!=sel2)return -EIO;
- return div_u64(24000000ULL*m,(p<<s)*2000)>=eff_floor ? 0 : -ERANGE;
+ return div_u64(24000000ULL*m,(p<<s)*2000)>=floor ? 0 : -ERANGE;
 }
 /* devfreq calls target with its lock held, and from PM QoS notifiers with the
  * global dev_pm_qos_mtx held (sysfs min/max_freq, cooling). Updating the MIF
@@ -573,17 +572,15 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   }
   {
    struct pro5_int_always_on_rates int_rates;
-   u32 eff_int_qos;
    stage="INT-read";
    exynos7420_bus_dvfs_read_lock();
    ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);
-   eff_int_qos=exynos7420_int_effective_floor_khz(r->int_qos);
    exynos7420_bus_dvfs_read_unlock();
    if(ret)goto fault;
    stage="INT-floor";
-   ret=pro5_topc_int_always_on_floor(&int_rates,eff_int_qos);
+   ret=pro5_topc_int_always_on_floor(&int_rates,r->int_qos);
    if(ret) {
-    dev_dbg(d->dev,"GPU INT floor not met (%u kHz), deferring up-switch\n", eff_int_qos);
+    dev_dbg(d->dev,"GPU INT floor not met (%u kHz), deferring up-switch\n", r->int_qos);
     *freq = old;
     ret = 0;
     goto put;
