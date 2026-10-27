@@ -769,6 +769,9 @@ static int gpu_probe(struct platform_device *pdev)
  ret=validate_asv(d);
  if(ret)return dev_err_probe(&pdev->dev,ret,"GPU ASV handoff validation failed\n");
  if(!domain_on(d) || actual_rate(d)!=266000000 || !(readl(d->cmu+0x800)&1)) {
+  bool on=domain_on(d);
+  dev_info(&pdev->dev,"GPU cold power on: domain=%d rate=%lu coregate=%#x\n",
+           on,on ? actual_rate(d) : 0,on ? readl(d->cmu+0x800) : 0);
   ret=m86_gpu_cold_power_on(d);
   if(ret)return dev_err_probe(&pdev->dev,ret,"GPU cold power on failed\n");
  }
@@ -802,7 +805,9 @@ static int gpu_probe(struct platform_device *pdev)
   get_device(&d->zone->device);
   ret=devm_add_action_or_reset(&pdev->dev,put_zone,d->zone);if(ret)return ret;
   ret=thermal_zone_get_temp(d->zone,&temp);if(ret)return ret;
-  if(temp < -20000 || temp >=75000)return -ERANGE;
+  if(temp < -20000)return -ERANGE;
+  /* Probe stays at 266MHz, the runtime thermal cap level. */
+  if(temp>=75000)dev_warn(&pdev->dev,"GPU handoff at %d mC, held at 266MHz until it cools\n",temp);
  }
  ret=regmap_read(d->sysreg,0x1224,&mcs);if(ret)return ret;
  if(mcs!=0x31)return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"GPU MCS=%#x, expected 0x31\n",mcs);
