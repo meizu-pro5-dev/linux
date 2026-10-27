@@ -1239,6 +1239,8 @@ config TOUCHSCREEN_STMFTS
 config TOUCHSCREEN_M86_FTS
 	tristate "Meizu PRO 5 ST FTS 3980 touchscreen"
 	depends on I2C && OF
+	# Follows the DSI panel; if DRM=m, this can't be 'y'
+	depends on DRM || !DRM
 	help
 	  Support the legacy FTS protocol and existing firmware on Meizu PRO 5.
 	  Power supplies must remain enabled by the bootloader. No firmware flash

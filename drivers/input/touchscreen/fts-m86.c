@@ -12,6 +12,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/pm.h>
+#include <drm/drm_panel.h>
 
 #define FTS_FINGERS 10
 #define FTS_EVENT_SIZE 8
@@ -22,6 +23,7 @@ struct m86_fts {
 	struct input_dev *input;
 	struct touchscreen_properties prop;
 	struct mutex lock;
+	struct drm_panel_follower panel_follower;
 	bool dpms_blanked;
 	bool pm_suspended;
 	bool hw_asleep;
@@ -188,23 +190,44 @@ static void m86_fts_update_power_locked(struct m86_fts *fts)
 	}
 }
 
+static void m86_fts_set_dpms_blank(struct m86_fts *fts, bool blank)
+{
+	mutex_lock(&fts->lock);
+	if (fts->dpms_blanked != blank) {
+		fts->dpms_blanked = blank;
+		m86_fts_update_power_locked(fts);
+	}
+	mutex_unlock(&fts->lock);
+}
+
 void m86_fts_set_blank(bool blank)
 {
-	struct m86_fts *fts;
-
 	mutex_lock(&m86_fts_global_lock);
-	fts = m86_fts_instance;
-	if (fts) {
-		mutex_lock(&fts->lock);
-		if (fts->dpms_blanked != blank) {
-			fts->dpms_blanked = blank;
-			m86_fts_update_power_locked(fts);
-		}
-		mutex_unlock(&fts->lock);
-	}
+	if (m86_fts_instance)
+		m86_fts_set_dpms_blank(m86_fts_instance, blank);
 	mutex_unlock(&m86_fts_global_lock);
 }
 EXPORT_SYMBOL_GPL(m86_fts_set_blank);
+
+/* Native DSI panel: sleep before the panel powers down, wake after it is up. */
+static int m86_fts_panel_prepared(struct drm_panel_follower *follower)
+{
+	m86_fts_set_dpms_blank(container_of(follower, struct m86_fts,
+					    panel_follower), false);
+	return 0;
+}
+
+static int m86_fts_panel_unpreparing(struct drm_panel_follower *follower)
+{
+	m86_fts_set_dpms_blank(container_of(follower, struct m86_fts,
+					    panel_follower), true);
+	return 0;
+}
+
+static const struct drm_panel_follower_funcs m86_fts_panel_follower_funcs = {
+	.panel_prepared = m86_fts_panel_prepared,
+	.panel_unpreparing = m86_fts_panel_unpreparing,
+};
 
 static int m86_fts_pm_suspend(struct device *dev)
 {
@@ -339,7 +362,14 @@ static int m86_fts_probe(struct i2c_client *client)
 	mutex_lock(&m86_fts_global_lock);
 	m86_fts_instance = fts;
 	mutex_unlock(&m86_fts_global_lock);
-	return devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
+	ret = devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
+	if (ret || !drm_is_panel_follower(&client->dev))
+		return ret;
+	fts->panel_follower.funcs = &m86_fts_panel_follower_funcs;
+	ret = devm_drm_panel_add_follower(&client->dev, &fts->panel_follower);
+	if (ret)
+		return dev_err_probe(&client->dev, ret, "cannot follow panel\n");
+	return 0;
 }
 
 static const struct of_device_id m86_fts_match[] = {
