@@ -223,37 +223,34 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 	struct drm_display_mode *mode = &crtc->base.state->adjusted_mode;
+	int vsync_len, vbpd, vfpd, hsync_len, hbpd, hfpd;
 	u32 val, clkdiv;
 
 	/* nothing to do if we haven't set the mode yet */
 	if (mode->htotal == 0 || mode->vtotal == 0)
 		return;
 
-	if (!ctx->i80_if) {
-		int vsync_len, vbpd, vfpd, hsync_len, hbpd, hfpd;
-	      /* setup vertical timing values. */
-		vsync_len = mode->crtc_vsync_end - mode->crtc_vsync_start;
-		vbpd = mode->crtc_vtotal - mode->crtc_vsync_end;
-		vfpd = mode->crtc_vsync_start - mode->crtc_vdisplay;
+	/* setup vertical timing values. */
+	vsync_len = mode->crtc_vsync_end - mode->crtc_vsync_start;
+	vbpd = mode->crtc_vtotal - mode->crtc_vsync_end;
+	vfpd = mode->crtc_vsync_start - mode->crtc_vdisplay;
 
-		val = VIDTCON0_VBPD(vbpd - 1) | VIDTCON0_VFPD(vfpd - 1);
-		writel(val, ctx->regs + VIDTCON0);
+	val = VIDTCON0_VBPD(vbpd - 1) | VIDTCON0_VFPD(vfpd - 1);
+	writel(val, ctx->regs + VIDTCON0);
 
-		val = VIDTCON1_VSPW(vsync_len - 1);
-		writel(val, ctx->regs + VIDTCON1);
+	val = VIDTCON1_VSPW(vsync_len - 1);
+	writel(val, ctx->regs + VIDTCON1);
 
-		/* setup horizontal timing values.  */
-		hsync_len = mode->crtc_hsync_end - mode->crtc_hsync_start;
-		hbpd = mode->crtc_htotal - mode->crtc_hsync_end;
-		hfpd = mode->crtc_hsync_start - mode->crtc_hdisplay;
+	/* setup horizontal timing values.  */
+	hsync_len = mode->crtc_hsync_end - mode->crtc_hsync_start;
+	hbpd = mode->crtc_htotal - mode->crtc_hsync_end;
+	hfpd = mode->crtc_hsync_start - mode->crtc_hdisplay;
 
-		/* setup horizontal timing values.  */
-		val = VIDTCON2_HBPD(hbpd - 1) | VIDTCON2_HFPD(hfpd - 1);
-		writel(val, ctx->regs + VIDTCON2);
+	val = VIDTCON2_HBPD(hbpd - 1) | VIDTCON2_HFPD(hfpd - 1);
+	writel(val, ctx->regs + VIDTCON2);
 
-		val = VIDTCON3_HSPW(hsync_len - 1);
-		writel(val, ctx->regs + VIDTCON3);
-	}
+	val = VIDTCON3_HSPW(hsync_len - 1);
+	writel(val, ctx->regs + VIDTCON3);
 
 	/* setup horizontal and vertical display size. */
 	val = VIDTCON4_LINEVAL(mode->vdisplay - 1) |
@@ -261,6 +258,28 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 	writel(val, ctx->regs + VIDTCON4);
 
 	writel(mode->vdisplay - 1, ctx->regs + LINECNT_OP_THRESHOLD);
+
+	/*
+	 * The PRO 5 panel takes a MIC-compressed stream (vendor DT mic = <1>),
+	 * as decon_reg_config_mic() (decon_reg_7420.c:363-379) sets it up.
+	 */
+	if (ctx->i80_if) {
+		val = VIDTCON5_LINEVAL(mode->vdisplay / 2 - 1) |
+		      VIDTCON5_HOZVAL(mode->hdisplay * 2 / 3 - 1);
+		writel(val, ctx->regs + VIDTCON5);
+
+		val = VIDTCON6_LINEVAL(mode->vdisplay - 1) |
+		      VIDTCON6_HOZVAL(mode->hdisplay / 3 - 1);
+		writel(val, ctx->regs + VIDTCON6);
+
+		val = DECON_MIC_CON0_WIDTH_C(mode->hdisplay * 2) |
+		      DECON_MIC_CON0_MIC_PIXEL_ORDER_F |
+		      DECON_MIC_CON0_MIC_PARA_CR_CTRL_F;
+		writel(val, ctx->regs + DECON_MIC_CON0);
+
+		writel(readl(ctx->regs + ENHANCER_MIC_CTRL) |
+		       ENHANCER_MIC_CTRL_MIC_ON_F, ctx->regs + ENHANCER_MIC_CTRL);
+	}
 
 	/*
 	 * fields of register with prefix '_F' would be updated
@@ -777,18 +796,107 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	exynos_crtc_handle_event(crtc);
 }
 
+/*
+ * Stop the i80 output only after the frame in flight has been sent.
+ * Gating the clocks mid-frame leaves the window DMA suspended on the old
+ * framebuffer; once the compositor frees it, the next atomic_enable
+ * resumes the fetch from an unmapped IOVA and the SYSMMU faults forever.
+ * Same sequence as the vendor decon_reg_stop() for command mode.
+ */
+static void decon_i80_stop(struct decon_context *ctx)
+{
+	u32 val;
+	int ret;
+
+	val = readl(ctx->regs + TRIGCON);
+	val &= ~(TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
+		 TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_SWTRIGCMD_I80_RGB);
+	writel(val, ctx->regs + TRIGCON);
+
+	if (!(readl(ctx->regs + VIDCON0) & VIDCON0_DECON_STOP_STATUS))
+		return;
+
+	ret = readl_poll_timeout(ctx->regs + VIDCON1(0), val,
+				 !VIDCON1_LINECNT_GET(val) &&
+				 (val & VIDCON1_VSTATUS_MASK) == VIDCON1_VSTATUS_IDLE,
+				 10, 50 * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(ctx->dev, "frame still in flight at stop: VIDCON1 0x%08x\n",
+			 val);
+
+	val = readl(ctx->regs + VIDCON0);
+	val &= ~(VIDCON0_ENVID | VIDCON0_ENVID_F);
+	writel(val, ctx->regs + VIDCON0);
+	writel(readl(ctx->regs + DECON_UPDATE) | DECON_UPDATE_STANDALONE_F,
+	       ctx->regs + DECON_UPDATE);
+
+	ret = readl_poll_timeout(ctx->regs + VIDCON0, val,
+				 !(val & VIDCON0_DECON_STOP_STATUS),
+				 10, 20 * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(ctx->dev, "DECON did not stop: VIDCON0 0x%08x\n", val);
+}
+
+/*
+ * Command mode setup from reset, as the vendor decon_reg_init()
+ * (decon_reg_7420.c:489-537) does it for DECON-INT on one DSI with the
+ * software trigger. Geometry and MIC follow in decon_commit(). The DPU
+ * stays off with its APB clock gated, as S-Boot leaves it.
+ */
+static void decon_i80_init(struct decon_context *ctx)
+{
+	u32 val;
+	int ret;
+
+	/* S-Boot leaves DECON running on its framebuffer. */
+	decon_i80_stop(ctx);
+
+	writel(VIDCON0_SWRESET, ctx->regs + VIDCON0);
+	ret = readl_poll_timeout(ctx->regs + VIDCON0, val,
+				 !(val & VIDCON0_SWRESET), 10, 20 * USEC_PER_MSEC);
+	if (ret)
+		dev_warn(ctx->dev, "DECON reset did not finish: VIDCON0 0x%08x\n",
+			 val);
+
+	writel(readl(ctx->regs + DECON_CMU) & ~DECON_CMU_ALL_CLKGATE_ENABLE,
+	       ctx->regs + DECON_CMU);
+	writel(BLENDCON_NEW_8BIT_ALPHA_VALUE, ctx->regs + BLENDCON);
+
+	val = readl(ctx->regs + VIDOUTCON0) & ~VIDOUTCON0_IF_MASK;
+	val |= VIDOUTCON0_I80IF | VIDOUTCON0_DISP_IF_0_ON;
+	writel(val, ctx->regs + VIDOUTCON0);
+
+	writel(readl(ctx->regs + CRCCTRL) & ~(CRCCTRL_CRCCLKEN | CRCCTRL_CRCEN |
+	       CRCCTRL_CRCSTART_F), ctx->regs + CRCCTRL);
+
+	val = readl(ctx->regs + VIDCON1(0));
+	val &= ~(VIDCON1_VCLK_MASK | VIDCON1_RGB_ORDER_O_MASK);
+	val |= VIDCON1_VCLK_RUN_VDEN_DISABLE | VIDCON1_RGB_ORDER_O_RGB;
+	writel(val, ctx->regs + VIDCON1(0));
+
+	/*
+	 * ECLK gates itself while idle and VCLK only runs while a frame is
+	 * sent: no free run, as decon_reg_init_probe() (:580-582) leaves it.
+	 */
+	val = readl(ctx->regs + VCLKCON0) & ~VCLKCON0_VCLKFREE;
+	val |= VCLKCON0_ECLK_IDLE_GATE_EN | VCLKCON0_CLKVALUP;
+	writel(val, ctx->regs + VCLKCON0);
+
+	/* decon_reg_configure_trigger(DECON_SW_TRIG), :253-267 */
+	val = readl(ctx->regs + TRIGCON);
+	val &= ~(TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_TRIG_SAVE_DISABLE_SYNCMGR);
+	val |= TRIGCON_SWTRIGEN_I80_RGB;
+	writel(val, ctx->regs + TRIGCON);
+}
+
 static void decon_init(struct decon_context *ctx)
 {
 	u32 val;
 
-	/*
-	 * In command (i80) mode the bootloader already brought up the whole
-	 * display path (DSI, panel, DECON trigger).  Resetting DECON here drops
-	 * state we cannot restore yet, after which no frame is ever transmitted.
-	 * Keep the existing configuration and just update the frame buffer.
-	 */
-	if (ctx->i80_if)
+	if (ctx->i80_if) {
+		decon_i80_init(ctx);
 		return;
+	}
 
 	writel(VIDCON0_SWRESET, ctx->regs + VIDCON0);
 
@@ -844,16 +952,9 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 
 	decon_init(ctx);
 
-	if (ctx->i80_if) {
+	if (ctx->i80_if)
 		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
 		       VIDINTCON0_INT_I80_EN, ctx->regs + VIDINTCON0);
-		/*
-		 * As vendor decon_reg_init() does: ECLK gates itself while idle
-		 * and VCLK only runs while a frame is sent (no free run).
-		 */
-		writel((readl(ctx->regs + VCLKCON0) | VCLKCON0_ECLK_IDLE_GATE_EN) &
-		       ~VCLKCON0_VCLKFREE, ctx->regs + VCLKCON0);
-	}
 
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
@@ -864,47 +965,6 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
 	if (ctx->i80_if)
 		ctx->i80_handoff_processed = true;
-}
-
-/*
- * Stop the i80 output only after the frame in flight has been sent.
- * Gating the clocks mid-frame leaves the window DMA suspended on the old
- * framebuffer; once the compositor frees it, the next atomic_enable
- * resumes the fetch from an unmapped IOVA and the SYSMMU faults forever.
- * Same sequence as the vendor decon_reg_stop() for command mode.
- */
-static void decon_i80_stop(struct decon_context *ctx)
-{
-	u32 val;
-	int ret;
-
-	val = readl(ctx->regs + TRIGCON);
-	val &= ~(TRIGCON_HWTRIGEN_I80_RGB | TRIGCON_HWTRIGMASK_DISPIF0 |
-		 TRIGCON_HWTRIGMASK_DISPIF1 | TRIGCON_SWTRIGCMD_I80_RGB);
-	writel(val, ctx->regs + TRIGCON);
-
-	if (!(readl(ctx->regs + VIDCON0) & VIDCON0_DECON_STOP_STATUS))
-		return;
-
-	ret = readl_poll_timeout(ctx->regs + VIDCON1(0), val,
-				 !VIDCON1_LINECNT_GET(val) &&
-				 (val & VIDCON1_VSTATUS_MASK) == VIDCON1_VSTATUS_IDLE,
-				 10, 50 * USEC_PER_MSEC);
-	if (ret)
-		dev_warn(ctx->dev, "frame still in flight at stop: VIDCON1 0x%08x\n",
-			 val);
-
-	val = readl(ctx->regs + VIDCON0);
-	val &= ~(VIDCON0_ENVID | VIDCON0_ENVID_F);
-	writel(val, ctx->regs + VIDCON0);
-	writel(readl(ctx->regs + DECON_UPDATE) | DECON_UPDATE_STANDALONE_F,
-	       ctx->regs + DECON_UPDATE);
-
-	ret = readl_poll_timeout(ctx->regs + VIDCON0, val,
-				 !(val & VIDCON0_DECON_STOP_STATUS),
-				 10, 20 * USEC_PER_MSEC);
-	if (ret)
-		dev_warn(ctx->dev, "DECON did not stop: VIDCON0 0x%08x\n", val);
 }
 
 static void decon_atomic_disable(struct exynos_drm_crtc *crtc)

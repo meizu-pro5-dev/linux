@@ -370,4 +370,18 @@
 #define TRIGCON_SWTRIGCMD_I80_RGB		(1 << 1)
 #define TRIGCON_SWTRIGEN_I80_RGB		(1 << 0)
 
+/* MIC (Mobile Image Compression), Exynos7420 vendor regs-decon.h. */
+#define VIDTCON5				0x624
+#define VIDTCON5_LINEVAL(_x)			(((_x) & 0x1fff) << 16)
+#define VIDTCON5_HOZVAL(_x)			(((_x) & 0x1fff) << 0)
+#define VIDTCON6				0x638
+#define VIDTCON6_LINEVAL(_x)			(((_x) & 0x1fff) << 16)
+#define VIDTCON6_HOZVAL(_x)			(((_x) & 0x1fff) << 0)
+#define ENHANCER_MIC_CTRL			0x6D0
+#define ENHANCER_MIC_CTRL_MIC_ON_F		(1 << 16)
+#define DECON_MIC_CON0				0x2404
+#define DECON_MIC_CON0_WIDTH_C(_x)		(((_x) & 0x7fff) << 8)
+#define DECON_MIC_CON0_MIC_PIXEL_ORDER_F	(1 << 4)
+#define DECON_MIC_CON0_MIC_PARA_CR_CTRL_F	(1 << 1)
+
 #endif /* EXYNOS_REGS_DECON7_H */
