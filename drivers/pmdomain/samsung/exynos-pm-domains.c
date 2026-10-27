@@ -9,6 +9,7 @@
 // conjunction with runtime-pm. Support for both device-tree and non-device-tree
 // based power domain support is included.
 
+#include <linux/arm-smccc.h>
 #include <linux/io.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
@@ -21,32 +22,11 @@
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
 
-enum exynos_pd_block {
-	PD_BLK_TOP0,
-	PD_BLK_DISP,
-	PD_BLK_VPP,
-	PD_BLK_PMU,
-	PD_NUM_BLKS,
-};
-
-/* RMW descriptor for the Exynos7420 power-up/down register sequences */
-struct exynos_pd_seq {
-	u8 blk;
-	u16 off;
-	u32 set;
-	u32 clr;
-};
-
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
 	u32 local_pwr_cfg;
 	/* Value written to the OPTION register (base + 0x8); 0 = skip */
 	u32 local_pwr_option;
-	/* Optional pre/post power sequences (Exynos7420 DISP) */
-	const struct exynos_pd_seq *pre;
-	unsigned int n_pre;
-	const struct exynos_pd_seq *post;
-	unsigned int n_post;
 };
 
 struct exynos7420_reg_bits {
@@ -66,9 +46,21 @@ struct exynos7420_pd_cfg {
 	size_t num_local_clks;
 	const struct exynos7420_reg_bits *async_clks;
 	size_t num_async_clks;
+	/* Set async_clks before power on, as the vendor on_pre does (DISP). */
+	bool async_before_on;
 	const struct exynos7420_reg_bits *sys_pwr_regs;
 	size_t num_sys_pwr_regs;
+	/* Content firewall IDs to protect again after every power on. */
+	const u32 *cfw_ids;
+	size_t num_cfw_ids;
 };
+
+/* Vendor include/linux/smc.h:48-49, 113-115. */
+#define EXYNOS7420_SMC_SET_CFW_PROT	0xc20018a0
+#define EXYNOS7420_SMC_DRM_CFW_PROT	0x10000000
+#define EXYNOS7420_CFW_DISP_RW		3
+#define EXYNOS7420_CFW_VPP0		5
+#define EXYNOS7420_CFW_VPP1		6
 
 static const struct exynos7420_reg_bits exynos7420_top_clks_mfc[] = {
 	{ 0x10570804, BIT(8) },
@@ -193,6 +185,46 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] = {
 	{ 0x105c158c, BIT(0) },
 };
 
+/* Vendor pm_domains-exynos7420-cal.h:315-389, regs-pmu-exynos7420.h. */
+static const struct exynos7420_reg_bits exynos7420_top_clks_vpp[] = {
+	{ 0x105d080c, BIT(8) | BIT(4) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_vpp[] = {
+	{ 0x13ed0800, BIT(15) | BIT(14) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_vpp[] = {
+	{ 0x105c1478, BIT(0) },
+	{ 0x105c14b8, BIT(0) },
+	{ 0x105c14f8, BIT(0) },
+	{ 0x105c1538, BIT(0) },
+	{ 0x105c1578, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c15b8, BIT(0) },
+};
+static const u32 exynos7420_cfw_vpp[] = {
+	EXYNOS7420_CFW_VPP0, EXYNOS7420_CFW_VPP1,
+};
+
+static const struct exynos7420_reg_bits exynos7420_top_clks_disp[] = {
+	{ 0x105d080c, BIT(28) },
+	{ 0x105d0a20, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) },
+};
+static const struct exynos7420_reg_bits exynos7420_local_clks_disp[] = {
+	{ 0x13ad0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) },
+};
+/* The DISP async bridges sit in CMU_VPP. */
+static const struct exynos7420_reg_bits exynos7420_async_clks_disp[] = {
+	{ 0x13ed0800, BIT(3) | BIT(2) | BIT(1) | BIT(0) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_disp[] = {
+	{ 0x105c1450, BIT(0) },
+	{ 0x105c1490, BIT(0) },
+	{ 0x105c14d0, BIT(0) },
+	{ 0x105c1510, BIT(0) },
+	{ 0x105c1550, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
+	{ 0x105c1590, BIT(0) },
+};
+static const u32 exynos7420_cfw_disp[] = { EXYNOS7420_CFW_DISP_RW };
+
 static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-mfc",
@@ -265,6 +297,33 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.sys_pwr_regs = exynos7420_sys_pwr_cam1,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam1),
 	},
+	{
+		.name = "pd-vpp",
+		.pmu_off = 0x41e0,
+		.top_clks = exynos7420_top_clks_vpp,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_vpp),
+		.local_clks = exynos7420_local_clks_vpp,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_vpp),
+		.sys_pwr_regs = exynos7420_sys_pwr_vpp,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_vpp),
+		.cfw_ids = exynos7420_cfw_vpp,
+		.num_cfw_ids = ARRAY_SIZE(exynos7420_cfw_vpp),
+	},
+	{
+		.name = "pd-disp",
+		.pmu_off = 0x4080,
+		.top_clks = exynos7420_top_clks_disp,
+		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_disp),
+		.local_clks = exynos7420_local_clks_disp,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_disp),
+		.async_clks = exynos7420_async_clks_disp,
+		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_disp),
+		.async_before_on = true,
+		.sys_pwr_regs = exynos7420_sys_pwr_disp,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_disp),
+		.cfw_ids = exynos7420_cfw_disp,
+		.num_cfw_ids = ARRAY_SIZE(exynos7420_cfw_disp),
+	},
 };
 
 static int exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
@@ -321,6 +380,7 @@ static const struct {
 	{ 0x146d0000, 0x4140 },	/* CMU_ISP0 */
 	{ 0x142f0000, 0x4180 },	/* CMU_ISP1_LOCAL */
 	{ 0x147d0000, 0x4180 },	/* CMU_ISP1 */
+	{ 0x13ed0000, 0x41e0 },	/* CMU_VPP */
 };
 
 /*
@@ -419,10 +479,13 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 				   const struct exynos7420_pd_cfg *cfg)
 {
 	int timeout = 200;
+	size_t i;
 
 	/* 1. Enable top clocks */
 	exynos7420_apply_reg_list(cfg->top_clks, cfg->num_top_clks, true);
 	udelay(10);
+	if (cfg->async_before_on)
+		exynos7420_apply_async_clks(pmu_base, cfg);
 
 	/* 2. Clear sys_pwr_regs before power on */
 	exynos7420_apply_reg_list(cfg->sys_pwr_regs, cfg->num_sys_pwr_regs, false);
@@ -450,10 +513,29 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 	 * forced power-off path, as in the vendor exynos_pd_power_forced_off_pre().
 	 */
 	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
-	exynos7420_apply_async_clks(pmu_base, cfg);
+	if (!cfg->async_before_on)
+		exynos7420_apply_async_clks(pmu_base, cfg);
 
 	pr_info("exynos-pd: powered on %s (stat=%#x)\n",
 		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+
+	/*
+	 * 6. The secure world protects the block's content firewall again
+	 * after every power on, as the vendor exynos_pd_power_on_post() asks
+	 * it to (pm_domains-exynos7420.c:246-267); it answers 2.
+	 */
+	for (i = 0; i < cfg->num_cfw_ids; i++) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(EXYNOS7420_SMC_SET_CFW_PROT,
+			      EXYNOS7420_SMC_DRM_CFW_PROT, cfg->cfw_ids[i],
+			      0, 0, 0, 0, 0, &res);
+		if (res.a0 != 2) {
+			pr_err("exynos-pd: %s: CFW %u protection failed: %ld\n",
+			       cfg->name, cfg->cfw_ids[i], (long)res.a0);
+			return -EBUSY;
+		}
+	}
 	return 0;
 }
 
@@ -465,43 +547,9 @@ struct exynos_pm_domain {
 	struct generic_pm_domain pd;
 	u32 local_pwr_cfg;
 	u32 local_pwr_option;
-	void __iomem *blk[PD_NUM_BLKS];
-	const struct exynos_pd_seq *pre;
-	unsigned int n_pre;
-	const struct exynos_pd_seq *post;
-	unsigned int n_post;
 	const struct exynos7420_pd_cfg *e7420_cfg;
 	void __iomem *pmu_base;
 };
-
-static const resource_size_t exynos7420_pd_blk_addr[PD_NUM_BLKS] = {
-	[PD_BLK_TOP0] = 0x105d0000,
-	[PD_BLK_DISP] = 0x13ad0000,
-	[PD_BLK_VPP] = 0x13ed0000,
-	[PD_BLK_PMU] = 0x105c0000,
-};
-
-static void exynos_pd_apply_seq(struct exynos_pm_domain *pd,
-				const struct exynos_pd_seq *seq,
-				unsigned int n, bool power_on)
-{
-	unsigned int i;
-
-	for (i = 0; i < n; i++, seq++) {
-		void __iomem *base = pd->blk[seq->blk];
-		u32 set = power_on ? seq->set : seq->clr;
-		u32 clr = power_on ? seq->clr : seq->set;
-		u32 v;
-
-		if (!base)
-			continue;
-
-		v = readl_relaxed(base + seq->off);
-		v |= set;
-		v &= ~clr;
-		writel_relaxed(v, base + seq->off);
-	}
-}
 
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 {
@@ -526,10 +574,6 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 
 	pwr = power_on ? pd->local_pwr_cfg : 0;
 
-	/* Exynos7420: bring up top/async clocks + PMU sys_pwr before power */
-	if (power_on)
-		exynos_pd_apply_seq(pd, pd->pre, pd->n_pre, true);
-
 	if (power_on && pd->local_pwr_option)
 		writel_relaxed(pd->local_pwr_option, base + 0x8);
 
@@ -548,9 +592,6 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 		cpu_relax();
 		usleep_range(80, 100);
 	}
-
-	if (power_on)
-		exynos_pd_apply_seq(pd, pd->post, pd->n_post, true);
 
 	return 0;
 }
@@ -573,36 +614,10 @@ static const struct exynos_pm_domain_config exynos5433_cfg = {
 	.local_pwr_cfg		= 0xf,
 };
 
-/*
- * Exynos7420 DISP power sequence, ported from the vendor kernel
- * (arch/arm/mach-exynos/pm_domains-exynos7420.c + -cal.h). The generic
- * sequence is not enough on this SoC: top-to-local clocks, async-bridge
- * clocks and the PMU sys_pwr registers must be programmed around the local
- * power switch, and the OPTION register has to be written.
- */
-static const struct exynos_pd_seq exynos7420_disp_pre[] = {
-	{ PD_BLK_TOP0, 0x080c, BIT(28), 0 },
-	{ PD_BLK_TOP0, 0x0a20, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12), 0 },
-	{ PD_BLK_VPP, 0x0800, 0xf, 0 },
-	{ PD_BLK_PMU, 0x1450, 0, BIT(0) },
-	{ PD_BLK_PMU, 0x1490, 0, BIT(0) },
-	{ PD_BLK_PMU, 0x14d0, 0, BIT(0) },
-	{ PD_BLK_PMU, 0x1510, 0, BIT(0) },
-	{ PD_BLK_PMU, 0x1550, 0, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
-	{ PD_BLK_PMU, 0x1590, 0, BIT(0) },
-};
-
-static const struct exynos_pd_seq exynos7420_disp_post[] = {
-	{ PD_BLK_DISP, 0x0800, BIT(31) | BIT(30) | BIT(29) | BIT(28), 0 },
-};
-
-static const struct exynos_pm_domain_config exynos7420_disp_cfg = {
+/* Domains without an exynos7420_pds[] entry only flip the local switch. */
+static const struct exynos_pm_domain_config exynos7420_cfg = {
 	.local_pwr_cfg		= 0xf,
 	.local_pwr_option	= 0x0102,
-	.pre			= exynos7420_disp_pre,
-	.n_pre			= ARRAY_SIZE(exynos7420_disp_pre),
-	.post			= exynos7420_disp_post,
-	.n_post			= ARRAY_SIZE(exynos7420_disp_post),
 };
 
 static const struct of_device_id exynos_pm_domain_of_match[] = {
@@ -614,7 +629,7 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 		.data = &exynos5433_cfg,
 	}, {
 		.compatible = "samsung,exynos7420-pd",
-		.data = &exynos7420_disp_cfg,
+		.data = &exynos7420_cfg,
 	},
 	{ },
 };
@@ -625,9 +640,9 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
  * off when unused, including by genpd_power_off_unused() at late_initcall.
  *  AUD  - LPASS, I2S0, ADMA and the BT UART; LPASS is set up once by
  *         exynos7420_init_aud_lpass() and the gpz pads lose state when off.
- *  DISP - DECON/DSIM path initialised by the bootloader; powering it off
- *         hangs the first DECON commit.
- *  VPP  - DECON scan-out source, coupled to DISP (vendor pd-vpp).
+ *  DISP - DECON/DSIM path; its power sequence is in exynos7420_pds[], kept
+ *         on until it is verified powered off (ADR 0012 S4).
+ *  VPP  - DECON scan-out path and parent of DISP, likewise.
  *  G3D  - GPU power is owned by m86-gpu-dvfs.
  */
 static const char * const exynos_pd_always_on[] = { "AUD", "DISP", "VPP", "G3D" };
@@ -673,37 +688,17 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
 	pd->local_pwr_option = pm_domain_cfg->local_pwr_option;
-	pd->pre = pm_domain_cfg->pre;
-	pd->n_pre = pm_domain_cfg->n_pre;
-	pd->post = pm_domain_cfg->post;
-	pd->n_post = pm_domain_cfg->n_post;
 
 	if (of_address_to_resource(np, 0, &res) == 0)
 		pmu_off = res.start & 0xffff;
 
-	if (of_device_is_compatible(np, "samsung,exynos7420-pd") && pmu_off != 0x4080) {
-		pd->n_pre = 0;
-		pd->n_post = 0;
-		pd->local_pwr_cfg = 0xf;
-		pd->local_pwr_option = 0x0102;
-
+	if (of_device_is_compatible(np, "samsung,exynos7420-pd")) {
 		for (i = 0; i < ARRAY_SIZE(exynos7420_pds); i++) {
 			if (exynos7420_pds[i].pmu_off == pmu_off) {
 				pd->e7420_cfg = &exynos7420_pds[i];
 				pd->pmu_base = devm_ioremap(dev, 0x105c0000, 0x5000);
 				break;
 			}
-		}
-	}
-
-	/* Exynos7420: map the clock/PMU register windows used by the seqs */
-	if (pd->n_pre || pd->n_post) {
-		for (i = 0; i < PD_NUM_BLKS; i++) {
-			pd->blk[i] = devm_ioremap(dev,
-						  exynos7420_pd_blk_addr[i],
-						  0x1000);
-			if (!pd->blk[i])
-				dev_warn(dev, "failed to map block %d\n", i);
 		}
 	}
 
