@@ -1744,20 +1744,32 @@ CLK_OF_DECLARE(exynos7_clk_g3d, "samsung,exynos7-clock-g3d",
 
 /* Register Offset definitions for CMU_DISP (0x13AD0000) */
 #define DISP_PLL_LOCK			0x0000
+#define DPHY_PLL_LOCK			0x0004
 #define DISP_PLL_CON0			0x0100
+#define DISP_PLL_CON1			0x0104
+#define DISP_PLL_CON2			0x0108
+#define DPHY_PLL_CON0			0x0110
+#define DPHY_PLL_CON1			0x0114
 #define MUX_SEL_DISP0			0x0200
 #define MUX_SEL_DISP1			0x0204
 #define MUX_SEL_DISP2			0x0208
 #define MUX_SEL_DISP3			0x020C
+#define MUX_SEL_DISP4			0x0210
+#define MUX_SEL_DISP5			0x0214
 #define DIV_DISP			0x0600
 #define ENABLE_ACLK_DISP		0x0800
 #define ENABLE_ACLK_DISP_RO_SMMU	0x0804
 #define ENABLE_ACLK_DISP_RW_SMMU	0x0808
+#define ENABLE_ACLK_DISP_RO_SFW		0x080C
+#define ENABLE_ACLK_DISP_RW_SFW		0x0810
 #define ENABLE_PCLK_DISP		0x0900
 #define ENABLE_PCLK_DISP_RO_SMMU	0x0904
 #define ENABLE_PCLK_DISP_RW_SMMU	0x0908
+#define ENABLE_PCLK_DISP_RO_SFW		0x090C
+#define ENABLE_PCLK_DISP_RW_SFW		0x0910
 #define ENABLE_SCLK_DISP1		0x0A04
 #define ENABLE_SCLK_DISP2		0x0A08
+#define ENABLE_SCLK_DISP4		0x0A10
 
 static const struct samsung_pll_rate_table disp_pll_tbl[] = {
 	PLL_36XX_RATE(24 * MHZ, 252000000, 42, 2, 1, 0),
@@ -1871,22 +1883,35 @@ static const struct samsung_gate_clock disp_gate_clks[] = {
 		CLK_IGNORE_UNUSED, 0),
 };
 
+/* All of the vendor save_list_disp (pm_domains-exynos7420-cal.h). */
 static const unsigned long disp_clk_regs[] = {
 	DISP_PLL_LOCK,
 	DISP_PLL_CON0,
+	DISP_PLL_CON1,
+	DISP_PLL_CON2,
+	DPHY_PLL_LOCK,
+	DPHY_PLL_CON0,
+	DPHY_PLL_CON1,
 	MUX_SEL_DISP0,
 	MUX_SEL_DISP1,
 	MUX_SEL_DISP2,
 	MUX_SEL_DISP3,
+	MUX_SEL_DISP4,
+	MUX_SEL_DISP5,
 	DIV_DISP,
 	ENABLE_ACLK_DISP,
 	ENABLE_ACLK_DISP_RO_SMMU,
 	ENABLE_ACLK_DISP_RW_SMMU,
+	ENABLE_ACLK_DISP_RO_SFW,
+	ENABLE_ACLK_DISP_RW_SFW,
 	ENABLE_PCLK_DISP,
 	ENABLE_PCLK_DISP_RO_SMMU,
 	ENABLE_PCLK_DISP_RW_SMMU,
+	ENABLE_PCLK_DISP_RO_SFW,
+	ENABLE_PCLK_DISP_RW_SFW,
 	ENABLE_SCLK_DISP1,
 	ENABLE_SCLK_DISP2,
+	ENABLE_SCLK_DISP4,
 };
 
 static const struct samsung_cmu_info disp_cmu_info = {
