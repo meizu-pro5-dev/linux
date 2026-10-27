@@ -70,6 +70,7 @@ struct decon_context {
 	struct clk			*aclk;
 	struct clk			*eclk;
 	struct clk			*vclk;
+	struct clk			*aclk_disp;
 	void __iomem			*regs;
 	unsigned long			irq_flags;
 	bool				i80_if;
@@ -1213,6 +1214,14 @@ static int decon_probe(struct platform_device *pdev)
 		goto err_iounmap;
 	}
 
+	/* Exynos7420 DISP bus write path, see exynos7_decon_resume(). */
+	ctx->aclk_disp = devm_clk_get_optional(dev, "aclk_disp");
+	if (IS_ERR(ctx->aclk_disp)) {
+		ret = dev_err_probe(dev, PTR_ERR(ctx->aclk_disp),
+				    "failed to get aclk_disp\n");
+		goto err_iounmap;
+	}
+
 	ret =  platform_get_irq_byname(pdev, ctx->i80_if ? "lcd_sys" : "vsync");
 	if (ret < 0)
 		goto err_iounmap;
@@ -1348,6 +1357,7 @@ static int exynos7_decon_suspend(struct device *dev)
 	clk_disable_unprepare(ctx->eclk);
 	clk_disable_unprepare(ctx->aclk);
 	clk_disable_unprepare(ctx->pclk);
+	clk_disable_unprepare(ctx->aclk_disp);
 
 	return 0;
 }
@@ -1385,8 +1395,21 @@ static int exynos7_decon_resume(struct device *dev)
 		goto err_vclk_enable;
 	}
 
+	/*
+	 * The vendor decon_runtime_resume() (decon_core.c:3942-3946) also
+	 * runs aclk_disp, the DISP to TOP bus path the window DMA uses.
+	 */
+	ret = clk_prepare_enable(ctx->aclk_disp);
+	if (ret < 0) {
+		DRM_DEV_ERROR(dev, "Failed to prepare_enable the aclk_disp [%d]\n",
+			      ret);
+		goto err_aclk_disp_enable;
+	}
+
 	return 0;
 
+err_aclk_disp_enable:
+	clk_disable_unprepare(ctx->vclk);
 err_vclk_enable:
 	clk_disable_unprepare(ctx->eclk);
 err_eclk_enable:
