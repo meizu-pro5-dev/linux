@@ -1827,11 +1827,11 @@ static const struct samsung_div_clock disp_div_clks[] = {
 static const struct samsung_gate_clock disp_gate_clks[] = {
 	GATE(CLK_SCLK_DSD, "user_sclk_dsd", "usermux_sclk_dsd",
 		ENABLE_SCLK_DISP1, 16, 0, 0),
-	/* DISP -> TOP write path of sysmmu_disp_rw; BLK_DISP is always on. */
+	/* DISP -> TOP path of sysmmu_disp_rw, run by DECON as "aclk_disp". */
 	GATE(0, "aclk_lh_async_si_top_disp", "usermux_aclk_disp_400",
-		ENABLE_ACLK_DISP, 28, CLK_IS_CRITICAL, 0),
+		ENABLE_ACLK_DISP, 28, 0, 0),
 	GATE(CLK_ACLK_XIU_DISP_RW, "aclk_xiu_disp_rw", "aclk_lh_async_si_top_disp",
-		ENABLE_ACLK_DISP, 26, CLK_IS_CRITICAL, 0),
+		ENABLE_ACLK_DISP, 26, 0, 0),
 	GATE(CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8, "mipidphy0_bit",
 		"usermux_mipidphy0_bit", ENABLE_SCLK_DISP2, 8, CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_MIPIDPHY0_RXCLKESC0, "mipidphy0_rx",
