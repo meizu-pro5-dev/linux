@@ -16,8 +16,13 @@
 
 #define PLL_MASK ((0x3ff << 16) | (0x3f << 8) | 7)
 #define POLL_US 10000
-struct m86_rate { unsigned long hz; u32 div0, div1, pms; };
+
+struct m86_rate {
+	unsigned long hz;
+	u32 div0, div1, pms;
+};
 #include "m86-rate-tables.h"
+
 struct m86_cpuclk {
 	struct clk_hw hw;
 	struct device *dev;
@@ -32,11 +37,13 @@ struct m86_cpuclk {
 	struct hlist_node hotplug_node;
 	bool online;
 };
+
 #define to_m86(hw) container_of(hw, struct m86_cpuclk, hw)
 
 static unsigned long pll_rate(u32 con, unsigned long fin)
 {
 	u32 p = (con >> 8) & 0x3f;
+
 	if (!p || !(con & BIT(31)) || !(con & BIT(29)))
 		return 0;
 	return div_u64((u64)fin * ((con >> 16) & 0x3ff), p << (con & 7));
@@ -67,6 +74,7 @@ static unsigned long current_rate(struct m86_cpuclk *c)
 {
 	u32 div, root;
 	unsigned long rate;
+
 	if (!accessible(c))
 		return 0;
 	if (readl(c->base + 0x700) || readl(c->base + 0x704))
@@ -93,6 +101,7 @@ static unsigned long m86_recalc(struct clk_hw *hw, unsigned long parent_rate)
 {
 	struct m86_cpuclk *c = to_m86(hw);
 	unsigned long rate;
+
 	mutex_lock(&c->lock);
 	rate = c->failed ? 0 : current_rate(c);
 	mutex_unlock(&c->lock);
@@ -104,6 +113,7 @@ static long m86_round(struct clk_hw *hw, unsigned long request, unsigned long *p
 	struct m86_cpuclk *c = to_m86(hw);
 	unsigned long best = 0;
 	unsigned int i;
+
 	for (i = 0; i < c->nr_rates; i++)
 		if (c->rates[i].hz <= request && c->rates[i].hz <= c->ceiling)
 			best = max(best, c->rates[i].hz);
@@ -113,12 +123,14 @@ static long m86_round(struct clk_hw *hw, unsigned long request, unsigned long *p
 static int wait_clear(struct m86_cpuclk *c, u32 offset, u32 mask)
 {
 	u32 val;
+
 	return readl_poll_timeout(c->base + offset, val, !(val & mask), 1, POLL_US);
 }
 
 static int set_divs(struct m86_cpuclk *c, u32 d0, u32 d1)
 {
 	int ret;
+
 	writel(d0, c->base + 0x600);
 	ret = wait_clear(c, 0x700, c->atlas ? 0x4101111 : 0x1111111);
 	if (ret || readl(c->base + 0x600) != d0)
@@ -133,6 +145,7 @@ static int set_divs(struct m86_cpuclk *c, u32 d0, u32 d1)
 static int select_root(struct m86_cpuclk *c, u32 which)
 {
 	u32 val, original = readl(c->base + 0x208);
+
 	writel((original & ~1U) | which, c->base + 0x208);
 	return readl_poll_timeout(c->base + 0x408, val, (val & 7) == which,
 				 1, POLL_US);
@@ -147,7 +160,8 @@ static int program_pll(struct m86_cpuclk *c, u32 pms)
 
 	writel(lock_cycles, c->base + 0x000);
 	writel((con & ~PLL_MASK) | pms, c->base + 0x100);
-	/* Flush writes, then allow a complete programmed 24MHz lock interval.
+	/*
+	 * Flush writes, then allow a complete programmed 24MHz lock interval.
 	 * Do not require observing a possibly very short LOCK deassertion.
 	 * Interrupts remain enabled; this callback runs under a mutex.
 	 */
@@ -156,7 +170,7 @@ static int program_pll(struct m86_cpuclk *c, u32 pms)
 		return -EIO;
 	usleep_range(settle_us, settle_us + 10);
 	ret = readl_poll_timeout(c->base + 0x100, val,
-		(val & PLL_MASK) == pms && (val & BIT(29)), 1, POLL_US);
+				 (val & PLL_MASK) == pms && (val & BIT(29)), 1, POLL_US);
 	if (ret)
 		return ret;
 	usleep_range(2, 5);
@@ -168,8 +182,10 @@ static int program_pll(struct m86_cpuclk *c, u32 pms)
 static u32 max_fields(u32 a, u32 b, const u8 *shifts, unsigned int n)
 {
 	unsigned int i;
+
 	for (i = 0; i < n; i++) {
 		u32 shift = shifts[i], mask = 7U << shift;
+
 		a = (a & ~mask) | (max((a >> shift) & 7, (b >> shift) & 7) << shift);
 	}
 	return a;
@@ -186,6 +202,7 @@ static int m86_set(struct clk_hw *hw, unsigned long hz, unsigned long parent)
 	unsigned long old, safe;
 	unsigned int i;
 	int ret = -EINVAL;
+
 	for (i = 0; i < c->nr_rates; i++)
 		if (c->rates[i].hz == hz)
 			target = &c->rates[i];
@@ -193,47 +210,71 @@ static int m86_set(struct clk_hw *hw, unsigned long hz, unsigned long parent)
 		return c->failed ? -EIO : -EINVAL;
 	mutex_lock(&c->lock);
 	/* A fully offline cluster is inaccessible, not a poisoned PLL. */
-	if (!accessible(c)) { ret = -EHOSTDOWN; goto out; }
+	if (!accessible(c)) {
+		ret = -EHOSTDOWN;
+		goto out;
+	}
 	old = current_rate(c);
 	safe = safe_rate(c);
 	if (!old || !safe || (readl(c->base + 0x408) & 7) ||
 	    !(readl(c->base + 0x204) & 1) ||
 	    (readl(c->base + 0x404) & 7) != 1)
 		goto out;
-	if (hz == old) { ret = 0; goto out; }
-	if (clk_get_rate(c->fin) != 24000000) { ret = -EINVAL; goto out; }
+	if (hz == old) {
+		ret = 0;
+		goto out;
+	}
+	if (clk_get_rate(c->fin) != 24000000) {
+		ret = -EINVAL;
+		goto out;
+	}
 	old0 = readl(c->base + 0x600);
 	old1 = readl(c->base + 0x604);
 	/* Refuse reserved bit3 in each core divider or an unrepresentable bypass. */
-	if (old0 & 0x88) { ret = -EINVAL; goto out; }
+	if (old0 & 0x88) {
+		ret = -EINVAL;
+		goto out;
+	}
 	core_div = DIV_ROUND_UP(safe, min(old, hz));
-	if (!core_div || core_div > 8) { ret = -ERANGE; goto out; }
+	if (!core_div || core_div > 8) {
+		ret = -ERANGE;
+		goto out;
+	}
 	/* Preserve non-divider bits; vendor masks are not whole-register authority. */
 	target0 = old0;
 	for (i = 0; i < (c->atlas ? ARRAY_SIZE(atlas_fields) : ARRAY_SIZE(apollo_fields)); i++) {
 		u32 s = c->atlas ? atlas_fields[i] : apollo_fields[i];
+
 		target0 = (target0 & ~(7U << s)) | (target->div0 & (7U << s));
 	}
 	target1 = old1;
 	for (i = 0; i < (c->atlas ? 3 : 2); i++)
 		target1 = (target1 & ~(7U << (i * 4))) | (target->div1 & (7U << (i * 4)));
 	temp0 = max_fields(old0, target0,
-		c->atlas ? atlas_fields : apollo_fields,
-		c->atlas ? ARRAY_SIZE(atlas_fields) : ARRAY_SIZE(apollo_fields));
+			   c->atlas ? atlas_fields : apollo_fields,
+			   c->atlas ? ARRAY_SIZE(atlas_fields) : ARRAY_SIZE(apollo_fields));
 	temp0 = (temp0 & ~7U) | max(temp0 & 7, core_div - 1);
 	temp1 = max_fields(old1, target1, div1_fields, c->atlas ? 3 : 2);
 	ret = set_divs(c, temp0, temp1);
-	if (ret) goto failed;
+	if (ret)
+		goto failed;
 	ret = select_root(c, 1);
-	if (ret) goto failed;
+	if (ret)
+		goto failed;
 	/* Core on BUS0 <= min(old,new); auxiliary dividers never reduced here. */
 	ret = program_pll(c, target->pms);
-	if (ret) goto failed;
+	if (ret)
+		goto failed;
 	ret = select_root(c, 0);
-	if (ret) goto failed;
+	if (ret)
+		goto failed;
 	ret = set_divs(c, target0, target1);
-	if (ret) goto failed;
-	if (current_rate(c) != hz) { ret = -EIO; goto failed; }
+	if (ret)
+		goto failed;
+	if (current_rate(c) != hz) {
+		ret = -EIO;
+		goto failed;
+	}
 	goto out;
 failed:
 	/* Never guess a rollback rate. Preserve observed state and prohibit retries. */
@@ -246,14 +287,18 @@ out:
 }
 
 static const struct clk_ops m86_ops = {
-	.recalc_rate = m86_recalc, .round_rate = m86_round, .set_rate = m86_set,
+	.recalc_rate = m86_recalc,
+	.round_rate = m86_round,
+	.set_rate = m86_set,
 };
 
 /* Callbacks never invoke CCF, avoiding prepare_lock / CPU hotplug ABBA. */
 static int m86_hotplug_state;
+
 static int m86_cpu_online(unsigned int cpu, struct hlist_node *node)
 {
 	struct m86_cpuclk *c = container_of(node, struct m86_cpuclk, hotplug_node);
+
 	if (cpumask_test_cpu(cpu, &c->cpus)) {
 		mutex_lock(&c->lock);
 		c->online = true;
@@ -266,6 +311,7 @@ static int m86_cpu_offline(unsigned int cpu, struct hlist_node *node)
 {
 	struct m86_cpuclk *c = container_of(node, struct m86_cpuclk, hotplug_node);
 	cpumask_t remaining;
+
 	if (cpumask_test_cpu(cpu, &c->cpus)) {
 		mutex_lock(&c->lock);
 		cpumask_and(&remaining, &c->cpus, cpu_online_mask);
@@ -279,6 +325,7 @@ static int m86_cpu_offline(unsigned int cpu, struct hlist_node *node)
 static void m86_remove_hotplug(void *data)
 {
 	struct m86_cpuclk *c = data;
+
 	cpuhp_state_remove_instance(m86_hotplug_state, &c->hotplug_node);
 }
 
@@ -289,9 +336,12 @@ static int m86_probe(struct platform_device *pdev)
 	unsigned int cpu;
 	int ret;
 	u32 ceiling;
-	if (!of_machine_is_compatible("meizu,m86")) return -ENODEV;
+
+	if (!of_machine_is_compatible("meizu,m86"))
+		return -ENODEV;
 	c = devm_kzalloc(&pdev->dev, sizeof(*c), GFP_KERNEL);
-	if (!c) return -ENOMEM;
+	if (!c)
+		return -ENOMEM;
 	c->dev = &pdev->dev;
 	mutex_init(&c->lock);
 	c->atlas = of_device_is_compatible(pdev->dev.of_node, "meizu,m86-atlas-clock");
@@ -300,48 +350,69 @@ static int m86_probe(struct platform_device *pdev)
 	c->shift = c->atlas ? 4 : 8;
 	for_each_possible_cpu(cpu) {
 		struct device *dev = get_cpu_device(cpu);
-		if (dev && dev->of_node && of_device_is_compatible(dev->of_node,
-			c->atlas ? "arm,cortex-a57" : "arm,cortex-a53"))
+
+		if (dev && dev->of_node &&
+		    of_device_is_compatible(dev->of_node,
+					    c->atlas ? "arm,cortex-a57" : "arm,cortex-a53"))
 			cpumask_set_cpu(cpu, &c->cpus);
 	}
-	if (cpumask_empty(&c->cpus)) return -ENODEV;
+	if (cpumask_empty(&c->cpus))
+		return -ENODEV;
 	ret = cpuhp_state_add_instance(m86_hotplug_state, &c->hotplug_node);
-	if (ret) return ret;
+	if (ret)
+		return ret;
 	ret = devm_add_action_or_reset(&pdev->dev, m86_remove_hotplug, c);
-	if (ret) return ret;
-	if (!accessible(c)) return -EPROBE_DEFER;
+	if (ret)
+		return ret;
+	if (!accessible(c))
+		return -EPROBE_DEFER;
 	c->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(c->base)) return PTR_ERR(c->base);
+	if (IS_ERR(c->base))
+		return PTR_ERR(c->base);
 	c->topc = devm_ioremap(&pdev->dev, 0x10570000, 0x1000);
-	if (!c->topc) return -ENOMEM;
+	if (!c->topc)
+		return -ENOMEM;
 	c->safe = devm_clk_get(&pdev->dev, "safe");
-	if (IS_ERR(c->safe)) return PTR_ERR(c->safe);
+	if (IS_ERR(c->safe))
+		return PTR_ERR(c->safe);
 	c->fin = devm_clk_get(&pdev->dev, "fin");
-	if (IS_ERR(c->fin)) return PTR_ERR(c->fin);
+	if (IS_ERR(c->fin))
+		return PTR_ERR(c->fin);
 	ret = of_property_read_u32(pdev->dev.of_node,
-		"meizu,max-validated-frequency", &ceiling);
-	if (ret || !ceiling) return -EINVAL;
+				   "meizu,max-validated-frequency", &ceiling);
+	if (ret || !ceiling)
+		return -EINVAL;
 	c->ceiling = ceiling;
 	init.name = c->atlas ? "m86_atlas_cpu" : "m86_apollo_cpu";
 	c->hw.init = &init;
 	ret = devm_clk_hw_register(&pdev->dev, &c->hw);
-	if (ret) return ret;
+	if (ret)
+		return ret;
 	return devm_of_clk_add_hw_provider(&pdev->dev, of_clk_hw_simple_get, &c->hw);
 }
+
 static const struct of_device_id m86_matches[] = {
 	{ .compatible = "meizu,m86-atlas-clock" },
-	{ .compatible = "meizu,m86-apollo-clock" }, { }
+	{ .compatible = "meizu,m86-apollo-clock" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, m86_matches);
+
 static struct platform_driver m86_driver = {
 	.probe = m86_probe,
-	.driver = { .name = "m86-cpu-clocks", .of_match_table = m86_matches },
+	.driver = {
+		.name = "m86-cpu-clocks",
+		.of_match_table = m86_matches,
+	},
 };
+
 static int __init m86_clocks_init(void)
 {
 	int ret;
+
 	m86_hotplug_state = cpuhp_setup_state_multi(CPUHP_AP_ONLINE_DYN,
-		"m86/cpu-clocks:online", m86_cpu_online, m86_cpu_offline);
+						    "m86/cpu-clocks:online",
+						    m86_cpu_online, m86_cpu_offline);
 	if (m86_hotplug_state < 0)
 		return m86_hotplug_state;
 	ret = platform_driver_register(&m86_driver);
@@ -349,6 +420,7 @@ static int __init m86_clocks_init(void)
 		cpuhp_remove_multi_state(m86_hotplug_state);
 	return ret;
 }
+
 static void __exit m86_clocks_exit(void)
 {
 	platform_driver_unregister(&m86_driver);
