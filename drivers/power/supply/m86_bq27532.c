@@ -143,7 +143,15 @@ static const struct of_device_id m86_of[] = {
 };
 MODULE_DEVICE_TABLE(of, m86_of);
 static struct i2c_driver m86_driver = {
-	.driver = { .name = "m86-bq27532-readonly", .of_match_table = m86_of },
+	.driver = {
+		.name = "m86-bq27532-readonly",
+		.of_match_table = m86_of,
+		/*
+		 * bq25890 holds this power supply through its phandle and keeps
+		 * polling it; unbinding would leave it calling a freed client.
+		 */
+		.suppress_bind_attrs = true,
+	},
 	.probe = m86_probe,
 };
 module_i2c_driver(m86_driver);
