@@ -7,7 +7,6 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
-#include <linux/m86-fts.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -28,9 +27,6 @@ struct m86_fts {
 	bool pm_suspended;
 	bool hw_asleep;
 };
-
-static DEFINE_MUTEX(m86_fts_global_lock);
-static struct m86_fts *m86_fts_instance;
 
 static int m86_fts_read(struct m86_fts *fts, const u8 *cmd, unsigned int ncmd,
 			u8 *data, unsigned int size)
@@ -200,16 +196,7 @@ static void m86_fts_set_dpms_blank(struct m86_fts *fts, bool blank)
 	mutex_unlock(&fts->lock);
 }
 
-void m86_fts_set_blank(bool blank)
-{
-	mutex_lock(&m86_fts_global_lock);
-	if (m86_fts_instance)
-		m86_fts_set_dpms_blank(m86_fts_instance, blank);
-	mutex_unlock(&m86_fts_global_lock);
-}
-EXPORT_SYMBOL_GPL(m86_fts_set_blank);
-
-/* Native DSI panel: sleep before the panel powers down, wake after it is up. */
+/* Sleep before the panel powers down, wake after it is up. */
 static int m86_fts_panel_prepared(struct drm_panel_follower *follower)
 {
 	m86_fts_set_dpms_blank(container_of(follower, struct m86_fts,
@@ -263,11 +250,6 @@ static void m86_fts_disable(void *data)
 {
 	struct m86_fts *fts = data;
 	const u8 disable[] = { 0xb6, 0x00, 0x1c, 0x00 };
-
-	mutex_lock(&m86_fts_global_lock);
-	if (m86_fts_instance == fts)
-		m86_fts_instance = NULL;
-	mutex_unlock(&m86_fts_global_lock);
 
 	mutex_lock(&fts->lock);
 	if (!fts->hw_asleep) {
@@ -359,10 +341,7 @@ static int m86_fts_probe(struct i2c_client *client)
 		return ret;
 	enable_irq(client->irq);
 	i2c_set_clientdata(client, fts);
-	mutex_lock(&m86_fts_global_lock);
-	m86_fts_instance = fts;
-	mutex_unlock(&m86_fts_global_lock);
-	ret = devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
+	ret =devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
 	if (ret || !drm_is_panel_follower(&client->dev))
 		return ret;
 	fts->panel_follower.funcs = &m86_fts_panel_follower_funcs;
