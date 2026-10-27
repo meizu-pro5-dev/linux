@@ -560,22 +560,10 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 		for (i = 0; i < n; i++)
 			pr_err("exynos-pd: %s before power off: %pa = %#010x\n",
 			       pd->name, &pd->dump_regs[i], dump[i]);
-
 		/*
-		 * genpd keeps the domain on after a failed power off, and its
-		 * devices will touch it again: switch it fully back on rather
-		 * than leave it half way.
+		 * Writing the domain back on from here hangs the SoC on Exynos
+		 * 7420 DISP, so only report it.
 		 */
-		writel_relaxed(0xf, pmu_base + pd->pmu_off + 0x0);
-		timeout = 200;
-		while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0xf) {
-			if (--timeout <= 0)
-				break;
-			usleep_range(10, 20);
-		}
-		pr_err("exynos-pd: %s back on (stat=%#x)\n", pd->name,
-		       readl_relaxed(pmu_base + pd->pmu_off + 0x4));
-		exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
 		return -EBUSY;
 	}
 
