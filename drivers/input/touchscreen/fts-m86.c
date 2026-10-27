@@ -341,7 +341,7 @@ static int m86_fts_probe(struct i2c_client *client)
 		return ret;
 	enable_irq(client->irq);
 	i2c_set_clientdata(client, fts);
-	ret =devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
+	ret = devm_add_action_or_reset(&client->dev, m86_fts_disable, fts);
 	if (ret || !drm_is_panel_follower(&client->dev))
 		return ret;
 	fts->panel_follower.funcs = &m86_fts_panel_follower_funcs;
