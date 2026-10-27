@@ -1058,7 +1058,7 @@ static int gpu_probe(struct platform_device *pdev)
  }
  dev_info(&pdev->dev,"retained GPU handoff: rate=%lu cap=%lu raw_selector=%#x voltage_writes=%u MCS=%#x\n",
   clk_get_rate(d->clock),d->cap,selector,d->active_voltage || d->normal_on_voltage,mcs);
- if(d->normal_on_voltage)dev_info(d->dev,"explicit Normal ON fixed-LDO protocol, max544MHz\n");
+ if(d->normal_on_voltage)dev_info(d->dev,"explicit Normal ON fixed-LDO protocol, cap %luMHz\n",d->cap/1000000);
  return 0;
 }
 static int gpu_remove(struct platform_device *pdev)
