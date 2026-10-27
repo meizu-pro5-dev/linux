@@ -143,7 +143,10 @@ static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
 }
 
 static umode_t m86_visible(const void *data, enum hwmon_sensor_types type,
-			   u32 attr, int channel) { return 0444; }
+			   u32 attr, int channel)
+{
+	return 0444;
+}
 
 static int m86_read_locked(struct device *dev, enum hwmon_sensor_types type,
 			   u32 attr, int channel, long *val)
@@ -152,6 +155,7 @@ static int m86_read_locked(struct device *dev, enum hwmon_sensor_types type,
 	void __iomem *b = t->base[channel];
 	u32 status, trim, code;
 	int e1, e2, ret, attempt;
+
 	trim = t->trim[channel];
 	if (!(readl(b + EXYNOS7420_TMU_REG_CONTROL) & BIT(0))) {
 		dev_err_ratelimited(dev, "TMU%d sensing disabled control=%08x\n",
@@ -181,10 +185,13 @@ static int m86_read_locked(struct device *dev, enum hwmon_sensor_types type,
 				    channel, readl(b + EXYNOS7420_TMU_REG_STATUS));
 		return -EAGAIN;
 	}
-	e1 = trim & 0x1ff; e2 = (trim >> 9) & 0x1ff;
-	if (!e1) return -ENODATA; /* Do not disguise missing efuse by fallback. */
+	e1 = trim & 0x1ff;
+	e2 = (trim >> 9) & 0x1ff;
+	if (!e1)
+		return -ENODATA; /* Do not disguise missing efuse by fallback. */
 	if (trim & BIT(23)) {
-		if (e2 <= e1) return -ERANGE;
+		if (e2 <= e1)
+			return -ERANGE;
 		*val = ((int)code - e1) * 60000 / (e2 - e1) + 25000;
 	} else {
 		*val = ((int)code - e1 + 25) * 1000;
@@ -196,6 +203,7 @@ static int m86_read(struct device *dev, enum hwmon_sensor_types type,
 		    u32 attr, int channel, long *val)
 {
 	int ret;
+
 	mutex_lock(&m86_tmu_access);
 	ret = m86_read_locked(dev, type, attr, channel, val);
 	mutex_unlock(&m86_tmu_access);
@@ -403,18 +411,22 @@ static int m86_probe(struct platform_device *pdev)
 	int i, ret;
 
 	clk = devm_clk_get_enabled(&pdev->dev, "tmu_apbif");
-	if (IS_ERR(clk)) return dev_err_probe(&pdev->dev, PTR_ERR(clk), "TMU APB clock failed\n");
+	if (IS_ERR(clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(clk), "TMU APB clock failed\n");
 	clk = devm_clk_get_enabled(&pdev->dev, "tmu_sclk");
-	if (IS_ERR(clk)) return dev_err_probe(&pdev->dev, PTR_ERR(clk), "TMU sensing clock failed\n");
+	if (IS_ERR(clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(clk), "TMU sensing clock failed\n");
 
 	t = devm_kzalloc(&pdev->dev, sizeof(*t), GFP_KERNEL);
-	if (!t) return -ENOMEM;
+	if (!t)
+		return -ENOMEM;
 	t->dev = &pdev->dev;
 	platform_set_drvdata(pdev, t);
 
 	for (i = 0; i < 4; i++) {
 		t->base[i] = devm_platform_ioremap_resource(pdev, i);
-		if (IS_ERR(t->base[i])) return PTR_ERR(t->base[i]);
+		if (IS_ERR(t->base[i]))
+			return PTR_ERR(t->base[i]);
 
 		ret = m86_tmu_hw_init_bank(t, i);
 		if (ret)
@@ -425,7 +437,8 @@ static int m86_probe(struct platform_device *pdev)
 
 	hwmon = devm_hwmon_device_register_with_info(&pdev->dev, "m86_tmu",
 						    t, &m86_chip, NULL);
-	if (IS_ERR(hwmon)) return PTR_ERR(hwmon);
+	if (IS_ERR(hwmon))
+		return PTR_ERR(hwmon);
 	t->hwmon = hwmon;
 
 	/* Interrupt-driven thermal zones: polling_delay = 0, passive_delay = 1000 */
@@ -434,15 +447,18 @@ static int m86_probe(struct platform_device *pdev)
 						    ARRAY_SIZE(t->trips), 0, t,
 						    &m86_thermal_ops, NULL,
 						    1000, 0);
-	if (IS_ERR(tz)) return PTR_ERR(tz);
+	if (IS_ERR(tz))
+		return PTR_ERR(tz);
 	t->tzd = tz;
 
 	ret = devm_add_action_or_reset(&pdev->dev, m86_unregister_zone, tz);
-	if (ret) return ret;
+	if (ret)
+		return ret;
 
 	/* Request threaded IRQs for all 4 banks */
 	for (i = 0; i < 4; i++) {
 		int irq = platform_get_irq(pdev, i);
+
 		if (irq < 0)
 			return dev_err_probe(&pdev->dev, irq, "Failed to get TMU%d irq\n", i);
 		t->banks[i].tmu = t;
@@ -458,7 +474,8 @@ static int m86_probe(struct platform_device *pdev)
 	}
 
 	ret = thermal_zone_device_enable(tz);
-	if (ret) return ret;
+	if (ret)
+		return ret;
 
 	mutex_lock(&m86_tmu_access);
 	if (m86_tmu_instance) {
