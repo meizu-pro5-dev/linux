@@ -137,20 +137,24 @@ static int lm3644_hw_init(struct lm3644_chip *chip)
 		return ret;
 
 	/* Initialize brightness registers from the class-device state. */
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR,
-		     min_t(u32, chip->leds[LM3644_ID_TORCH0].fled_cdev.brightness.val,
-			   LM3644_TORCH_MAX_LEVEL));
-	regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR,
-		     min_t(u32, chip->leds[LM3644_ID_TORCH1].fled_cdev.brightness.val,
-			   LM3644_TORCH_MAX_LEVEL));
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR,
-		     min_t(u32, chip->leds[LM3644_ID_FLASH0].fled_cdev.brightness.val,
-			   LM3644_FLASH_MAX_LEVEL));
-	regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR,
-		     min_t(u32, chip->leds[LM3644_ID_FLASH1].fled_cdev.brightness.val,
-			   LM3644_FLASH_MAX_LEVEL));
-
-	return 0;
+	ret = regmap_write(chip->regmap, LM3644_REG_TORCH_LED0_BR,
+			   min_t(u32, chip->leds[LM3644_ID_TORCH0].fled_cdev.brightness.val,
+				 LM3644_TORCH_MAX_LEVEL));
+	if (ret)
+		return ret;
+	ret = regmap_write(chip->regmap, LM3644_REG_TORCH_LED1_BR,
+			   min_t(u32, chip->leds[LM3644_ID_TORCH1].fled_cdev.brightness.val,
+				 LM3644_TORCH_MAX_LEVEL));
+	if (ret)
+		return ret;
+	ret = regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR,
+			   min_t(u32, chip->leds[LM3644_ID_FLASH0].fled_cdev.brightness.val,
+				 LM3644_FLASH_MAX_LEVEL));
+	if (ret)
+		return ret;
+	return regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR,
+			    min_t(u32, chip->leds[LM3644_ID_FLASH1].fled_cdev.brightness.val,
+				  LM3644_FLASH_MAX_LEVEL));
 }
 
 static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
@@ -190,7 +194,7 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 {
 	struct lm3644_led *led = to_lm3644_led(cdev);
 	struct lm3644_chip *chip = led->chip;
-	u8 reg_br, led_bit;
+	u8 reg_br, led_bit, mask;
 	int ret = 0;
 
 	mutex_lock(&chip->lock);
@@ -207,6 +211,10 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 		goto out;
 	}
 
+	/*
+	 * Update the enable masks only once the chip took the write, or once
+	 * HWEN has switched everything off.
+	 */
 	if (led->is_flash) {
 		reg_br = (led->led_index == 0) ?
 			 LM3644_REG_FLASH_LED0_BR : LM3644_REG_FLASH_LED1_BR;
@@ -218,13 +226,13 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 			if (ret)
 				goto out;
 
-			chip->flash_en_mask |= led_bit;
+			mask = chip->flash_en_mask | led_bit;
 			ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 						 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
-						 chip->flash_en_mask | LM3644_MODE_FLASH);
+						 mask | LM3644_MODE_FLASH);
 		} else {
-			chip->flash_en_mask &= ~led_bit;
-			if (chip->flash_en_mask == 0) {
+			mask = chip->flash_en_mask & ~led_bit;
+			if (mask == 0) {
 				if (chip->torch_en_mask > 0) {
 					ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 								 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
@@ -238,9 +246,11 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 			} else {
 				ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 							 LM3644_LED0_EN | LM3644_LED1_EN,
-							 chip->flash_en_mask);
+							 mask);
 			}
 		}
+		if (!ret || !chip->hw_enabled)
+			chip->flash_en_mask = mask;
 	} else {
 		reg_br = (led->led_index == 0) ?
 			 LM3644_REG_TORCH_LED0_BR : LM3644_REG_TORCH_LED1_BR;
@@ -252,13 +262,13 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 			if (ret)
 				goto out;
 
-			chip->torch_en_mask |= led_bit;
+			mask = chip->torch_en_mask | led_bit;
 			ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 						 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
-						 chip->torch_en_mask | LM3644_MODE_TORCH);
+						 mask | LM3644_MODE_TORCH);
 		} else {
-			chip->torch_en_mask &= ~led_bit;
-			if (chip->torch_en_mask == 0) {
+			mask = chip->torch_en_mask & ~led_bit;
+			if (mask == 0) {
 				if (chip->flash_en_mask > 0) {
 					ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 								 LM3644_LED0_EN | LM3644_LED1_EN | LM3644_MODE_MASK,
@@ -272,12 +282,17 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 			} else {
 				ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
 							 LM3644_LED0_EN | LM3644_LED1_EN,
-							 chip->torch_en_mask);
+							 mask);
 			}
 		}
+		if (!ret || !chip->hw_enabled)
+			chip->torch_en_mask = mask;
 	}
 
 out:
+	/* A failed write left nothing lit: drop HWEN again. */
+	if (ret && !chip->flash_en_mask && !chip->torch_en_mask)
+		lm3644_set_hw_power(chip, false);
 	mutex_unlock(&chip->lock);
 	return ret;
 }
@@ -390,21 +405,23 @@ static int lm3644_refresh_flags_locked(struct lm3644_chip *chip)
 	 * flash_fault sysfs attributes cannot consume each other's evidence.
 	 */
 	ret = regmap_read(chip->regmap, LM3644_REG_FLAGS1, &flag0);
-	if (!ret)
-		ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
-	if (!ret) {
-		/* Accumulate until the next strobe: a second read of the
-		 * clear-on-read registers returns 0 and must not erase a fault.
-		 */
-		if (chip->flags_valid) {
-			chip->flags1 |= flag0;
-			chip->flags2 |= flag1;
-		} else {
-			chip->flags1 = flag0;
-			chip->flags2 = flag1;
-		}
+	if (ret)
+		return ret;
+
+	/* Accumulate until the next strobe: a second read of the
+	 * clear-on-read registers returns 0 and must not erase a fault.
+	 * FLAGS1 is cleared now, so keep it even if FLAGS2 cannot be read.
+	 */
+	if (!chip->flags_valid) {
+		chip->flags1 = 0;
+		chip->flags2 = 0;
 		chip->flags_valid = true;
 	}
+	chip->flags1 |= flag0;
+
+	ret = regmap_read(chip->regmap, LM3644_REG_FLAGS2, &flag1);
+	if (!ret)
+		chip->flags2 |= flag1;
 	return ret;
 }
 
@@ -602,9 +619,12 @@ static int lm3644_probe(struct i2c_client *client)
 
 	/* STROBE trigger GPIO: active low initially */
 	chip->strobe_gpio = devm_gpiod_get_optional(dev, "strobe", GPIOD_OUT_LOW);
-	if (IS_ERR(chip->strobe_gpio))
+	if (IS_ERR(chip->strobe_gpio)) {
+		if (chip->hwen_gpio)
+			gpiod_set_value_cansleep(chip->hwen_gpio, 0);
 		return dev_err_probe(dev, PTR_ERR(chip->strobe_gpio),
 				      "Failed to get strobe-gpios\n");
+	}
 
 	/* Check device ID */
 	ret = regmap_read(chip->regmap, LM3644_REG_DEV_ID, &dev_id);
