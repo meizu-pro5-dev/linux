@@ -849,6 +849,9 @@
 			compatible = "samsung,exynos7-clock-disp";
 			reg = <0x13ad0000 0x1000>;
 			#clock-cells = <1>;
+			clocks = <&clock_top0 CLK_ACLK_DISP_400>;
+			clock-names = "aclk_disp_400";
+			power-domains = <&pd_disp>;
 		};
 
 		sysmmu_disp_ro: sysmmu@13a00000 {
