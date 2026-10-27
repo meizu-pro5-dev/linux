@@ -648,6 +648,7 @@ struct exynos_pm_domain {
 	u32 local_pwr_option;
 	const struct exynos7420_pd_cfg *e7420_cfg;
 	void __iomem *pmu_base;
+	bool on_until_synced;
 };
 
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
@@ -739,12 +740,18 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
  * off when unused, including by genpd_power_off_unused() at late_initcall.
  *  AUD  - LPASS, I2S0, ADMA and the BT UART; LPASS is set up once by
  *         exynos7420_init_aud_lpass() and the gpz pads lose state when off.
- *  DISP - DECON/DSIM path; its power sequence is in exynos7420_pds[], kept
- *         on until it is verified powered off (ADR 0012 S4).
- *  VPP  - DECON scan-out path and parent of DISP, likewise.
  *  G3D  - GPU power is owned by m86-gpu-dvfs.
  */
-static const char * const exynos_pd_always_on[] = { "AUD", "DISP", "VPP", "G3D" };
+static const char * const exynos_pd_always_on[] = { "AUD", "G3D" };
+
+/*
+ * Domains carrying the bootloader's display (DECON/DSIM in DISP, its
+ * scan-out DMA in VPP). If found on, keep them on until all their
+ * consumers have probed: DECON stops the bootloader's windows when it
+ * binds. The vendor kernel likewise only powers domains off at
+ * late_initcall_sync, after DECON took over (ADR 0012 S4).
+ */
+static const char * const exynos_pd_on_until_synced[] = { "DISP", "VPP" };
 
 static const char *exynos_get_domain_name(struct device *dev,
 					  struct device_node *node)
@@ -802,6 +809,12 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	}
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
+	if (on && match_string(exynos_pd_on_until_synced,
+			       ARRAY_SIZE(exynos_pd_on_until_synced),
+			       pd->pd.name) >= 0) {
+		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
+		pd->on_until_synced = true;
+	}
 
 	ret = pm_genpd_init(&pd->pd, NULL, !on);
 	if (ret) {
@@ -830,8 +843,26 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		of_node_put(parent.np);
 	}
 
+	platform_set_drvdata(pdev, pd);
 	pm_runtime_enable(dev);
 	return 0;
+}
+
+static void exynos_pd_sync_state(struct device *dev)
+{
+	struct exynos_pm_domain *pd = dev_get_drvdata(dev);
+
+	if (!pd->on_until_synced)
+		return;
+
+	/*
+	 * genpd only reads the flag when deciding to power off; a check
+	 * racing with this just leaves the domain on until its next idle.
+	 */
+	pd->on_until_synced = false;
+	WRITE_ONCE(pd->pd.flags, pd->pd.flags & ~GENPD_FLAG_ALWAYS_ON);
+	pr_info("exynos-pd: %s consumers probed, no longer kept on\n",
+		pd->pd.name);
 }
 
 static struct platform_driver exynos_pd_driver = {
@@ -839,6 +870,7 @@ static struct platform_driver exynos_pd_driver = {
 	.driver	= {
 		.name		= "exynos-pd",
 		.of_match_table	= exynos_pm_domain_of_match,
+		.sync_state	= exynos_pd_sync_state,
 		.suppress_bind_attrs = true,
 	}
 };
