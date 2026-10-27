@@ -735,14 +735,16 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 
 /*
  * Domains genpd must never power off. Every other Exynos7420 domain (CAM0,
- * CAM1, ISP0, ISP1, MFC, MSCL, VPP, DISP) is powered on by genpd for its
- * consumers and off when unused, including by genpd_power_off_unused() at
- * late_initcall.
+ * CAM1, ISP0, ISP1, MFC, MSCL) is powered on by genpd for its consumers and
+ * off when unused, including by genpd_power_off_unused() at late_initcall.
  *  AUD  - LPASS, I2S0, ADMA and the BT UART; LPASS is set up once by
  *         exynos7420_init_aud_lpass() and the gpz pads lose state when off.
+ *  DISP - DECON/DSIM path; its power sequence is in exynos7420_pds[], kept
+ *         on until it is verified powered off (ADR 0012 S4).
+ *  VPP  - DECON scan-out path and parent of DISP, likewise.
  *  G3D  - GPU power is owned by m86-gpu-dvfs.
  */
-static const char * const exynos_pd_always_on[] = { "AUD", "G3D" };
+static const char * const exynos_pd_always_on[] = { "AUD", "DISP", "VPP", "G3D" };
 
 static const char *exynos_get_domain_name(struct device *dev,
 					  struct device_node *node)
