@@ -7,7 +7,6 @@
  *	Ajay Kumar <ajaykumar.rs@samsung.com>
  */
 
-#include <linux/backlight.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/delay.h>
@@ -863,22 +862,8 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	decon_commit(ctx->crtc);
 
 	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
-	if (ctx->i80_if) {
-		struct backlight_device *bd;
-
+	if (ctx->i80_if)
 		ctx->i80_handoff_processed = true;
-
-		bd = backlight_device_get_by_name("m86-panel");
-		if (bd) {
-			int ret_bl = backlight_enable(bd);
-
-			if (ret_bl)
-				dev_warn(ctx->dev, "m86-panel: backlight enable failed: %d\n", ret_bl);
-			else
-				dev_info(ctx->dev, "m86-panel: display unblanked on DPMS enable\n");
-			put_device(&bd->dev);
-		}
-	}
 }
 
 /*
@@ -934,20 +919,6 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 	 */
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_disable_plane(crtc, &ctx->planes[i]);
-
-	if (ctx->i80_if) {
-		struct backlight_device *bd = backlight_device_get_by_name("m86-panel");
-
-		if (bd) {
-			int ret_bl = backlight_disable(bd);
-
-			if (ret_bl)
-				dev_warn(ctx->dev, "m86-panel: backlight disable failed: %d\n", ret_bl);
-			else
-				dev_info(ctx->dev, "m86-panel: display blanked on DPMS disable\n");
-			put_device(&bd->dev);
-		}
-	}
 
 	atomic_set(&ctx->frame_pending, 0);
 	decon_disable_te_irq_nosync(ctx);
