@@ -433,15 +433,6 @@ void panfrost_gpu_power_on(struct panfrost_device *pfdev)
 		val, val == pfdev->features.tiler_present, 100, 1000);
 	if (ret)
 		dev_err(pfdev->dev, "error powering up gpu tiler");
-
-	/* m86 retained-domain diagnostic: MMIO is still powered in this callback.
-	 * PWRTRANS completion alone does not prove READY became zero. */
-	if (of_machine_is_compatible("meizu,m86"))
-		dev_info_once(pfdev->dev,
-			      "m86 after power-on polling: READY_LO shader=%#x tiler=%#x l2=%#x\n",
-			      gpu_read(pfdev, SHADER_READY_LO),
-			      gpu_read(pfdev, TILER_READY_LO),
-			      gpu_read(pfdev, L2_READY_LO));
 }
 
 void panfrost_gpu_power_off(struct panfrost_device *pfdev)
@@ -466,15 +457,6 @@ void panfrost_gpu_power_off(struct panfrost_device *pfdev)
 				 val, !val, 0, 2000);
 	if (ret)
 		dev_err(pfdev->dev, "l2 power transition timeout");
-
-	/* m86 retained-domain diagnostic: MMIO is still powered in this callback.
-	 * PWRTRANS completion alone does not prove READY became zero. */
-	if (of_machine_is_compatible("meizu,m86"))
-		dev_info_once(pfdev->dev,
-			      "m86 after power-off polling: READY_LO shader=%#x tiler=%#x l2=%#x\n",
-			      gpu_read(pfdev, SHADER_READY_LO),
-			      gpu_read(pfdev, TILER_READY_LO),
-			      gpu_read(pfdev, L2_READY_LO));
 }
 
 void panfrost_gpu_suspend_irq(struct panfrost_device *pfdev)
