@@ -363,7 +363,8 @@ fail:
 /* Require the exact selector/frequency pair before and after a transaction.
  * device_lock protects PMIC lifetime; transaction serializes this coordinator.
  */
-static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz)
+/* Optional selector/ramp out: the full rail read the caller may reuse. */
+static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz,u32 *sel_out,u32 *ramp_out)
 {
  u32 selector=~0U,ramp=~0U,mcs=~0U;
  const char *stage="frequency";
@@ -385,7 +386,11 @@ static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz)
  stage="mcs";
  mcs_read_ret=regmap_read(d->sysreg,0x1224,&mcs);
  ret=mcs_read_ret ?: (mcs==0x31 ? 0 : -EOPNOTSUPP);
- if(!ret)return 0;
+ if(!ret) {
+  if(sel_out)*sel_out=selector;
+  if(ramp_out)*ramp_out=ramp;
+  return 0;
+ }
 fail:
  /* Read MCS only on failure if the original guard did not reach it. The
   * diagnostic read never replaces the first guard return code. */
@@ -410,7 +415,7 @@ int m86_gpu_resume_validate(struct device *gpu)
  if(d->failed){ret=-EIO;goto done;}
  hz=clk_get_rate(d->clock);
  if(hz>d->cap)ret=-ERANGE;
- else ret=check_normal_on_state(d,hz);
+ else ret=check_normal_on_state(d,hz,NULL,NULL);
  if(ret) {
   mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
   dev_err(d->dev,"GPU retained resume state rejected: rate=%lu error=%d\n",hz,ret);
@@ -437,10 +442,13 @@ static int set_mcs(struct gpu_dvfs *d,u32 uv)
  ret=regmap_read(d->sysreg,0x1224,&value);
  return ret ?: (value==((old&~0x30U)|(mcs<<4)) ? 0 : -EIO);
 }
-static int set_voltage(struct gpu_dvfs *d,u32 uv)
+/* Normal ON: old/ramp come from the caller's pair check, which validated the
+ * whole rail just before; the caller's pair check after the switch validates
+ * it again. Only the selector write is read back here. */
+static int set_voltage(struct gpu_dvfs *d,u32 uv,u32 old,u32 ramp)
 {
  struct regmap *map;
- u32 old,ramp,sel,actual,wait;
+ u32 sel,actual,wait;
  unsigned int i;
  bool valid_uv=false;
  int ret;
@@ -451,14 +459,14 @@ static int set_voltage(struct gpu_dvfs *d,u32 uv)
  sel=(uv-300000)/6250; /* r39 trim78/bit5set: normal vendor path, NO OCP+5. */
  if(sel>255)return -ERANGE;
  device_lock(d->pmic);
- ret=check_rail(d,&old,&ramp);if(ret)goto out;
+ if(!d->normal_on_voltage){ret=check_rail(d,&old,&ramp);if(ret)goto out;}
  map=dev_get_regmap(d->pmic,NULL);
  ret=regmap_write(map,0x24,sel);if(ret)goto out;
  wait=DIV_ROUND_UP(abs((int)sel-(int)old)*6250,6000U<<(ramp&3))+10;
  usleep_range(wait,wait+10);
  ret=pmic_read(d,0x24,&actual);
  if(!ret && actual!=sel)ret=-EIO;
- if(!ret)ret=check_rail(d,&actual,&ramp);
+ if(!ret && !d->normal_on_voltage)ret=check_rail(d,&actual,&ramp);
 out:
  device_unlock(d->pmic);return ret;
 }
@@ -583,19 +591,21 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   }
   if(d->normal_on_voltage) {
    stage="normal-pair-before";
-   ret=check_normal_on_state(d,old);if(ret)goto fault;
+   ret=check_normal_on_state(d,old,&selector,&ramp);if(ret)goto fault;
   }
   stage="MCS-before";
   ret=regmap_read(d->sysreg,0x1224,&mcs);if(ret)goto fault;
   if(mcs!=0x31){ret=-EOPNOTSUPP;goto fault;}
-  stage="rail-before";
-  device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
-  if(ret)goto fault;
+  if(!d->normal_on_voltage) {
+   stage="rail-before";
+   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
+   if(ret)goto fault;
+  }
   if(!d->active_voltage && !d->normal_on_voltage){ret=-EPERM;goto put;}
   dev_dbg(d->dev,"GPU transition start old=%lu target=%lu uv=%u\n",old,r->hz,target_uv);
   if(r->hz>old) {
    stage="up-voltage";
-   ret=set_voltage(d,target_uv);if(ret)goto fault;
+   ret=set_voltage(d,target_uv,selector,ramp);if(ret)goto fault;
    if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,target_uv);if(ret)goto fault;}
    stage="up-clock";
    ret=set_clock(d,r->hz);if(ret)goto fault;
@@ -604,13 +614,13 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    ret=set_clock(d,r->hz);if(ret)goto fault;
    if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,target_uv);if(ret)goto fault;}
    stage="down-voltage";
-   ret=set_voltage(d,target_uv);if(ret)goto fault;
+   ret=set_voltage(d,target_uv,selector,ramp);if(ret)goto fault;
    if(d->bus_qos_active && r->mif < d->cur_mif_qos)
     mif_vote(d,r->mif);
   }
   if(d->normal_on_voltage) {
    stage="normal-pair-after";
-   ret=check_normal_on_state(d,r->hz);if(ret)goto fault;
+   ret=check_normal_on_state(d,r->hz,NULL,NULL);if(ret)goto fault;
   }
   dev_dbg(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),target_uv);
  finish:
