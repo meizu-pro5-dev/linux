@@ -730,17 +730,35 @@ static int m86_aif1_hw_params(struct snd_pcm_substream *substream,
 		int sr;
 
 		switch (params_rate(params)) {
-		case 8000:   sr = 0; break;
-		case 11025:  sr = 1; break;
-		case 12000:  sr = 2; break;
-		case 16000:  sr = 3; break;
-		case 22050:  sr = 4; break;
-		case 24000:  sr = 5; break;
-		case 32000:  sr = 6; break;
+		case 8000:
+			sr = 0;
+			break;
+		case 11025:
+			sr = 1;
+			break;
+		case 12000:
+			sr = 2;
+			break;
+		case 16000:
+			sr = 3;
+			break;
+		case 22050:
+			sr = 4;
+			break;
+		case 24000:
+			sr = 5;
+			break;
+		case 32000:
+			sr = 6;
+			break;
 		case 44100:
 		case 88200:
-		case 176400: sr = 7; break;
-		default:     sr = 8; break;
+		case 176400:
+			sr = 7;
+			break;
+		default:
+			sr = 8;
+			break;
 		}
 		snd_soc_component_update_bits(priv->amp_component,
 					      0x04 /* TFA989X_I2SREG */,
@@ -958,8 +976,10 @@ static int m86_late_probe(struct snd_soc_card *card)
 	/* Look up TFA9890 amplifier component if attached to card */
 	{
 		struct device_node *amp_np = of_parse_phandle(card->dev->of_node, "audio-amplifier", 0);
+
 		if (amp_np) {
 			struct snd_soc_component *comp;
+
 			for_each_card_components(card, comp) {
 				if (comp->dev->of_node == amp_np) {
 					priv->amp_component = comp;
@@ -989,8 +1009,10 @@ static int m86_late_probe(struct snd_soc_card *card)
 	regmap_write(priv->component->regmap, ARIZONA_AIF3TX2MIX_INPUT_1_VOLUME, 0x80);
 	regmap_update_bits(priv->component->regmap, ARIZONA_AIF3_TX_ENABLES, 0x3, 0x3);
 
-	/* Gate 24MHz XCLKOUT after probe (matching vendor meizu_audio_WM8998.c:1303);
-	 * m86_start_sysclk() and m86_es705_init_hw() re-enable it on audio playback. */
+	/*
+	 * Gate 24MHz XCLKOUT after probe (matching vendor meizu_audio_WM8998.c:1303);
+	 * m86_start_sysclk() and m86_es705_init_hw() re-enable it on audio playback.
+	 */
 	if (!priv->es705_booted)
 		m86_enable_mclk(priv, false);
 
