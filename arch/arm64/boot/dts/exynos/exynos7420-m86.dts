@@ -486,6 +486,8 @@
 		interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
 		touchscreen-size-x = <1080>;
 		touchscreen-size-y = <1920>;
+		/* Sleep while the panel is unprepared (DPMS off, suspend). */
+		panel = <&m86_panel>;
 	};
 };
 
@@ -653,15 +655,6 @@
 	interconnect-names = "dma-mem";
 	memory-region = <&decon_iova_resv>;
 	status = "okay";
- display-timings {
-  native-mode = <&m86_handoff_timing>;
-  m86_handoff_timing: timing {
-   clock-frequency = <125216000>;
-   hactive = <1080>; vactive = <1920>;
-   hfront-porch = <1>; hback-porch = <1>; hsync-len = <1>;
-   vfront-porch = <5>; vback-porch = <1>; vsync-len = <1>;
-  };
- };
  i80-if-timings { };
  ports {
   #address-cells = <1>;
@@ -733,9 +726,9 @@
    m86_dsim_out: endpoint { remote-endpoint = <&m86_panel_in>; data-lanes = <0 1>; };
   };
  };
- panel@0 {
+ m86_panel: panel@0 {
   compatible = "meizu,m86-s6e3fa3";
-  te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
+  /* No te-gpios: DECON owns the gpc0-1 TE EINT and triggers frames. */
   reg = <0>;
   vci-supply = <&m86_lcd_3v3>;
   vdd3-supply = <&m86_lcd_1v8>;
@@ -777,14 +770,15 @@
  };
 };
 
-/* S6E3FA3 command-mode panel and backlight controller */
+/*
+ * Native DSIM host (samsung-dsim) with the S6E3FA3 panel driver. DECON
+ * keeps the bootloader command-mode setup; without display-timings it
+ * creates no DPI encoder, so the DSI encoder drives the CRTC. Keep gpg0-1
+ * as it was during the handoff: DECON triggers from the gpc0-1 TE EINT.
+ */
 &m86_dsim {
-	compatible = "meizu,m86-s6e3fa3-panel", "meizu,m86-dsim-handoff-backlight";
 	/delete-property/ pinctrl-names;
 	/delete-property/ pinctrl-0;
-	/delete-property/ assigned-clocks;
-	/delete-property/ assigned-clock-parents;
-	default-brightness = <68>;
 	status = "okay";
 };
 
