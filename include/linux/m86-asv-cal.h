@@ -311,23 +311,31 @@ static inline void m86_asv_get_atlas_ema(const struct m86_asv_cal_info *info,
 	if (uv >= 1000000U) {
 		l1 = (w14 >> 16) & 0xfU;
 		l2 = (w15 >> 0) & 0xfU;
-		if (!l1) l1 = 6U;
-		if (!l2) l2 = 5U;
+		if (!l1)
+			l1 = 6U;
+		if (!l2)
+			l2 = 5U;
 	} else if (uv >= 900000U) {
 		l1 = (w14 >> 20) & 0xfU;
 		l2 = (w15 >> 4) & 0xfU;
-		if (!l1) l1 = 6U;
-		if (!l2) l2 = 5U;
+		if (!l1)
+			l1 = 6U;
+		if (!l2)
+			l2 = 5U;
 	} else if (uv >= 800000U) {
 		l1 = (w14 >> 24) & 0xfU;
 		l2 = (w15 >> 8) & 0xfU;
-		if (!l1) l1 = 8U;
-		if (!l2) l2 = 11U;
+		if (!l1)
+			l1 = 8U;
+		if (!l2)
+			l2 = 11U;
 	} else {
 		l1 = (w14 >> 28) & 0xfU;
 		l2 = (w15 >> 12) & 0xfU;
-		if (!l1) l1 = 7U;
-		if (!l2) l2 = 9U;
+		if (!l1)
+			l1 = 7U;
+		if (!l2)
+			l2 = 9U;
 	}
 	*l1_out = l1;
 	*l2_out = l2;
@@ -359,16 +367,20 @@ static inline u32 m86_asv_get_g3d_mcs_reg(const struct m86_asv_cal_info *info,
 
 	if (uv >= 900000U) {
 		val = (w5 >> 21) & 0x3U;
-		if (!val) val = 1U;
+		if (!val)
+			val = 1U;
 	} else if (uv >= 800000U) {
 		val = (w5 >> 23) & 0x3U;
-		if (!val) val = 1U;
+		if (!val)
+			val = 1U;
 	} else if (uv >= 700000U) {
 		val = (w5 >> 25) & 0x3U;
-		if (!val) val = 1U;
+		if (!val)
+			val = 1U;
 	} else {
 		val = (w5 >> 27) & 0x3U;
-		if (!val) val = 3U;
+		if (!val)
+			val = 3U;
 	}
 
 	return (0x11U & ~(0x3U << 4)) | (val << 4);
