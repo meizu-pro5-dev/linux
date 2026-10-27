@@ -1746,38 +1746,6 @@ static const struct samsung_cmu_info g3d_cmu_info __initconst = {
 	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
 };
 
-/* Domain-only LPI gate has no normal consumer/CCF reference. Keep its
- * one-bit update under the actual CMU lock shared by ordinary CCF gates.
- * Full saved-context replay restores the original value on domain-on. */
-static struct samsung_clk_provider *m86_g3d_owner;
-int m86_exynos7_g3d_lpi_clock(struct regmap *pmu, struct mutex *transaction,
-                            struct mutex *hardware, bool *was_enabled)
-{
- unsigned long flags;
- unsigned int cfg, status;
- u32 v;
- int ret;
- if (!m86_g3d_owner || !pmu || !transaction || !hardware || !was_enabled)
-  return -EINVAL;
- lockdep_assert_held(transaction);
- lockdep_assert_held(hardware);
- ret = regmap_read(pmu, 0x4100, &cfg);
- if (!ret)
-  ret = regmap_read(pmu, 0x4104, &status);
- if (ret)
-  return ret;
- if ((cfg & 15) != 15 || (status & 15) != 15)
-  return -EHOSTDOWN;
- spin_lock_irqsave(&m86_g3d_owner->lock, flags);
- v = readl(m86_g3d_owner->reg_base + ENABLE_ACLK_G3D);
- *was_enabled = !!(v & BIT(1));
- writel(v | BIT(1), m86_g3d_owner->reg_base + ENABLE_ACLK_G3D);
- ret = readl(m86_g3d_owner->reg_base + ENABLE_ACLK_G3D) == (v | BIT(1)) ? 0 : -EIO;
- spin_unlock_irqrestore(&m86_g3d_owner->lock, flags);
- return ret;
-}
-EXPORT_SYMBOL_GPL(m86_exynos7_g3d_lpi_clock);
-
 static void __init exynos7_clk_g3d_init(struct device_node *np)
 {
 	struct samsung_clk_provider *ctx;
@@ -1786,7 +1754,6 @@ static void __init exynos7_clk_g3d_init(struct device_node *np)
 	ctx = samsung_cmu_register_one(np, &g3d_cmu_info);
 	if (!ctx)
 		return;
-	m86_g3d_owner = ctx;
 	g3d_pll_ro_base = ctx->reg_base;
 	g3d_pll_ro_hw.init = &g3d_pll_ro_init;
 	ret = clk_hw_register(NULL, &g3d_pll_ro_hw);
