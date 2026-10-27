@@ -545,7 +545,7 @@ static int m86_cwmcu_read_raw(struct iio_dev *indio_dev,
 				ret = m86_cwmcu_half_to_micro(data->sample[sensor_id][axis], val);
 			}
 		}
-	out:
+out:
 		ret = m86_cwmcu_end(data, ret);
 		mutex_unlock(&data->lock);
 		return ret ? ret : IIO_VAL_INT;
@@ -682,15 +682,24 @@ static int m86_cwmcu_reg_access(struct iio_dev *indio_dev, unsigned int reg,
 	if (!readval)
 		return -EPERM;
 	switch (reg) {
-	case CWMCU_REG_ENABLE_LIST: len = 8; break;
+	case CWMCU_REG_ENABLE_LIST:
+		len = 8;
+		break;
 	case CWMCU_REG_READ_ACCEL:
 	case CWMCU_REG_READ_MAG:
-	case CWMCU_REG_READ_GYRO: len = 6; break;
+	case CWMCU_REG_READ_GYRO:
+		len = 6;
+		break;
 	case CWMCU_REG_FW_VERSION:
 	case CWMCU_REG_LIB_VERSION:
-	case CWMCU_REG_ERROR: len = 4; break;
-	case CWMCU_REG_STREAM_COUNT: len = 2; break;
-	default: return -EINVAL;
+	case CWMCU_REG_ERROR:
+		len = 4;
+		break;
+	case CWMCU_REG_STREAM_COUNT:
+		len = 2;
+		break;
+	default:
+		return -EINVAL;
 	}
 	mutex_lock(&data->lock);
 	ret = m86_cwmcu_begin(data);
