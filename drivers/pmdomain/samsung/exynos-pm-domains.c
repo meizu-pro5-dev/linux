@@ -34,6 +34,13 @@ struct exynos7420_reg_bits {
 	u32 mask;
 };
 
+/* A CMU register kept across a power cycle, as the vendor sfr_save. */
+struct exynos7420_sfr {
+	phys_addr_t pa;
+	u32 val;
+	bool valid;
+};
+
 struct exynos7420_pd_cfg {
 	const char *name;
 	u32 pmu_off;
@@ -50,6 +57,9 @@ struct exynos7420_pd_cfg {
 	bool async_before_on;
 	const struct exynos7420_reg_bits *sys_pwr_regs;
 	size_t num_sys_pwr_regs;
+	/* Registers of a CMU that no runtime PM restores, see the VPP entry. */
+	struct exynos7420_sfr *save_regs;
+	size_t num_save_regs;
 	/* Content firewall IDs to protect again after every power on. */
 	const u32 *cfw_ids;
 	size_t num_cfw_ids;
@@ -200,6 +210,16 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_vpp[] = {
 	{ 0x105c1578, BIT(9) | BIT(8) | BIT(5) | BIT(4) | BIT(1) | BIT(0) },
 	{ 0x105c15b8, BIT(0) },
 };
+/*
+ * CMU_VPP has no consumer, so its runtime PM never resumes it to restore
+ * these after VPP was off: keep them here, as save_list_vpp does.
+ */
+static struct exynos7420_sfr exynos7420_save_vpp[] = {
+	{ .pa = 0x13ed0600 },	/* DIV_VPP */
+	{ .pa = 0x13ed0200 },	/* MUX_SEL_VPP */
+	{ .pa = 0x13ed0800 },	/* ENABLE_ACLK_VPP */
+	{ .pa = 0x13ed0900 },	/* ENABLE_PCLK_VPP */
+};
 static const u32 exynos7420_cfw_vpp[] = {
 	EXYNOS7420_CFW_VPP0, EXYNOS7420_CFW_VPP1,
 };
@@ -306,6 +326,8 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_vpp),
 		.sys_pwr_regs = exynos7420_sys_pwr_vpp,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_vpp),
+		.save_regs = exynos7420_save_vpp,
+		.num_save_regs = ARRAY_SIZE(exynos7420_save_vpp),
 		.cfw_ids = exynos7420_cfw_vpp,
 		.num_cfw_ids = ARRAY_SIZE(exynos7420_cfw_vpp),
 	},
@@ -342,6 +364,40 @@ static int exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
 	readl_relaxed(base + off);
 	iounmap(base);
 	return 0;
+}
+
+static void exynos7420_save_regs(const struct exynos7420_pd_cfg *pd)
+{
+	size_t i;
+
+	for (i = 0; i < pd->num_save_regs; i++) {
+		struct exynos7420_sfr *sfr = &pd->save_regs[i];
+		void __iomem *base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
+
+		if (!base)
+			continue;
+		sfr->val = readl_relaxed(base + (sfr->pa & ~PAGE_MASK));
+		sfr->valid = true;
+		iounmap(base);
+	}
+}
+
+static void exynos7420_restore_regs(const struct exynos7420_pd_cfg *pd)
+{
+	size_t i;
+
+	for (i = 0; i < pd->num_save_regs; i++) {
+		struct exynos7420_sfr *sfr = &pd->save_regs[i];
+		void __iomem *base;
+
+		if (!sfr->valid)
+			continue;
+		base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
+		if (!base)
+			continue;
+		writel_relaxed(sfr->val, base + (sfr->pa & ~PAGE_MASK));
+		iounmap(base);
+	}
 }
 
 static int exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
@@ -429,6 +485,7 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 
 	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, true);
 	udelay(10);
+	exynos7420_save_regs(pd);
 	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
 	if (pd->is_aud)
 		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
@@ -512,6 +569,7 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 	 * LPI busmaster masks and the A7IS option are only written on the
 	 * forced power-off path, as in the vendor exynos_pd_power_forced_off_pre().
 	 */
+	exynos7420_restore_regs(cfg);
 	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
 	if (!cfg->async_before_on)
 		exynos7420_apply_async_clks(pmu_base, cfg);
