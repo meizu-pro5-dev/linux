@@ -28,4 +28,3 @@ obj-$(CONFIG_M86_CPU_CLOCKS) += m86-cpu-clocks.o
 
 obj-$(CONFIG_M86_GPU_DVFS) += m86-gpu-dvfs.o
 
-obj-$(CONFIG_M86_G3D_DOMAIN_EXPERIMENT) += m86-g3d-domain.o m86-g3d-cmu-context.o m86-g3d-clock-owner.o

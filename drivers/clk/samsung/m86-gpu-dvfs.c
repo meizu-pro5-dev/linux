@@ -20,11 +20,6 @@
 #include <asm/barrier.h>
 #include <linux/m86-gpu-dvfs.h>
 #include "m86-topc-int-readback.h"
-#include <linux/m86-panfrost-domain.h>
-#include <linux/m86-tmu-transition.h>
-#include "m86-g3d-domain-platform.h"
-#include "m86-g3d-cmu-context.h"
-#include "m86-g3d-clock-owner.h"
 #include <linux/m86-bus-qos.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
 #include <linux/m86-asv-cal.h>
@@ -54,13 +49,6 @@ struct gpu_dvfs {
  u32 asv_sel[ARRAY_SIZE(rates)];
  bool active_voltage, normal_on_voltage, failed, normal_on_bit0_observed;
  struct task_struct *caller;
- struct m86_g3d_cmu_context saved;
- struct m86_g3d_top_gate top_gate;
- struct device *gpu_device;
- struct platform_device *domain_device;
- struct device_node *domain_node;
- bool external_domain, mmio_quiesced;
- int domain_error;
  struct device *bus_dev;
  struct dev_pm_qos_request bus_qos_req;
  bool bus_qos_active;
@@ -81,7 +69,7 @@ static unsigned long actual_rate(struct gpu_dvfs *d)
  u32 con, mux, stat, p, m, s;
  unsigned long rate;
  /* hardware serializes ordinary rate reads against domain-off preflight. */
- if (d->mmio_quiesced || !domain_on(d)) return d->current_rate ? d->current_rate : 266000000;
+ if (!domain_on(d)) return d->current_rate ? d->current_rate : 266000000;
  mux = readl(d->cmu+0x200); stat = readl(d->cmu+0x400);
  if ((stat & BIT(10)) || (readl(d->cmu+0x600)&7)) return d->current_rate ? d->current_rate : 266000000;
  if (mux & BIT(8)) return 24000000;
@@ -130,7 +118,7 @@ static int set_rate(struct clk_hw *hw,unsigned long hz,unsigned long parent)
  unsigned int i, settle;
  int ret=0;
  mutex_lock(&d->hardware);
- if(d->failed || d->mmio_quiesced || d->caller!=current || hz>d->cap || parent!=24000000 || !domain_on(d)) {
+ if(d->failed || d->caller!=current || hz>d->cap || parent!=24000000 || !domain_on(d)) {
   ret=-EPERM; goto out;
  }
  for(i=0;i<ARRAY_SIZE(rates);i++) if(rates[i].hz==hz) r=&rates[i];
@@ -727,171 +715,6 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    d->bus_qos_active = false;
   }
  }
- #if IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT)
- /* Explicit experimental board lifecycle: provider and coordinator are built-in,
-  * bind attributes suppressed, and no other enabled CMU_G3D consumer exists.
-  * Provider lock -> instance -> transaction -> short hardware. No CCF/thermal
-  * call while hardware is held; TOP CCF also stays outside the TMU wrapper. */
- static bool glue_domain_on(void *data) { return domain_on(data); }
- static int glue_rail(void *data,u32 expected)
- {
-  struct gpu_dvfs *d=data;
-  u32 selector,ramp;
-  int ret;
-  device_lock(d->pmic);
-  ret=check_rail(d,&selector,&ramp);
-  device_unlock(d->pmic);
-  return ret ?: (selector==expected ? 0 : -EOPNOTSUPP);
- }
- static struct m86_g3d_cmu_access glue_access(struct gpu_dvfs *d)
- {
-  return (struct m86_g3d_cmu_access){ .cmu=d->cmu,.sysreg=d->sysreg,
-   .transaction=&d->transaction,.hardware=&d->hardware,.data=d,
-   .cap=d->cap,.expected_selectors=d->asv_sel,
-   .domain_on=glue_domain_on,.validate_rail=glue_rail };
- }
- static void glue_unlock(struct gpu_dvfs *d)
- {
-  mutex_unlock(&d->transaction);
-  mutex_unlock(&instance_lock);
- }
- static int glue_prepare(void *data,bool on)
- {
-  struct gpu_dvfs *d=data;
-  struct m86_g3d_cmu_access access=glue_access(d);
-  unsigned long hz;
-  u32 selector,ramp;
-  int ret=0;
-  mutex_lock(&instance_lock);
-  mutex_lock(&d->transaction);
-  if(instance!=d || d->failed) { ret=-EIO;goto fail; }
-  if(on) {
-   if(!d->saved.valid) { ret=-EINVAL;goto fail; }
-   ret=glue_rail(d,d->saved.selector);
-  } else {
-   hz=clk_get_rate(d->clock);
-   ret=check_normal_on_state(d,hz);
-   if(ret)goto fail;
-   device_lock(d->pmic);ret=check_rail(d,&selector,&ramp);device_unlock(d->pmic);
-   if(ret)goto fail;
-   mutex_lock(&d->hardware);
-   ret=m86_g3d_cmu_save(&access,&d->saved,hz,selector);
-   /* Wait out any recalc already inside hardware, then close normal MMIO
-    * access before PMU/gate writes. Restore/LPI use the explicit owner path. */
-   if(!ret)d->mmio_quiesced=true;
-   mutex_unlock(&d->hardware);
-  }
-  if(!ret)return 0;
- fail:
-  if(ret!=-EBUSY) {
-   mutex_lock(&d->hardware);
-   if(!d->domain_error)d->domain_error=ret;
-   d->failed=true;
-   mutex_unlock(&d->hardware);
-  }
-  glue_unlock(d);
-  return ret;
- }
- static void glue_cancel(void *data)
- {
-  struct gpu_dvfs *d=data;
-  mutex_lock(&d->hardware);d->mmio_quiesced=false;mutex_unlock(&d->hardware);
-  glue_unlock(d);
- }
- static int glue_top(void *data,bool on)
- { return m86_g3d_top_gate_set(&((struct gpu_dvfs *)data)->top_gate,on); }
- static int glue_lpi(void *data)
- {
-  struct gpu_dvfs *d=data;
-  bool was_enabled;
-  int ret;
-  mutex_lock(&d->hardware);
-  ret=m86_exynos7_g3d_lpi_clock(d->pmu,&d->transaction,&d->hardware,&was_enabled);
-  mutex_unlock(&d->hardware);
-  return ret;
- }
- static int glue_idle(void *data)
- { return m86_panfrost_domain_idle(((struct gpu_dvfs *)data)->gpu_device); }
- static int glue_mode(void *data)
- {
-  struct gpu_dvfs *d=data;
-  return d->normal_on_voltage && !d->active_voltage && !d->failed ? 0 : -EOPNOTSUPP;
- }
- static int glue_run_on(void *data,int (*transition)(void *),void *arg)
- { return m86_tmu_gpu_transition(transition,arg); }
- static int glue_run_off(void *data,int (*transition)(void *),void *arg)
- { return m86_tmu_gpu_power_off(transition,arg); }
- static int glue_restore(void *data)
- {
-  struct gpu_dvfs *d=data;
-  struct m86_g3d_cmu_access access=glue_access(d);
-  int ret;
-  mutex_lock(&d->hardware);
-  ret=m86_g3d_cmu_restore(&access,&d->saved);
-  mutex_unlock(&d->hardware);
-  return ret;
- }
- static void glue_finish(void *data,bool on)
- {
-  struct gpu_dvfs *d=data;
-  /* On has completed PMU, context and TMU restore; off stays closed. */
-  if(on) {
-   mutex_lock(&d->hardware);d->mmio_quiesced=false;mutex_unlock(&d->hardware);
-  }
-  glue_unlock(d);
- }
- static void glue_abort(void *data,int error,u32 status,bool prepared)
- {
-  struct gpu_dvfs *d=data;
-  if(!prepared) { mutex_lock(&instance_lock);mutex_lock(&d->transaction); }
-  mutex_lock(&d->hardware);
-  if(!d->domain_error)d->domain_error=error;
-  d->failed=true;d->mmio_quiesced=true;
-  mutex_unlock(&d->hardware);
-  dev_err(d->dev,"external domain quarantined: first=%d status=%#x\n",d->domain_error,status);
-  glue_unlock(d);
- }
- static const struct m86_g3d_domain_ops glue_ops={
-  .prepare=glue_prepare,.cancel_prepare=glue_cancel,.top_gate=glue_top,
-  .local_lpi_clock=glue_lpi,.check_idle=glue_idle,.validate_mode=glue_mode,
-  .run_on=glue_run_on,.run_off=glue_run_off,.restore=glue_restore,.finish=glue_finish,.abort=glue_abort,
- };
-static void glue_put_gpu(void *arg) { put_device(arg); }
-static void glue_unregister(void *arg) { platform_device_unregister(arg); }
-static int glue_register(struct gpu_dvfs *d)
-{
- struct m86_g3d_domain_platform_data pdata={ .ops=&glue_ops,.data=d,.pmu=d->pmu,.supplier=d->dev };
- struct platform_device *gpu,*provider;
- struct device_node *top;
- int ret;
- gpu=of_find_device_by_node(d->gpu_node);
- if(!gpu)return -EPROBE_DEFER;
- d->gpu_device=&gpu->dev;
- ret=devm_add_action_or_reset(d->dev,glue_put_gpu,d->gpu_device);if(ret)return ret;
- top=of_find_compatible_node(NULL,NULL,"samsung,exynos7-clock-topc");
- if(!top)return -ENODEV;
- ret=m86_g3d_top_gate_init(d->dev,top,&d->top_gate);of_node_put(top);
- if(ret)return dev_err_probe(d->dev,ret,"G3D TOPC clock bootstrap failed\n");
- provider=platform_device_alloc("m86-g3d-domain-experiment",PLATFORM_DEVID_AUTO);
- if(!provider)return -ENOMEM;
- provider->dev.of_node=of_node_get(d->domain_node);
- ret=platform_device_add_data(provider,&pdata,sizeof(pdata));
- if(ret)goto put;
- /* Provider probe creates its supplier link after naming/registration. */
- ret=platform_device_add(provider);
- if(ret)goto put;
- d->domain_device=provider;
- return devm_add_action_or_reset(d->dev,glue_unregister,provider);
-put:
- of_node_put(provider->dev.of_node);
- provider->dev.of_node=NULL;
- platform_device_put(provider);
- return ret;
-}
-
-#else
-static int glue_register(struct gpu_dvfs *d) { return -EOPNOTSUPP; }
-#endif
 
 static int gpu_probe(struct platform_device *pdev)
 {
@@ -916,26 +739,7 @@ static int gpu_probe(struct platform_device *pdev)
  } else if(cap<266000000 || cap>772000000 || (!d->active_voltage && cap>266000000))return -EINVAL;
  d->gpu_node=of_parse_phandle(pdev->dev.of_node,"meizu,gpu",0);if(!d->gpu_node)return -EINVAL;
  ret=devm_add_action_or_reset(&pdev->dev,put_node,d->gpu_node);if(ret)return ret;
- d->external_domain=of_property_read_bool(pdev->dev.of_node,"meizu,experimental-g3d-domain");
- if(d->external_domain) {
-  struct device_node *consumer_domain;
-  struct platform_device *existing;
-  u32 cells;
-  if(!IS_ENABLED(CONFIG_M86_G3D_DOMAIN_EXPERIMENT) || !d->normal_on_voltage)return -EOPNOTSUPP;
-  d->domain_node=of_parse_phandle(pdev->dev.of_node,"meizu,g3d-domain",0);
-  if(!d->domain_node)return -EINVAL;
-  if(!of_device_is_available(d->domain_node) ||
-     of_property_read_u32(d->domain_node,"#power-domain-cells",&cells) || cells) {
-   of_node_put(d->domain_node);return -EINVAL;
-  }
-  ret=devm_add_action_or_reset(&pdev->dev,put_node,d->domain_node);if(ret)return ret;
-  existing=of_find_device_by_node(d->domain_node);
-  if(existing) { put_device(&existing->dev);return -EEXIST; }
-  consumer_domain=of_parse_phandle(d->gpu_node,"power-domains",0);
-  ret=consumer_domain==d->domain_node ? 0 : -EINVAL;
-  of_node_put(consumer_domain);if(ret)return ret;
- }
- if(!d->external_domain && of_find_property(d->gpu_node,"power-domains",NULL))
+ if(of_find_property(d->gpu_node,"power-domains",NULL))
   return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"GPU power domain is not retained\n");
  fin=devm_clk_get(&pdev->dev,"fin");if(IS_ERR(fin))return PTR_ERR(fin);
  if(clk_get_rate(fin)!=24000000)
@@ -1049,13 +853,6 @@ static int gpu_probe(struct platform_device *pdev)
  mutex_lock(&instance_lock);
  if(instance){mutex_unlock(&instance_lock);return -EBUSY;}
  instance=d;platform_set_drvdata(pdev,d);mutex_unlock(&instance_lock);
- if(d->external_domain) {
-  ret=glue_register(d);
-  if(ret) {
-   mutex_lock(&instance_lock);instance=NULL;mutex_unlock(&instance_lock);
-   return dev_err_probe(d->dev,ret,"GPU external-domain glue registration failed\n");
-  }
- }
  dev_info(&pdev->dev,"retained GPU handoff: rate=%lu cap=%lu raw_selector=%#x voltage_writes=%u MCS=%#x\n",
   clk_get_rate(d->clock),d->cap,selector,d->active_voltage || d->normal_on_voltage,mcs);
  if(d->normal_on_voltage)dev_info(d->dev,"explicit Normal ON fixed-LDO protocol, cap %luMHz\n",d->cap/1000000);

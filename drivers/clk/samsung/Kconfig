@@ -119,10 +119,3 @@ config M86_GPU_DVFS
 	  No probe voltage/clock writes; active voltage requires separately validated
 	  BUCK6 ownership and an explicit DT flag. Keep the first ceiling266MHz.
 
-config M86_G3D_DOMAIN_EXPERIMENT
- bool "PRO5 experimental retained-rail G3D provider"
- depends on ARCH_EXYNOS && PM_GENERIC_DOMAINS && OF
- depends on M86_GPU_DVFS=y && M86_TMU_MONITOR=y && DRM_PANFROST=y
- help
-   Independent compile/integration candidate. Requires the companion clock,
-   TMU, consumer idle and coordinator glue patches. No board DT enables this.
