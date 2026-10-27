@@ -16,6 +16,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/thermal.h>
+#include <linux/workqueue.h>
 #include <asm/barrier.h>
 #include <linux/m86-gpu-dvfs.h>
 #include "m86-topc-int-readback.h"
@@ -63,7 +64,8 @@ struct gpu_dvfs {
  struct device *bus_dev;
  struct dev_pm_qos_request bus_qos_req;
  bool bus_qos_active;
- u32 cur_mif_qos;
+ u32 cur_mif_qos, want_mif;
+ struct work_struct mif_work;
 };
 static DEFINE_MUTEX(instance_lock);
 static struct gpu_dvfs *instance;
@@ -494,6 +496,31 @@ static int bus_floor(struct gpu_dvfs *d,u32 floor)
     !(sel&BIT(16)) || !(sel&BIT(20)) || con!=con2 || sel!=sel2)return -EIO;
  return div_u64(24000000ULL*m,(p<<s)*2000)>=eff_floor ? 0 : -ERANGE;
 }
+/* devfreq calls target with its lock held, and from PM QoS notifiers with the
+ * global dev_pm_qos_mtx held (sysfs min/max_freq, cooling). Updating the MIF
+ * request there self-deadlocks, and from the monitor it inverts against those
+ * writers. Apply it from a work; a requeue picks up the latest value. */
+static void mif_work_fn(struct work_struct *work)
+{
+ struct gpu_dvfs *d=container_of(work,struct gpu_dvfs,mif_work);
+ dev_pm_qos_update_request(&d->bus_qos_req,READ_ONCE(d->want_mif));
+}
+static void mif_vote(struct gpu_dvfs *d,u32 khz)
+{
+ if(!d->bus_qos_active)return;
+ d->cur_mif_qos=khz;
+ WRITE_ONCE(d->want_mif,khz);
+ queue_work(system_highpri_wq,&d->mif_work);
+}
+/* The vote normally lands within a MIF switch; under a QoS writer it cannot
+ * run until target returns, so give up after 5 ms and defer to the next poll. */
+static int bus_floor_wait(struct gpu_dvfs *d,u32 floor)
+{
+ ktime_t end=ktime_add_us(ktime_get(),5000);
+ int ret;
+ while((ret=bus_floor(d,floor)) && ktime_before(ktime_get(),end))usleep_range(200,300);
+ return ret;
+}
 int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
 {
  struct gpu_dvfs *d;
@@ -535,12 +562,10 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   if(temp>=75000 && r->hz>266000000) {r=&rates[0];idx=0;*freq=r->hz;}
   target_uv = d->asv_uv[idx];
   if(old==r->hz){ret=0;goto finish;} /* Fast-path unchanged rate without GPIO-I2C storm. */
-  if(r->hz>old && d->bus_qos_active && r->mif > d->cur_mif_qos) {
-   dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
-   d->cur_mif_qos = r->mif;
-  }
+  if(r->hz>old && d->bus_qos_active && r->mif > d->cur_mif_qos)
+   mif_vote(d,r->mif);
   stage="MIF-floor";
-  ret=bus_floor(d,r->mif);
+  ret=bus_floor_wait(d,r->mif);
   if(ret) {
    /* Deferral is not a failure: keep the old rate and retry on the next
     * poll. -EAGAIN made devfreq_monitor() dev_err() every 50 ms, and the
@@ -592,10 +617,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    if(!d->normal_on_voltage) {stage="MCS-set";ret=set_mcs(d,target_uv);if(ret)goto fault;}
    stage="down-voltage";
    ret=set_voltage(d,target_uv);if(ret)goto fault;
-   if(d->bus_qos_active && r->mif < d->cur_mif_qos) {
-    dev_pm_qos_update_request(&d->bus_qos_req, r->mif);
-    d->cur_mif_qos = r->mif;
-   }
+   if(d->bus_qos_active && r->mif < d->cur_mif_qos)
+    mif_vote(d,r->mif);
   }
   if(d->normal_on_voltage) {
    stage="normal-pair-after";
@@ -609,10 +632,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
           stage,ret,requested,r ? r->hz : 0,old,temp,selector,mcs);
   if(!d->failed && clk_get_rate(d->clock)>266000000)
    if(set_clock(d,266000000))dev_err(d->dev,"emergency GPU clock throttle failed\n");
-  if(d->bus_qos_active && d->cur_mif_qos > rates[0].mif) {
-   dev_pm_qos_update_request(&d->bus_qos_req, rates[0].mif);
-   d->cur_mif_qos = rates[0].mif;
-  }
+  if(d->bus_qos_active && d->cur_mif_qos > rates[0].mif)
+   mif_vote(d,rates[0].mif);
   /* Throughput vote has no electrical safety role, including after failure. */
   mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
   dev_err(d->dev,"GPU transaction failed%d; no voltage rollback; all switching frozen\n",ret);
@@ -701,6 +722,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  {
   struct gpu_dvfs *d = data;
   if (d->bus_qos_active) {
+   cancel_work_sync(&d->mif_work);
    dev_pm_qos_remove_request(&d->bus_qos_req);
    d->bus_qos_active = false;
   }
@@ -1014,7 +1036,8 @@ static int gpu_probe(struct platform_device *pdev)
   if(!d->bus_dev)d->bus_dev=exynos_bus_get_dev("bus-mif");
   if(!d->bus_dev)d->bus_dev=exynos_bus_get_dev(NULL);
   if(d->bus_dev) {
-   d->cur_mif_qos=rates[0].mif;
+   d->cur_mif_qos=d->want_mif=rates[0].mif;
+   INIT_WORK(&d->mif_work,mif_work_fn);
    ret=dev_pm_qos_add_request(d->bus_dev,&d->bus_qos_req,DEV_PM_QOS_MIN_FREQUENCY,d->cur_mif_qos);
    if(ret >= 0) {
     d->bus_qos_active=true;
@@ -1042,6 +1065,7 @@ static int gpu_remove(struct platform_device *pdev)
 {
  struct gpu_dvfs *d = platform_get_drvdata(pdev);
  if (d && d->bus_qos_active) {
+  cancel_work_sync(&d->mif_work);
   dev_pm_qos_remove_request(&d->bus_qos_req);
   d->bus_qos_active = false;
  }
