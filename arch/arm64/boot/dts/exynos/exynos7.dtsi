@@ -657,6 +657,18 @@
 			label = "CAM1";
 		};
 
+		/*
+		 * Out of address order: VPP must probe before its child DISP, so
+		 * DISP is linked to it before CMU_VPP can let genpd power VPP off
+		 * under the bootloader's display.
+		 */
+		pd_vpp: power-domain@105c41e0 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c41e0 0x20>;
+			#power-domain-cells = <0>;
+			label = "VPP";
+		};
+
 		pd_disp: power-domain@105c4080 {
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4080 0x20>;
@@ -703,13 +715,6 @@
 			reg = <0x105c41c0 0x20>;
 			#power-domain-cells = <0>;
 			label = "MSCL";
-		};
-
-		pd_vpp: power-domain@105c41e0 {
-			compatible = "samsung,exynos7420-pd";
-			reg = <0x105c41e0 0x20>;
-			#power-domain-cells = <0>;
-			label = "VPP";
 		};
 
 		rtc: rtc@10590000 {
