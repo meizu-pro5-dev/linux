@@ -650,11 +650,6 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	list_add_tail(&bus->node, &exynos_bus_list);
 	mutex_unlock(&exynos_bus_list_lock);
 
-	if (bus->is_exynos7420_mif || bus->is_exynos7420_int)
-		device_create_file(dev, &dev_attr_hw_status);
-	if (bus->is_exynos7420_mif)
-		device_create_file(dev, &dev_attr_baseline_floor_khz);
-
 	max_state = bus->devfreq->max_state;
 	min_freq = min(bus->devfreq->freq_table[0], bus->devfreq->freq_table[max_state - 1]) / 1000;
 	max_freq = max(bus->devfreq->freq_table[0], bus->devfreq->freq_table[max_state - 1]) / 1000;
@@ -811,6 +806,28 @@ static const struct of_device_id exynos_bus_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, exynos_bus_of_match);
 
+static struct attribute *exynos_bus_attrs[] = {
+	&dev_attr_hw_status.attr,
+	&dev_attr_baseline_floor_khz.attr,
+	NULL,
+};
+
+static umode_t exynos_bus_attr_is_visible(struct kobject *kobj,
+					  struct attribute *attr, int n)
+{
+	struct exynos_bus *bus = dev_get_drvdata(kobj_to_dev(kobj));
+
+	if (attr == &dev_attr_baseline_floor_khz.attr)
+		return bus->is_exynos7420_mif ? attr->mode : 0;
+	return bus->is_exynos7420_mif || bus->is_exynos7420_int ? attr->mode : 0;
+}
+
+static const struct attribute_group exynos_bus_group = {
+	.attrs = exynos_bus_attrs,
+	.is_visible = exynos_bus_attr_is_visible,
+};
+__ATTRIBUTE_GROUPS(exynos_bus);
+
 static struct platform_driver exynos_bus_platdrv = {
 	.probe		= exynos_bus_probe,
 	.shutdown	= exynos_bus_shutdown,
@@ -818,6 +835,7 @@ static struct platform_driver exynos_bus_platdrv = {
 		.name	= "exynos-bus",
 		.pm	= &exynos_bus_pm,
 		.of_match_table = exynos_bus_of_match,
+		.dev_groups = exynos_bus_groups,
 	},
 };
 module_platform_driver(exynos_bus_platdrv);
