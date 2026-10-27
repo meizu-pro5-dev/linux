@@ -79,6 +79,7 @@ struct decon_context {
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
 	struct gpio_desc		*te_gpio;
+	int				irq;
 	int				te_irq;
 	spinlock_t			te_lock;
 	bool				te_irq_enabled;
@@ -192,9 +193,16 @@ static void decon_clear_channels(struct decon_context *ctx)
 static int decon_ctx_initialize(struct decon_context *ctx,
 			struct drm_device *drm_dev)
 {
+	int ret;
+
 	ctx->drm_dev = drm_dev;
 
+	/* The DISP bus clocks only run while DECON is resumed. */
+	ret = pm_runtime_resume_and_get(ctx->dev);
+	if (ret < 0)
+		return ret;
 	decon_clear_channels(ctx);
+	pm_runtime_put_sync(ctx->dev);
 
 	return exynos_drm_register_dma(drm_dev, ctx->dev, &ctx->dma_priv);
 }
@@ -956,6 +964,7 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 	if (ctx->i80_if)
 		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
 		       VIDINTCON0_INT_I80_EN, ctx->regs + VIDINTCON0);
+	enable_irq(ctx->irq);
 
 	/* if vblank was enabled status, enable it again. */
 	if (test_and_clear_bit(0, &ctx->irq_flags))
@@ -995,6 +1004,7 @@ static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
 		decon_send_event(ctx);
 	}
 
+	disable_irq(ctx->irq);
 	pm_runtime_put_sync(ctx->dev);
 
 	if (ctx->bus_qos_active) {
@@ -1226,7 +1236,14 @@ static int decon_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err_iounmap;
 
-	ret = devm_request_irq(dev, ret, decon_irq_handler, 0, "drm_decon", ctx);
+	ctx->irq = ret;
+
+	/*
+	 * Only take interrupts while DECON is enabled: the handler reads
+	 * DECON, whose bus clocks stop when it is suspended.
+	 */
+	ret = devm_request_irq(dev, ctx->irq, decon_irq_handler, IRQF_NO_AUTOEN,
+			       "drm_decon", ctx);
 	if (ret) {
 		dev_err(dev, "irq request failed.\n");
 		goto err_iounmap;
