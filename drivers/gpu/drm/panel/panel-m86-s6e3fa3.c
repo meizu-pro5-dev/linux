@@ -42,7 +42,6 @@ static int m86_prepare(struct drm_panel *panel)
 {
  struct m86_panel *p = to_m86(panel);
  int ret, i;
- u8 id[3];
  if (p->prepared) return 0;
  ret = regulator_bulk_enable(2, p->supplies);
  if (ret) return ret;
@@ -59,10 +58,6 @@ static int m86_prepare(struct drm_panel *panel)
   if (ret < 0) goto fail;
   if (c->delay) msleep(c->delay);
  }
- ret=mipi_dsi_set_maximum_return_packet_size(p->dsi,sizeof(id));
- if (ret>=0) ret=mipi_dsi_dcs_read(p->dsi,0x04,id,sizeof(id));
- if (ret==sizeof(id)) dev_info(panel->dev,"S6E3FA3 ID %02x %02x %02x\n",id[0],id[1],id[2]);
- else dev_warn(panel->dev,"panel ID read returned %d\n",ret);
  p->prepared=true;
  return 0;
 fail:
