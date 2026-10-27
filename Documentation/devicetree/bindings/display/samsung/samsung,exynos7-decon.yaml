@@ -22,14 +22,17 @@ properties:
     const: samsung,exynos7-decon
 
   clocks:
-    maxItems: 4
+    minItems: 4
+    maxItems: 5
 
   clock-names:
+    minItems: 4
     items:
       - const: pclk_decon0
       - const: aclk_decon0
       - const: decon0_eclk
       - const: decon0_vclk
+      - const: aclk_disp
 
   display-timings:
     $ref: ../panel/display-timings.yaml#
