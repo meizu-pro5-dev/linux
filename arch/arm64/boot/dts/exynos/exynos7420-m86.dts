@@ -635,9 +635,6 @@
 &sysmmu_disp_rw { status = "okay"; };
 &decon {
 	compatible = "samsung,exynos7-decon";
-	clocks = <&cmu_disp CLK_PCLK_DECON0>, <&cmu_disp CLK_ACLK_DECON0>,
-	         <&cmu_disp CLK_SCLK_DECON0_ECLK>, <&cmu_disp CLK_SCLK_DECON0_VCLK>;
-	clock-names = "pclk_decon0", "aclk_decon0", "decon0_eclk", "decon0_vclk";
 	/*
 	 * The bootloader leaves the DISP PLL at 134 MHz and VCLK at 33.5 MHz,
 	 * which needs ~21 ms per command-mode frame, so every other 60 Hz

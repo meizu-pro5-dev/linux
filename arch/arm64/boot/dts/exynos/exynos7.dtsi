@@ -897,9 +897,10 @@
 			clocks = <&cmu_disp CLK_PCLK_DECON0>,
 				 <&cmu_disp CLK_ACLK_DECON0>,
 				 <&cmu_disp CLK_SCLK_DECON0_ECLK>,
-				 <&cmu_disp CLK_SCLK_DECON0_VCLK>;
+				 <&cmu_disp CLK_SCLK_DECON0_VCLK>,
+				 <&cmu_disp CLK_ACLK_XIU_DISP_RW>;
 			clock-names = "pclk_decon0", "aclk_decon0",
-				      "decon0_eclk", "decon0_vclk";
+				      "decon0_eclk", "decon0_vclk", "aclk_disp";
 			iommus = <&sysmmu_disp_ro>, <&sysmmu_disp_rw>;
 			interconnects = <&bus_mif>;
 			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>,
