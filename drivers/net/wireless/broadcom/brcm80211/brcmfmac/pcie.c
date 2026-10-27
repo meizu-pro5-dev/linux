@@ -2698,14 +2698,6 @@ static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 	.resume_noirq = brcmf_pcie_pm_resume_noirq,
 };
 
-static void quirk_brcmfmac_bcm4356_skip_bus_pm(struct pci_dev *pdev)
-{
-	pdev->skip_bus_pm = true;
-}
-DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, 0x43ab, quirk_brcmfmac_bcm4356_skip_bus_pm);
-DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_BROADCOM, BRCM_PCIE_4356_DEVICE_ID, quirk_brcmfmac_bcm4356_skip_bus_pm);
-
-
 #endif /* CONFIG_PM */
 
 
