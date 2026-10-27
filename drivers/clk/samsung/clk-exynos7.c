@@ -374,6 +374,8 @@ static const struct samsung_mux_clock top0_mux_clks[] __initconst = {
 
 	MUX(0, "mout_aclk_peric1_66", mout_top0_group1, MUX_SEL_TOP03, 12, 2),
 	MUX(0, "mout_aclk_peric0_66", mout_top0_group1, MUX_SEL_TOP03, 20, 2),
+	MUX(0, "mout_aclk_vpp0_400", mout_top0_group1, MUX_SEL_TOP03, 8, 2),
+	MUX(0, "mout_aclk_vpp1_400", mout_top0_group1, MUX_SEL_TOP03, 4, 2),
 
 	MUX(0, "mout_sclk_spdif", mout_top0_group3, MUX_SEL_TOP0_PERIC0, 4, 3),
 	MUX(0, "mout_sclk_pcm1", mout_top0_group4, MUX_SEL_TOP0_PERIC0, 8, 2),
@@ -405,6 +407,8 @@ static const struct samsung_div_clock top0_div_clks[] __initconst = {
 		DIV_TOP03, 12, 6),
 	DIV(DOUT_ACLK_PERIC0, "dout_aclk_peric0_66", "mout_aclk_peric0_66",
 		DIV_TOP03, 20, 6),
+	DIV(0, "dout_aclk_vpp0_400", "mout_aclk_vpp0_400", DIV_TOP03, 8, 4),
+	DIV(0, "dout_aclk_vpp1_400", "mout_aclk_vpp1_400", DIV_TOP03, 4, 4),
 
 	DIV(0, "dout_sclk_spdif", "mout_sclk_spdif", DIV_TOP0_PERIC0, 4, 4),
 	DIV(0, "dout_sclk_pcm1", "mout_sclk_pcm1", DIV_TOP0_PERIC0, 8, 12),
@@ -475,6 +479,15 @@ static const struct samsung_gate_clock top0_gate_clks[] __initconst = {
 
 	GATE(CLK_ACLK_DISP_400, "top_aclk_disp_400", "dout_aclk_disp_400",
 		ENABLE_ACLK_TOP03, 28, 0, 0),
+	/*
+	 * BLK_VPP inputs. DECON scan-out depends on BLK_VPP (ADR 0004/0012) but
+	 * does not consume these yet, so keep them running as the bootloader
+	 * left them.
+	 */
+	GATE(CLK_ACLK_VPP0_400, "top_aclk_vpp0_400", "dout_aclk_vpp0_400",
+		ENABLE_ACLK_TOP03, 8, CLK_IS_CRITICAL, 0),
+	GATE(CLK_ACLK_VPP1_400, "top_aclk_vpp1_400", "dout_aclk_vpp1_400",
+		ENABLE_ACLK_TOP03, 4, CLK_IS_CRITICAL, 0),
 	GATE(CLK_SCLK_DECON_INT_ECLK, "top_sclk_decon_int_eclk",
 		"dout_sclk_decon_int_eclk", ENABLE_SCLK_TOP0_DISP, 28, 0, 0),
 	GATE(CLK_SCLK_DECON_VCLK, "top_sclk_decon_vclk",
@@ -1928,6 +1941,116 @@ static const struct samsung_cmu_info m86_disp_cmu_info = {
 	.no_pm_smc		= true,
 };
 
+/*
+ * Register offset definitions for CMU_VPP (0x13ED0000), clock tree from the
+ * vendor kernel (drivers/clk/samsung/clk-exynos7420.c, vpp block). Nothing
+ * in mainline drives BLK_VPP yet, but DECON scan-out depends on it, so
+ * every gate keeps the state the bootloader left.
+ */
+#define MUX_SEL_VPP			0x0200
+#define DIV_VPP				0x0600
+#define ENABLE_ACLK_VPP			0x0800
+#define ENABLE_PCLK_VPP			0x0900
+
+static const unsigned long vpp_clk_regs[] = {
+	MUX_SEL_VPP,
+	DIV_VPP,
+	ENABLE_ACLK_VPP,
+	ENABLE_PCLK_VPP,
+};
+
+PNAME(mout_aclk_vpp0_400_user_p) = { "fin_pll", "top_aclk_vpp0_400" };
+PNAME(mout_aclk_vpp1_400_user_p) = { "fin_pll", "top_aclk_vpp1_400" };
+
+static const struct samsung_mux_clock vpp_mux_clks[] = {
+	MUX(CLK_MOUT_ACLK_VPP0_400_USER, "usermux_aclk_vpp0_400",
+		mout_aclk_vpp0_400_user_p, MUX_SEL_VPP, 0, 1),
+	MUX(CLK_MOUT_ACLK_VPP1_400_USER, "usermux_aclk_vpp1_400",
+		mout_aclk_vpp1_400_user_p, MUX_SEL_VPP, 4, 1),
+};
+
+static const struct samsung_div_clock vpp_div_clks[] = {
+	DIV(CLK_DOUT_PCLK_VPP, "dout_pclk_vpp_133", "usermux_aclk_vpp0_400",
+		DIV_VPP, 0, 3),
+};
+
+static const struct samsung_gate_clock vpp_gate_clks[] = {
+	GATE(0, "aclk_axi_lh_async_si_vpp0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 14, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_vppx0", "aclk_axi_lh_async_si_vpp0",
+		ENABLE_ACLK_VPP, 16, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_VPP_IDMA_VG0, "aclk_vpp_idma_vg0", "aclk_xiu_vppx0",
+		ENABLE_ACLK_VPP, 0, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_VPP_IDMA_VGR0, "aclk_vpp_idma_vgr0", "aclk_xiu_vppx0",
+		ENABLE_ACLK_VPP, 2, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_axi_lh_async_si_vpp1", "usermux_aclk_vpp1_400",
+		ENABLE_ACLK_VPP, 15, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_vppx1", "aclk_axi_lh_async_si_vpp1",
+		ENABLE_ACLK_VPP, 17, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_VPP_IDMA_VG1, "aclk_vpp_idma_vg1", "aclk_xiu_vppx1",
+		ENABLE_ACLK_VPP, 1, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_VPP_IDMA_VGR1, "aclk_vpp_idma_vgr1", "aclk_xiu_vppx1",
+		ENABLE_ACLK_VPP, 3, CLK_IGNORE_UNUSED, 0),
+
+	GATE(CLK_ACLK_SMMU_VPP0, "aclk_smmu_vpp0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 4, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_smmu_vpp_sfw0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 5, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_SMMU_VPP1, "aclk_smmu_vpp1", "usermux_aclk_vpp1_400",
+		ENABLE_ACLK_VPP, 6, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_smmu_vpp_sfw1", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 7, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_ppmu_vpp_0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 8, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_ppmu_vpp_1", "usermux_aclk_vpp1_400",
+		ENABLE_ACLK_VPP, 9, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_bts_idma_vg0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 10, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_bts_idma_vg1", "usermux_aclk_vpp1_400",
+		ENABLE_ACLK_VPP, 11, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_bts_idma_vgr0", "usermux_aclk_vpp0_400",
+		ENABLE_ACLK_VPP, 12, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_bts_idma_vgr1", "usermux_aclk_vpp1_400",
+		ENABLE_ACLK_VPP, 13, CLK_IGNORE_UNUSED, 0),
+
+	GATE(CLK_PCLK_SMMU_VPP0, "pclk_smmu_vpp0", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 4, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_smmu_vpp_sfw0", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 5, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PCLK_SMMU_VPP1, "pclk_smmu_vpp1", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 6, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_smmu_vpp_sfw1", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 7, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_ppmu_vpp_0", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 8, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_ppmu_vpp_1", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 9, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_bts_idma_vg0", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 10, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_bts_idma_vg1", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 11, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_bts_idma_vgr0", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 12, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "pclk_bts_idma_vgr1", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 13, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_PCLK_VPP, "pclk_vpp", "dout_pclk_vpp_133",
+		ENABLE_PCLK_VPP, 20, CLK_IGNORE_UNUSED, 0),
+};
+
+static const struct samsung_cmu_info vpp_cmu_info = {
+	.mux_clks		= vpp_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(vpp_mux_clks),
+	.div_clks		= vpp_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(vpp_div_clks),
+	.gate_clks		= vpp_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(vpp_gate_clks),
+	.nr_clk_ids		= VPP_NR_CLK,
+	.clk_regs		= vpp_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(vpp_clk_regs),
+	.clk_name		= "aclk_vpp0_400",
+	.no_pm_smc		= true,
+};
+
 static int __init exynos7_cmu_probe(struct platform_device *pdev)
 {
 	return exynos_arm64_register_cmu_pm(pdev, false);
@@ -1946,6 +2069,9 @@ static const struct of_device_id exynos7_cmu_of_match[] = {
 	}, {
 		.compatible = "meizu,m86-clock-disp",
 		.data = &m86_disp_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7-clock-vpp",
+		.data = &vpp_cmu_info,
 	}, {
 	},
 };
