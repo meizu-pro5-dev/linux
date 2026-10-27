@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Meizu PRO 5 (m86), conservative Linux 6.6 first-boot board description.
+ * Meizu PRO 5 (m86) board description.
  * Board wiring: meizuosc/m576 ubuntu 5a0c442 and archived m86 raw DTB.
  * Requires the project's pinned Exynos7420 SoC patch (A53 + MCT nodes).
  */
 /dts-v1/;
 
 #include "exynos7.dtsi"
+#include <dt-bindings/clock/exynos7-clk.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 #include <dt-bindings/input/ti-drv260x.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/usb/pd.h>
 
@@ -113,9 +117,9 @@
 	};
 
 	/*
-	 * RTC-only PMIC path. The adapter checks/holds non-running APM in
-	 * reset before requesting GPIOs. No default pinctrl state may run
-	 * ahead of that guard. The regulator driver remains disabled.
+	 * PMIC path. The adapter checks/holds non-running APM in reset before
+	 * requesting GPIOs. No default pinctrl state may run ahead of that
+	 * guard.
 	 */
 	i2c_pmic: i2c-pmic {
 		compatible = "meizu,m86-pmic-i2c", "i2c-gpio";
@@ -131,7 +135,7 @@
 		m86_pmic: pmic@66 {
 			compatible = "samsung,s2mps15-pmic";
 			reg = <0x66>;
-			/* No PMIC IRQ: RTC read/write only, no alarm or wakeup. */
+			/* No PMIC IRQ: no RTC alarm or wakeup from the PMIC. */
 			regulators {
 				/* Dynamic MIF, CPU, and INT rails: BUCK1, BUCK2, BUCK3, BUCK4 */
 				m86_buck1_mif: BUCK1 {
@@ -160,197 +164,87 @@
 					regulator-max-microvolt = <1000000>;
 					regulator-always-on;
 				};
-			};
-		};
-	};
-};
-
-&fin_pll {
-	clock-frequency = <24000000>;
-};
-
-&serial_2 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&uart2_data>;
-	status = "okay";
-};
-
-/*
- * Preserve all MPIDRs, allowing the boot CPU to be identified whichever
- * cluster U-Boot entered. Bring up both clusters before capability finalization.
- * Stock PSCI 0.1 uses exactly the inherited CPU_ON/OFF function IDs.
- */
-&{/timer} {
-	clock-frequency = <24000000>;
-	interrupt-names = "sec-phys", "phys", "hyp-phys";
-	interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
-		     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
-		     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
-};
-
-&hsi2c_8 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	m86_fusb302: typec-portc@22 {
-		compatible = "fcs,fusb302";
-		reg = <0x22>;
-		interrupt-parent = <&gpa1>;
-		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
-		pd-on-gpios = <&gpr3 4 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&ccd_int>;
-		vbus-supply = <&usb_otg_vbus>;
-
-		connector {
-			compatible = "usb-c-connector";
-			label = "USB-C";
-			power-role = "dual";
-			data-role = "dual";
-			/* FUSB302 is PD 2.0 silicon: a PD 3.0 Get_Source_Cap_Extended
-			 * from a PD 3.0 host ends in a Hard Reset loop every ~1.2 s.
-			 */
-			pd-revision = /bits/ 8 <0x2 0x0 0x1 0x3>;
-			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;
-			sink-pdos = <
-				PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
-				PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)
-				PDO_FIXED(12000, 2000, PDO_FIXED_USB_COMM)
-			>;
-			op-sink-microwatt = <24000000>;
-			usb-role-switch = <&m86_dwc3>;
-
-			ports {
-				#address-cells = <1>;
-				#size-cells = <0>;
-
-				port@0 {
-					reg = <0>;
-					usbc_hs: endpoint {
-						remote-endpoint = <&dwc3_ep>;
-					};
+				/*
+				 * Board LDOs. These constraints can write the voltage
+				 * at probe if the firmware setting differs.
+				 */
+				m86_wm8998_1v8: LDO16 {
+					regulator-name = "vdd18_audio";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				ldo17_reg: LDO17 {
+					regulator-name = "vdd28_sen";
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				m86_lcd_1v8: LDO18 {
+					regulator-name = "vdd18_lcd";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				m86_lcd_3v3: LDO19 {
+					regulator-name = "vdd33_lcd";
+					regulator-min-microvolt = <3300000>;
+					regulator-max-microvolt = <3300000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				m86_touch_3v3: LDO21 {
+					regulator-name = "vdd33_touch";
+					regulator-min-microvolt = <2900000>;
+					regulator-max-microvolt = <2900000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				m86_es705_1v1: LDO22 {
+					regulator-name = "vdd11_nr";
+					regulator-min-microvolt = <1100000>;
+					regulator-max-microvolt = <1100000>;
+				};
+				m86_touch_1v8: LDO23 {
+					regulator-name = "vdd18_touch";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				ldo25_reg: LDO25 {
+					regulator-name = "vdd28_ps";
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+					regulator-boot-on;
+				};
+				ldo14_reg: LDO14 {
+					regulator-name = "vdd28_fp";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+					regulator-boot-on;
+					regulator-always-on;
+				};
+				ldo2_reg: LDO2 {
+					regulator-name = "vqmmc_sdcard";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <3300000>;
+					regulator-boot-on;
+				};
+				ldo27_reg: LDO27 {
+					regulator-name = "vdd18_nfc";
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+					regulator-boot-on;
+					regulator-always-on;
 				};
 			};
 		};
 	};
-	m86_muic: muic@25 {
-		compatible = "meizu,m86-tsu6721";
-		reg = <0x25>;
-	};
-};
 
-&ufs {
-	samsung,bus = <&bus_mif>;
-	interconnects = <&bus_int &bus_mif>;
-	interconnect-names = "dma-mem";
-	status = "okay";
-};
-
-&mmc_2 {
-	status = "okay";
-	num-slots = <1>;
-	cap-sd-highspeed;
-	sd-uhs-sdr12;
-	sd-uhs-sdr25;
-	sd-uhs-sdr50;
-	sd-uhs-sdr104;
-	sd-uhs-ddr50;
-	card-detect-delay = <200>;
-	samsung,dw-mshc-ciu-div = <3>;
-	samsung,dw-mshc-sdr-timing = <3 0 3 2>;
-	samsung,dw-mshc-ddr-timing = <3 0 2 1>;
-	fifo-depth = <0x40>;
-	bus-width = <4>;
-	cd-gpios = <&gpa1 3 GPIO_ACTIVE_LOW>;
-	vmmc-supply = <&dvdd29_tf>;
-	vqmmc-supply = <&ldo2_reg>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &m86_sd2_cd>;
-};
-
-&usbdrd_phy {
-	status = "okay";
-};
-
-/* Fingerprint sensor bus (vendor DT: secure-mode). Normal-world access
- * verified with diagnostics/kmods/m86-spi4-probe and m86-fpc-hwid: the
- * sensor reports HWID 0x150b (FPC1150 rev B).
- */
-&spi_4 {
-	status = "okay";
-	/* Vendor 3.10 drives nCS manually; CS_AUTO read back MISO as 0. */
-	pinctrl-0 = <&m86_spi4_bus &m86_spi4_cs>;
-	cs-gpios = <&gpv7 1 GPIO_ACTIVE_LOW>;
-
-	fpc_spi: fingerprint@0 {
-		compatible = "fpc,fpc1150";
-		reg = <0>;
-		spi-max-frequency = <4800000>;
-	};
-};
-
-&usbdrd {
-	status = "okay";
-
-	m86_dwc3: usb@0 {
-		dr_mode = "otg";
-		usb-role-switch;
-		role-switch-default-mode = "peripheral";
-		maximum-speed = "high-speed";
-		snps,dis_u2_susphy_quirk;
-		snps,dis_enblslpm_quirk;
-
-		port {
-			dwc3_ep: endpoint {
-				remote-endpoint = <&usbc_hs>;
-			};
-		};
-	};
-};
-
-&pmu_system_controller {
-	/*
-	 * S-Boot reads SYSIP_DAT0 after SWRESET (vendor common.c
-	 * exynos_restart()). Only the modes S-Boot was seen to honour are
-	 * listed; 0xfe ("bootloader") leaves it stuck at the boot logo.
-	 */
-	reboot-mode {
-		compatible = "syscon-reboot-mode";
-		offset = <0x810>; /* SYSIP_DAT0 */
-		mode-normal = <0x00>;
-		mode-fastboot = <0xfc>;
-		mode-recovery = <0xff>;
-	};
-};
-
-/* Avoid unneeded first-boot accesses and the S6 display/audio sequences. */
-&pdma0 { status = "okay"; };
-&pdma1 { status = "okay"; };
-&adma { status = "okay"; };
-&pwm { status = "disabled"; };
-&tmuctrl_0 { status = "disabled"; };
-&tmuctrl_1 { status = "disabled"; };
-&tmuctrl_2 { status = "disabled"; };
-&tmuctrl_3 { status = "disabled"; };
-&atlas_thermal { status = "disabled"; };
-&cmu_g3d { status = "okay"; };
-&cmu_aud { status = "okay"; };
-&cmu_disp { status = "disabled"; };
-&pd_g3d { status = "okay"; };
-&pd_disp { status = "disabled"; };
-&pinctrl_aud { status = "okay"; };
-&sysmmu_disp_ro { status = "disabled"; };
-&sysmmu_disp_rw { status = "disabled"; };
-
-// SPDX-License-Identifier: GPL-2.0-only
-/* Include after the board DTS root and pinctrl definitions.
- * PMIC supplies are retained from the bootloader, not registered/reconfigured.
- */
-#include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/input/input.h>
-#include <dt-bindings/interrupt-controller/irq.h>
-
-/ {
 	m86_gpio_keys: gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
@@ -408,512 +302,114 @@
 	trng {
 		compatible = "samsung,exynos7420-trng", "samsung,exynos850-trng";
 	};
-};
 
-&pinctrl_alive {
-	ccd_int: ccd-int-pin {
-		samsung,pins = "gpa1-5";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
-	};
-	m86_touch_irq_pin: m86-touch-irq-pin {
-		samsung,pins = "gpa1-1";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <3>;
-	};
-	m86_keys_pins: m86-keys-pins {
-		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
-	};
-	als_irq_pins: als-irq-pins {
-		samsung,pins = "gpa2-5";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <3>;
-		samsung,pin-drv = <0>;
-	};
-	ps_irq_pins: ps-irq-pins {
-		samsung,pins = "gpa3-4";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <3>;
-		samsung,pin-drv = <0>;
-	};
-	fpc_irq_pin: fpc-irq-pins {
-		samsung,pins = "gpa2-2";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
-	};
-	m86_sd2_cd: sd2-cd-pin {
-		samsung,pins = "gpa1-3";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <3>;
-	};
-	nfc_int_pin: nfc-int-pin {
-		samsung,pins = "gpa2-1";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <1>;
-	};
-};
-
-&pinctrl_ese {
-	fpc_rst_pin: fpc-rst-pins {
-		samsung,pins = "gpv7-4";
-		samsung,pin-function = <1>;
-		samsung,pin-pud = <0>;
-	};
-	/* SPI4 CLK/MISO/MOSI only: nCS (gpv7-1) is a GPIO, see &spi_4. */
-	m86_spi4_bus: m86-spi4-bus-pins {
-		samsung,pins = "gpv7-0", "gpv7-2", "gpv7-3";
-		samsung,pin-function = <2>;
-		samsung,pin-pud = <3>;
-	};
-	m86_spi4_cs: m86-spi4-cs-pins {
-		samsung,pins = "gpv7-1";
-		samsung,pin-function = <1>;
-		samsung,pin-pud = <3>;
-	};
-};
-
-&hsi2c_4 {
-	status = "okay";
-	clock-frequency = <400000>;
-	touchscreen@49 {
-		compatible = "meizu,m86-fts";
-		reg = <0x49>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&m86_touch_irq_pin>;
-		interrupt-parent = <&gpa1>;
-		interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
-		touchscreen-size-x = <1080>;
-		touchscreen-size-y = <1920>;
-		/* Sleep while the panel is unprepared (DPMS off, suspend). */
-		panel = <&m86_panel>;
-	};
-};
-
-/* Integration proposal, not included by the active board DTS.
- * Keep the inherited Exynos7 TMU disabled; this monitor owns all four windows.
- * Driver enables clocks and sensing; no threshold or trim writes.
- * A 95 C software critical zone polls maximum of all four P0 sensors.
- */
-/ {
+	/*
+	 * Replaces the inherited Exynos7 TMU, which stays disabled; this monitor
+	 * owns all four windows. The driver enables clocks and sensing; no
+	 * threshold or trim writes. A 95 C software critical zone polls the
+	 * maximum of all four P0 sensors.
+	 */
 	m86_tmu_monitor: tmu-monitor@10060000 {
 		compatible = "meizu,m86-tmu-monitor";
 		reg = <0 0x10060000 0 0x200>, <0 0x10064000 0 0x200>,
 		      <0 0x10068000 0 0x200>, <0 0x1006c000 0 0x200>;
 		interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>,
-		             <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,
-		             <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
-		             <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>;
+			     <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&clock_peris PCLK_TMU>, <&clock_peris SCLK_TMU>;
 		clock-names = "tmu_apbif", "tmu_sclk";
 	};
-};
 
-&hsi2c_6 {
-	status = "okay";
-	clock-frequency = <100000>;
-
-	m86_gauge: gauge@55 {
-		compatible = "meizu,m86-bq27532-readonly";
-		reg = <0x55>;
-	};
-	m86_secondary_charger: charger@6b {
-		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
-		reg = <0x6b>;
-		interrupt-parent = <&gpa0>;
-		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
-		enable-gpios = <&gpr3 2 GPIO_ACTIVE_LOW>;
-		linux,skip-reset;
-		ti,charge-current = <2250000>;
-		ti,battery-regulation-voltage = <4352000>;
-		ti,termination-current = <64000>;
-		ti,precharge-current = <128000>;
-		ti,minimum-sys-voltage = <3500000>;
-		ti,boost-voltage = <5000000>;
-		ti,boost-max-current = <500000>;
-		ti,thermal-regulation-threshold = <80>;
-		meizu,secondary-charger;
-	};
-};
-
-&tmuctrl_0 { status = "disabled"; };
-&tmuctrl_1 { status = "disabled"; };
-&tmuctrl_2 { status = "disabled"; };
-&tmuctrl_3 { status = "disabled"; };
-
-/* Replace the empty regulators child on the board's existing S2MPS15 node.
- * These voltage constraints can write voltage at probe if firmware differs.
- * First read raw L18/19/21/23CTRL and record observed voltage/enable; don't
- * activate this proposal without evaluating the actual state.
- * Existing full constraints apply only to these registered rails on M86.
- */
-&i2c_pmic {
-  pmic@66 {
-	regulators {
-		m86_wm8998_1v8: LDO16 {
-			regulator-name = "vdd18_audio";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		ldo17_reg: LDO17 {
-			regulator-name = "vdd28_sen";
-			regulator-min-microvolt = <2800000>;
-			regulator-max-microvolt = <2800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		m86_lcd_1v8: LDO18 {
-			regulator-name = "vdd18_lcd";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		m86_lcd_3v3: LDO19 {
-			regulator-name = "vdd33_lcd";
-			regulator-min-microvolt = <3300000>;
-			regulator-max-microvolt = <3300000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		m86_touch_3v3: LDO21 {
-			regulator-name = "vdd33_touch";
-			regulator-min-microvolt = <2900000>;
-			regulator-max-microvolt = <2900000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		m86_es705_1v1: LDO22 {
-			regulator-name = "vdd11_nr";
-			regulator-min-microvolt = <1100000>;
-			regulator-max-microvolt = <1100000>;
-		};
-		m86_touch_1v8: LDO23 {
-			regulator-name = "vdd18_touch";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		ldo25_reg: LDO25 {
-			regulator-name = "vdd28_ps";
-			regulator-min-microvolt = <2800000>;
-			regulator-max-microvolt = <2800000>;
-			regulator-boot-on;
-		};
-		ldo14_reg: LDO14 {
-			regulator-name = "vdd28_fp";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-		ldo2_reg: LDO2 {
-			regulator-name = "vqmmc_sdcard";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <3300000>;
-			regulator-boot-on;
-		};
-		ldo27_reg: LDO27 {
-			regulator-name = "vdd18_nfc";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-boot-on;
-			regulator-always-on;
-		};
-	};
-  };
-};
-
-/* Command-mode display handoff from the bootloader. */
-&cmu_disp { status = "okay"; };
-&pd_disp { status = "okay"; };
-&sysmmu_disp_ro { status = "okay"; };
-&sysmmu_disp_rw { status = "okay"; };
-&decon {
-	compatible = "samsung,exynos7-decon";
-	/*
-	 * The bootloader leaves the DISP PLL at 134 MHz and VCLK at 33.5 MHz,
-	 * which needs ~21 ms per command-mode frame, so every other 60 Hz
-	 * frame is dropped. Set the vendor rates for this 1080p MIC panel in
-	 * the vendor order (decon_int_set_clocks(): DISP PLL 267 MHz, the
-	 * closest table rate being 266 MHz, then VCLK 60 MHz): VCLK becomes
-	 * 266 / 5 = 53.2 MHz.
-	 */
-	assigned-clocks = <&cmu_disp CLK_FOUT_DISP_PLL>,
-			  <&cmu_disp CLK_DOUT_SUB_SCLK_DECON_INT_VCLK>;
-	assigned-clock-rates = <266000000>, <60000000>;
-	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
-	samsung,bus = <&bus_mif>;
-	interconnects = <&bus_int &bus_mif>;
-	interconnect-names = "dma-mem";
-	memory-region = <&decon_iova_resv>;
-	status = "okay";
- i80-if-timings { };
- ports {
-  #address-cells = <1>;
-  #size-cells = <0>;
-  port@0 {
-   reg = <0>;
-   m86_decon_out: endpoint { remote-endpoint = <&m86_dsim_in>; };
-  };
- };
-};
-// SPDX-License-Identifier: GPL-2.0-only
-/* DSIM/PHY portion only. Parent adds DECON graph, panel/reset/TE and supplies. */
-#include <dt-bindings/clock/exynos7-clk.h>
-#include <dt-bindings/interrupt-controller/arm-gic.h>
-
-/ {
 	m86_disp_sysreg: syscon@10050000 {
 		compatible = "syscon";
 		reg = <0x0 0x10050000 0x0 0x3000>;
 	};
+
 	m86_dsim_phy: dsim-phy {
 		compatible = "samsung,exynos7420-mipi-video-phy";
 		samsung,pmu-syscon = <&pmu_system_controller>;
 		samsung,disp-sysreg = <&m86_disp_sysreg>;
 		#phy-cells = <1>;
 	};
+
+	/*
+	 * Native DSIM host (samsung-dsim) with the S6E3FA3 panel driver. DECON
+	 * keeps the bootloader command-mode setup; without display-timings it
+	 * creates no DPI encoder, so the DSI encoder drives the CRTC.
+	 */
 	m86_dsim: dsi@13900000 {
-		/* Official HW TE input is separate from the gpc0-1 TE EINT. */
-		pinctrl-names = "default";
-		pinctrl-0 = <&m86_hw_te_on>;
 		compatible = "samsung,exynos7420-mipi-dsi";
 		power-domains = <&pd_disp>;
 		reg = <0x0 0x13900000 0x0 0x1000>;
 		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 196 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&cmu_disp CLK_PCLK_DSIM0>, <&fin_pll>,
-			<&cmu_disp CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8>,
-			<&cmu_disp CLK_PHYCLK_MIPIDPHY0_RXCLKESC0>,
-			<&cmu_disp CLK_SCLK_RGB_VCLK_TO_DSIM0>;
+			 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_BITCLKDIV8>,
+			 <&cmu_disp CLK_PHYCLK_MIPIDPHY0_RXCLKESC0>,
+			 <&cmu_disp CLK_SCLK_RGB_VCLK_TO_DSIM0>;
 		clock-names = "bus_clk", "sclk_mipi",
-			"phyclk_mipidphy0_bitclkdiv8",
-			"phyclk_mipidphy0_rxclkesc0", "sclk_rgb_vclk_to_dsim0";
+			      "phyclk_mipidphy0_bitclkdiv8",
+			      "phyclk_mipidphy0_rxclkesc0", "sclk_rgb_vclk_to_dsim0";
 		assigned-clocks = <&cmu_disp CLK_MOUT_MIPIDPHY0_BIT>,
-			<&cmu_disp CLK_MOUT_MIPIDPHY0_RX>;
+				  <&cmu_disp CLK_MOUT_MIPIDPHY0_RX>;
 		assigned-clock-parents = <&cmu_disp CLK_FOUT_MIPIDPHY0_BIT>,
-			<&cmu_disp CLK_FOUT_MIPIDPHY0_RX>;
+					 <&cmu_disp CLK_FOUT_MIPIDPHY0_RX>;
 		phys = <&m86_dsim_phy 0>;
 		phy-names = "dsim";
 		samsung,pll-clock-frequency = <24000000>;
 		samsung,burst-clock-frequency = <650000000>;
 		samsung,esc-clock-frequency = <20000000>;
 		samsung,mic-enabled;
-		status = "disabled";
-		/* Required: add vddcore/vddio supply phandles and ports/panel. */
-	};
-};
-&m86_dsim {
- #address-cells = <1>;
- #size-cells = <0>;
- ports {
-  #address-cells = <1>;
-  #size-cells = <0>;
-  port@0 {
-   reg = <0>;
-   m86_dsim_in: endpoint { remote-endpoint = <&m86_decon_out>; };
-  };
-  port@1 {
-   reg = <1>;
-   m86_dsim_out: endpoint { remote-endpoint = <&m86_panel_in>; data-lanes = <0 1>; };
-  };
- };
- m86_panel: panel@0 {
-  compatible = "meizu,m86-s6e3fa3";
-  /* No te-gpios: DECON owns the gpc0-1 TE EINT and triggers frames. */
-  reg = <0>;
-  vci-supply = <&m86_lcd_3v3>;
-  vdd3-supply = <&m86_lcd_1v8>;
-  reset-gpios = <&gpc3 3 GPIO_ACTIVE_LOW>;
-  port { m86_panel_in: endpoint { remote-endpoint = <&m86_dsim_out>; }; };
- };
-};
-
-/* Preserve the bootloader display clocks for the zenlte handoff path. */
-&cmu_disp {
- /* Decode the inherited PLL correctly without retuning the live display. */
- compatible = "meizu,m86-clock-disp";
-};
-
-/ {
- cmu_bus0: clock-controller@13400000 {
-  compatible = "samsung,exynos7-clock-bus0";
-  reg = <0x0 0x13400000 0x0 0x1000>;
-  #clock-cells = <1>;
-  clocks = <&fin_pll>, <&clock_topc CLK_ACLK_BUS0_532>;
-  clock-names = "fin_pll", "top_aclk_bus0_532";
- };
-};
-
-/* Handoff keeps the inherited TOP0 ECLK parent and divider. */
-
-
-/* Official disp_teson: GPG0-1 function2 routes the external hardware TE. */
-&pinctrl_bus0 {
- m86_hw_te_on: m86-hw-te-on {
-  samsung,pins = "gpg0-1";
-  samsung,pin-function = <2>;
- };
- nfc_ctrl_pins: nfc-ctrl-pins {
-  samsung,pins = "gpc3-0", "gpc3-4", "gpc3-7";
-  samsung,pin-function = <1>;
-  samsung,pin-pud = <0>;
-  samsung,pin-con-pdn = <3>;
- };
-};
-
-/*
- * Native DSIM host (samsung-dsim) with the S6E3FA3 panel driver. DECON
- * keeps the bootloader command-mode setup; without display-timings it
- * creates no DPI encoder, so the DSI encoder drives the CRTC. Keep gpg0-1
- * as it was during the handoff: DECON triggers from the gpc0-1 TE EINT.
- */
-&m86_dsim {
-	/delete-property/ pinctrl-names;
-	/delete-property/ pinctrl-0;
-	status = "okay";
-};
-
-/* Experimental retained-power GPU bring-up only.
- * Require observed G3D domain/BUCK6 on before booting this candidate.
- * No regulator voltage/control claims: missing mali-supply uses dummy supply.
- * Preserve external domain power rather than introducing unverified m86 PM.
- */
-&gpu {
-	/delete-property/ power-domains;
-	status = "okay";
-};
-
-/* CPU regulator consumer links only; no OPP or cpufreq enablement. */
-&cpu_atlas0 { cpu-supply = <&m86_buck2_cpu>; };
-&cpu_atlas1 { cpu-supply = <&m86_buck2_cpu>; };
-&cpu_atlas2 { cpu-supply = <&m86_buck2_cpu>; };
-&cpu_atlas3 { cpu-supply = <&m86_buck2_cpu>; };
-&cpu_apollo0 { cpu-supply = <&m86_buck3_cpu>; };
-&cpu_apollo1 { cpu-supply = <&m86_buck3_cpu>; };
-&cpu_apollo2 { cpu-supply = <&m86_buck3_cpu>; };
-&cpu_apollo3 { cpu-supply = <&m86_buck3_cpu>; };
-
-/* SPDX-License-Identifier: GPL-2.0-only */
-/* Include after exynos7420-m86.dts; candidate clock/header patch required. */
-#include <dt-bindings/clock/exynos7-clk.h>
-#include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/interrupt-controller/arm-gic.h>
-
-&soc {
-	/* Preserve SoC MMIO and translate the channel-1 PCIe outbound aperture. */
-	ranges = <0x00000000 0x0 0x00000000 0x18000000>,
-	         <0x1c000000 0x0 0x1c000000 0x04000000>;
-	/* Narrow SYSREG field, no existing syscon covers this register. */
-	pro5_pcie_sysreg: syscon@1005265c {
-		compatible = "samsung,exynos7420-pcie-sysreg", "syscon";
-		reg = <0x1005265c 4>;
-	};
-	/* This word lies outside clock_fsys1's existing 0xd00 range. */
-	pro5_pcie_cmu_control: syscon@156e0f00 {
-		compatible = "samsung,exynos7420-pcie-cmu-control", "syscon";
-		reg = <0x156e0f00 4>;
-	};
-	pro5_pcie1: pcie@15660000 {
-		compatible = "samsung,exynos7420-pro5-pcie-enumeration";
-		reg = <0x15660000 0x1000>, <0x15630000 0x1000>,
-		      <0x156f00e4 4>, <0x157b0000 0x1000>,
-		      <0x1c000000 0x1000>;
-		reg-names = "elbi", "phy", "pcs", "dbi", "config";
-		samsung,pcie-sysreg = <&pro5_pcie_sysreg>;
-		samsung,pmu-syscon = <&pmu_system_controller>;
-		samsung,pcie-cmu-control = <&pro5_pcie_cmu_control>;
-		device_type = "pci";
-		#address-cells = <3>;
-		#size-cells = <2>;
-		bus-range = <0 255>;
-		/* Inbound identity DMA aperture for the installed 3GB DRAM. */
-		dma-ranges = <0x02000000 0 0x40000000 0x40000000 0 0xc0000000>;
-		ranges = <0x82000000 0 0x1c011000 0x1c011000 0 0x03feefff>;
-		num-lanes = <1>;
-		max-link-speed = <1>;
-		interrupts = <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "elbi";
-		/* Interrupts are masked by the enumeration-only driver. */
-		reset-gpios = <&gpg2 0 GPIO_ACTIVE_LOW>;
-		reg-on-gpios = <&gpf5 6 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&pro5_pcie_gpio_pins &pro5_pcie_clkreq_pins
-		             &pro5_pcie_reset_clear_pins &pro5_pcie_wake_pins
-		             &pro5_pcie_clock_request_pins>;
-		clocks = <&clock_fsys1 ACLK_XIU_WIFI1X>,
-		         <&clock_fsys1 ACLK_AHB2AXI_PCIE_WIFI1>,
-		         <&clock_fsys1 ACLK_PCIE_WIFI1_MSTR>,
-		         <&clock_fsys1 ACLK_PCIE_WIFI1_SLV>,
-		         <&clock_fsys1 ACLK_PCIE_WIFI1_DBI>,
-		         <&clock_fsys1 ACLK_COMBO_PHY_PCS_WIFI1>,
-		         <&clock_fsys1 PCLK_ASYNC_COMBO_PHY_WIFI1>,
-		         <&clock_fsys1 SCLK_PCIE_LINK_WIFI1>,
-		         <&clock_fsys1 SCLK_COMBO_PHY_WIFI1_26M>,
-		         <&clock_fsys1 SCLK_PHY_FSYS1_USER>,
-		         <&clock_fsys1 PHYCLK_PCIE_WIFI1_TX0_USER>,
-		         <&clock_fsys1 PHYCLK_PCIE_WIFI1_RX0_USER>,
-		         <&clock_fsys1 MOUT_FSYS1_PHYCLK_SEL0>,
-		         <&clock_fsys1 MOUT_PHYCLK_PCIE_WIFI1_TX0_USER>,
-		         <&clock_fsys1 MOUT_PHYCLK_PCIE_WIFI1_RX0_USER>,
-		         <&clock_fsys1 MOUT_SCLK_PHY_FSYS1_USER>,
-		         <&fin_pll>, <&clock_fsys1 PHYCLK_PCIE_WIFI1_TX0>,
-		         <&clock_fsys1 PHYCLK_PCIE_WIFI1_RX0>,
-		         <&clock_top1 CLK_SCLK_PHY_FSYS1>;
-		clock-names = "aclk_xiu_wifi1x", "aclk_ahb2axi_pcie_wifi1",
-		              "aclk_pcie_wifi1_mstr_aclk", "aclk_pcie_wifi1_slv_aclk",
-		              "aclk_pcie_wifi1_dbi_aclk", "aclk_combo_phy_pcs_pclk_wifi1",
-		              "pclk_async_combo_phy_wifi1", "sclk_pcie_link_wifi1_gated",
-		              "sclk_combo_phy_wifi1_26m_gated", "sclk_phy_fsys1_gated",
-		              "phyclk_pcie_wifi1_tx0_gated", "phyclk_pcie_wifi1_rx0_gated",
-		              "combo-ref-mux", "phy-tx-mux", "phy-rx-mux", "phy-user-mux",
-		              "combo-ref-parent", "phy-tx-parent", "phy-rx-parent", "phy-user-parent";
-		/* The module selects these four parents explicitly after stage0.
-		 * No assigned-clock writes occur before manual driver logging.
-		 */
 		status = "okay";
-	};
-};
+		#address-cells = <1>;
+		#size-cells = <0>;
 
-&pinctrl_bus1 {
-	pro5_pcie_gpio_pins: pro5-pcie-gpio-pins {
-		samsung,pins = "gpf5-6", "gpg2-0";
-		samsung,pin-function = <1>;
-		samsung,pin-drv = <3>;
-	};
-	pro5_pcie_clkreq_pins: pro5-pcie-clkreq-pins {
-		samsung,pins = "gpf0-6";
-		samsung,pin-function = <2>;
-		samsung,pin-pud = <0>;
-		samsung,pin-drv = <3>;
-	};
-	pro5_pcie_reset_clear_pins: pro5-pcie-reset-clear-pins {
-		samsung,pins = "gpg2-2";
-		samsung,pin-function = <2>;
-		samsung,pin-pud = <3>;
-	};
-};
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-&pinctrl_alive {
-	pro5_pcie_clock_request_pins: pro5-pcie-clock-request-pins {
-		samsung,pins = "gpa3-5";
-		samsung,pin-function = <0xf>;
-		samsung,pin-pud = <0>;
-	};
-	pro5_pcie_wake_pins: pro5-pcie-wake-pins {
-		samsung,pins = "gpa3-3";
-		samsung,pin-function = <0>;
-		samsung,pin-pud = <0>;
-	};
-};
+			port@0 {
+				reg = <0>;
+				m86_dsim_in: endpoint {
+					remote-endpoint = <&m86_decon_out>;
+				};
+			};
 
-/* Include only with m86-topc-cpu-safe-mux.patch and reviewed driver. */
-/ {
+			port@1 {
+				reg = <1>;
+				m86_dsim_out: endpoint {
+					remote-endpoint = <&m86_panel_in>;
+					data-lanes = <0 1>;
+				};
+			};
+		};
+
+		m86_panel: panel@0 {
+			compatible = "meizu,m86-s6e3fa3";
+			/* No te-gpios: DECON owns the gpc0-1 TE EINT and triggers frames. */
+			reg = <0>;
+			vci-supply = <&m86_lcd_3v3>;
+			vdd3-supply = <&m86_lcd_1v8>;
+			reset-gpios = <&gpc3 3 GPIO_ACTIVE_LOW>;
+
+			port {
+				m86_panel_in: endpoint {
+					remote-endpoint = <&m86_dsim_out>;
+				};
+			};
+		};
+	};
+
+	cmu_bus0: clock-controller@13400000 {
+		compatible = "samsung,exynos7-clock-bus0";
+		reg = <0x0 0x13400000 0x0 0x1000>;
+		#clock-cells = <1>;
+		clocks = <&fin_pll>, <&clock_topc CLK_ACLK_BUS0_532>;
+		clock-names = "fin_pll", "top_aclk_bus0_532";
+	};
+
+	/* CPU cluster clocks (m86-cpu-clocks), switched via the TOPC safe mux. */
 	m86_atlas_clk: m86-atlas-clock@11800000 {
 		compatible = "meizu,m86-atlas-clock";
 		reg = <0 0x11800000 0 0x1000>;
@@ -922,6 +418,7 @@
 		clock-names = "safe", "fin";
 		meizu,max-validated-frequency = <2100000000>;
 	};
+
 	m86_apollo_clk: m86-apollo-clock@11900000 {
 		compatible = "meizu,m86-apollo-clock";
 		reg = <0 0x11900000 0 0x1000>;
@@ -930,21 +427,7 @@
 		clock-names = "safe", "fin";
 		meizu,max-validated-frequency = <1500000000>;
 	};
-};
-&cpu_atlas0 { clocks = <&m86_atlas_clk>; };
-&cpu_atlas1 { clocks = <&m86_atlas_clk>; };
-&cpu_atlas2 { clocks = <&m86_atlas_clk>; };
-&cpu_atlas3 { clocks = <&m86_atlas_clk>; };
-&cpu_apollo0 { clocks = <&m86_apollo_clk>; };
-&cpu_apollo1 { clocks = <&m86_apollo_clk>; };
-&cpu_apollo2 { clocks = <&m86_apollo_clk>; };
-&cpu_apollo3 { clocks = <&m86_apollo_clk>; };
 
-/* Review proposal only. Calibration flags require source-backed unit evidence;
- * bus-floor property must NOT be added until actual fixed MIF/INT mapping verified.
- * Add label m86_tmu_monitor to existing sensor node separately before inclusion.
- */
-/ {
 	bus_mif_opp_table: bus-mif-opp-table {
 		compatible = "operating-points-v2";
 
@@ -1086,6 +569,10 @@
 		status = "okay";
 	};
 
+	/*
+	 * Uses the unit-specific ASV/EMA fuse and MIF evidence; the driver
+	 * refuses to run unless the boot EMA register readbacks match.
+	 */
 	m86_cpu_dvfs: m86-cpu-coordinator {
 		compatible = "meizu,m86-cpu-coordinator";
 		meizu,ema-syscon = <&m86_disp_sysreg>;
@@ -1095,279 +582,72 @@
 		apollo-supply = <&m86_buck3_cpu>;
 		meizu,thermal-monitor = <&m86_tmu_monitor>;
 		meizu,max-validated-khz = <2100000 1500000>;
-		/* Intentionally no meizu,cpu-dvfs-active or validated-bus-floor gate. */
-		status = "disabled";
+		status = "okay";
+		meizu,cpu-dvfs-active;
+		samsung,bus = <&bus_mif>;
 	};
-};
 
-/* Explicit firstboot proposal only: include after clock and coordinator nodes.
- * Uses accepted unit-specific ASV/EMA fuse/MIF evidence. Boot EMA register
- * readbacks must also match; driver refuses otherwise. No automatic governor.
- */
-&m86_cpu_dvfs {
-	status = "okay";
-	meizu,cpu-dvfs-active;
-	samsung,bus = <&bus_mif>;
-	meizu,max-validated-khz = <2100000 1500000>;
-};
+	m86_gpu_buck6_observed: gpu-buck6-observed {
+		compatible = "meizu,m86-gpu-buck6-readonly";
+		regulator-name = "m86-gpu-buck6-encoded-readonly";
+	};
 
-// SPDX-License-Identifier: GPL-2.0-only
-/ {
- m86_gpu_buck6_observed: gpu-buck6-observed {
-  compatible = "meizu,m86-gpu-buck6-readonly";
-  regulator-name = "m86-gpu-buck6-encoded-readonly";
- };
-};
-&gpu { mali-supply = <&m86_gpu_buck6_observed>; };
+	/* GPU DVFS on the retained G3D domain and BUCK6. */
+	m86_gpu_dvfs: gpu-dvfs-retained {
+		compatible = "meizu,m86-gpu-dvfs-retained";
+		#clock-cells = <0>;
+		clocks = <&fin_pll>, <&m86_apollo_clk>;
+		clock-names = "fin", "apollo";
+		samsung,bus = <&bus_mif>;
+		meizu,gpu = <&gpu>;
+		meizu,sysreg = <&m86_disp_sysreg>;
+		meizu,retained-g3d-ownership;
+		meizu,max-validated-frequency = <700000000>;
+		meizu,validated-buck6-normal-on;
+		meizu,gpu-normal-on-takeover;
+		/*
+		 * Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
+		 * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72).
+		 */
+		meizu,thermal-monitor = <&m86_tmu_monitor>;
 
-// SPDX-License-Identifier: GPL-2.0-only
-/* Requires prior retained-power GPU, guarded PMIC access and readonlyrail.
- * Normal ON fixed-LDO candidate: explicit266/350MHz selector protocol.
- */
-/ {
- m86_gpu_dvfs: gpu-dvfs-retained {
-  compatible = "meizu,m86-gpu-dvfs-retained";
-  #clock-cells = <0>;
-  clocks = <&fin_pll>, <&m86_apollo_clk>;
-  clock-names = "fin", "apollo";
-  samsung,bus = <&bus_mif>;
-  meizu,gpu = <&gpu>;
-  meizu,sysreg = <&m86_disp_sysreg>;
-  meizu,retained-g3d-ownership;
-  meizu,max-validated-frequency = <700000000>;
-  meizu,validated-buck6-normal-on;
-  meizu,gpu-normal-on-takeover;
-  /* Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
-   * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72). */
-  meizu,thermal-monitor = <&m86_tmu_monitor>;
-  m86_g3d_experiment: g3d-domain {
-   #power-domain-cells = <0>;
-  };
- };
- m86_gpu_opps: gpu-opps {
-  compatible = "operating-points-v2";
-  /* Frequency-only governor/cooling table: coordinator owns voltage/MCS.
-   * Full hardware table remains in C source. Enable next OPPs only together
-   * with validation flag+clockcap; governor must not request unvalidatedrates.
-   */
-  opp-266000000 { opp-hz = /bits/ 64 <266000000>; };
-  opp-350000000 { opp-hz = /bits/ 64 <350000000>; };
-  opp-420000000 { opp-hz = /bits/ 64 <420000000>; };
-  opp-544000000 { opp-hz = /bits/ 64 <544000000>; };
-  opp-600000000 { opp-hz = /bits/ 64 <600000000>; };
-  opp-700000000 { opp-hz = /bits/ 64 <700000000>; };
-  /* Retained for a separately validated 772 MHz experiment. */
-  opp-772000000 { opp-hz = /bits/ 64 <772000000>; status = "disabled"; };
- };
-};
-&gpu {
- clocks = <&m86_gpu_dvfs>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
- clock-names = "core", "bus";
- mali-supply = <&m86_gpu_buck6_observed>;
- operating-points-v2 = <&m86_gpu_opps>;
- meizu,gpu-dvfs-coordinator = <&m86_gpu_dvfs>;
-};
-
-/* Relative per-MHz capacities derived from the Android nominal max-capacity
- * ratio 419/1024 at 1.5/2.1 GHz. arch_topology multiplies by each policy max
- * frequency: 2933*1500*1024/(5120*2100)=419, not 419*1500/(1024*2100).
- * Nominal compatibility values, not new DMIPS benchmark measurements.
- */
-&cpu_atlas0 { capacity-dmips-mhz = <5120>; };
-&cpu_atlas1 { capacity-dmips-mhz = <5120>; };
-&cpu_atlas2 { capacity-dmips-mhz = <5120>; };
-&cpu_atlas3 { capacity-dmips-mhz = <5120>; };
-&cpu_apollo0 { capacity-dmips-mhz = <2933>; };
-&cpu_apollo1 { capacity-dmips-mhz = <2933>; };
-&cpu_apollo2 { capacity-dmips-mhz = <2933>; };
-&cpu_apollo3 { capacity-dmips-mhz = <2933>; };
-
-/* Native capacity parsing requires complete cpu-map. */
-&{/cpus} {
- cpu-map {
-  cluster0 {
-   core0 { cpu = <&cpu_apollo0>; };
-   core1 { cpu = <&cpu_apollo1>; };
-   core2 { cpu = <&cpu_apollo2>; };
-   core3 { cpu = <&cpu_apollo3>; };
-  };
-  cluster1 {
-   core0 { cpu = <&cpu_atlas0>; };
-   core1 { cpu = <&cpu_atlas1>; };
-   core2 { cpu = <&cpu_atlas2>; };
-   core3 { cpu = <&cpu_atlas3>; };
-  };
- };
- apollo_l2: l2-cache1 { compatible = "cache"; cache-level = <2>; cache-unified; };
-};
-&cpu_apollo0 { next-level-cache = <&apollo_l2>; };
-&cpu_apollo1 { next-level-cache = <&apollo_l2>; };
-&cpu_apollo2 { next-level-cache = <&apollo_l2>; };
-&cpu_apollo3 { next-level-cache = <&apollo_l2>; };
-
-&hsi2c_11 {
-	status = "okay";
-	clock-frequency = <100000>;
-
-	m86_primary_charger: charger@6b {
-		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
-		reg = <0x6b>;
-		interrupt-parent = <&gpa0>;
-		interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
-		enable-gpios = <&gpr3 0 GPIO_ACTIVE_LOW>;
-		linux,skip-reset;
-		ti,charge-current = <2250000>;
-		ti,battery-regulation-voltage = <4352000>;
-		ti,termination-current = <64000>;
-		ti,precharge-current = <128000>;
-		ti,minimum-sys-voltage = <3500000>;
-		ti,boost-voltage = <5000000>;
-		ti,boost-max-current = <1500000>;
-		ti,thermal-regulation-threshold = <80>;
-		meizu,battery = <&m86_gauge>;
-		meizu,usb-source = <&m86_fusb302>;
-		linux,secondary-charger-name = "m86-charger-aux";
-
-		usb_otg_vbus: usb-otg-vbus {
-			regulator-name = "usb_otg_vbus";
+		m86_g3d_experiment: g3d-domain {
+			#power-domain-cells = <0>;
 		};
 	};
-};
 
-&hsi2c_1 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	audio_codec_wm8998: audio-codec-wm8998@1a {
-		compatible = "wlf,wm8998";
-		reg = <0x1a>;
-		interrupt-parent = <&gpa3>;
-		interrupts = <6 IRQ_TYPE_LEVEL_HIGH>;
-
-		wlf,reset = <&gpd0 1 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpd0 1 GPIO_ACTIVE_HIGH>;
-		wlf,ldoena = <&gpj0 2 GPIO_ACTIVE_HIGH>;
-
-		wlf,micd-ranges = <
-			105 226 /* KEY_MEDIA */
-			270 115 /* KEY_VOLUMEUP */
-			752 114 /* KEY_VOLUMEDOWN */ >;
-		wlf,micd-configs = <0 1 0>;
-		wlf,micbias1 = <2600 0 1 0 0>;
-		wlf,micbias2 = <1800 0 1 0 0>;
-		wlf,micbias3 = <1800 0 1 0 0>;
-		wlf,clk32k-src = <2>; /* MCLK2 */
-		wlf,micd-detect-debounce = <500>;
-		wlf,micd-bias-start-time = <9>;
-		wlf,micd-rate = <5>;
-		wlf,micd-dbtime = <1>;
-		wlf,micd-force-micbias = <1>;
-		wlf,micd-open-circuit-declare = <1>;
-
-		#sound-dai-cells = <1>;
-
-		AVDD-supply = <&m86_wm8998_1v8>;
-		LDOVDD-supply = <&m86_wm8998_1v8>;
-		DBVDD-supply = <&m86_wm8998_1v8>;
-		DBVDD1-supply = <&m86_wm8998_1v8>;
-		DBVDD2-supply = <&m86_wm8998_1v8>;
-		DBVDD3-supply = <&m86_wm8998_1v8>;
-		CPVDD-supply = <&m86_wm8998_1v8>;
-		SPKVDD-supply = <&m86_wm8998_1v8>;
-		SPKVDDL-supply = <&m86_wm8998_1v8>;
-		SPKVDDR-supply = <&m86_wm8998_1v8>;
-	};
-};
-
-&i2s0 {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&i2s0_bus>;
-};
-
-&i2s1 {
-	status = "okay";
-};
-
-&pinctrl_ff {
-	spi3_cs: spi3-cs-pins {
-		samsung,pins = "gpg4-1";
-		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
-		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
-		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
-	};
-};
-
-/*
- * SoC RTC alarm (GIC SPI 355) is the only RTC wake source: the S2MPS15 IRQ
- * line is not wired in this DT. RTCCON CLKOUTEN[9] stays owned by m86-audio;
- * rtc-s3c only read-modify-writes RTCEN/CNTSEL/CLKRST/TICEN.
- */
-&mfc {
-	memory-region = <&mfc_iova_resv>;
-	status = "okay";
-};
-
-&sysmmu_mfc_0 {
-	status = "okay";
-};
-
-&sysmmu_mfc_1 {
-	status = "okay";
-};
-
-&rtc {
-	clocks = <&clock_ccore PCLK_RTC>, <&m86_rtc_32k>;
-	clock-names = "rtc", "rtc_src";
-	status = "okay";
-};
-
-&spi_3 {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&spi3_bus &spi3_cs>;
-	cs-gpios = <&gpg4 1 GPIO_ACTIVE_LOW>;
-	num-cs = <1>;
-
-	es705: audio-dsp@0 {
-		compatible = "audience,es705";
-		reg = <0>;
-		spi-max-frequency = <4000000>;
-		spi-cpha;
-		controller-data {
-			samsung,spi-feedback-delay = <0>;
+	m86_gpu_opps: gpu-opps {
+		compatible = "operating-points-v2";
+		/*
+		 * Frequency-only governor/cooling table: coordinator owns voltage/MCS.
+		 * Full hardware table remains in C source. Enable next OPPs only together
+		 * with validation flag+clockcap; governor must not request unvalidated rates.
+		 */
+		opp-266000000 {
+			opp-hz = /bits/ 64 <266000000>;
+		};
+		opp-350000000 {
+			opp-hz = /bits/ 64 <350000000>;
+		};
+		opp-420000000 {
+			opp-hz = /bits/ 64 <420000000>;
+		};
+		opp-544000000 {
+			opp-hz = /bits/ 64 <544000000>;
+		};
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+		};
+		/* Retained for a separately validated 772 MHz experiment. */
+		opp-772000000 {
+			opp-hz = /bits/ 64 <772000000>;
+			status = "disabled";
 		};
 	};
-};
 
-&hsi2c_7 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	audio_pa_tfa9890: audio-codec@34 {
-		compatible = "nxp,tfa9890";
-		reg = <0x34>;
-		vddd-supply = <&m86_wm8998_1v8>;
-		reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
-		#sound-dai-cells = <0>;
-	};
-
-	ess9018k2m: ess9018k2m@48 {
-		compatible = "ess,ess9018k2m";
-		reg = <0x48>;
-		osc48k-gpios = <&gpf2 1 GPIO_ACTIVE_HIGH>;
-		osc44k-gpios = <&gpf2 3 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpf0 4 GPIO_ACTIVE_HIGH>;
-		mute-gpios = <&gpf1 3 GPIO_ACTIVE_HIGH>;
-		open-gpios = <&gpf5 0 GPIO_ACTIVE_HIGH>;
-		low-gain-gpios = <&gpf1 0 GPIO_ACTIVE_HIGH>;
-		out-select-gpios = <&gpf1 4 GPIO_ACTIVE_HIGH>;
-		dvdd18-gpios = <&gpf4 1 GPIO_ACTIVE_HIGH>;
-		#sound-dai-cells = <0>;
-	};
-};
-
-/ {
 	sound {
 		compatible = "samsung,meizu-m86-audio";
 		model = "Meizu-PRO5";
@@ -1395,124 +675,7 @@
 		i2s-controller = <&i2s1 0>;
 		status = "okay";
 	};
-};
 
-&pinctrl_alive {
-	bt_hostwake: bt-hostwake-pins {
-		samsung,pins = "gpa2-6";
-		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
-		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
-		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
-	};
-};
-
-&pinctrl_bus1 {
-	bt_ctrl: bt-ctrl-pins {
-		samsung,pins = "gpf5-7", "gpf4-0";
-		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
-		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
-		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
-	};
-};
-
-&serial_4 {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&uart4_bus &bt_ctrl &bt_hostwake>;
-	samsung,uart-fifosize = <64>;
-
-	bluetooth {
-		compatible = "brcm,bcm4345c5";
-		max-speed = <1500000>;
-		shutdown-gpios = <&gpf5 7 GPIO_ACTIVE_HIGH>;
-		device-wakeup-gpios = <&gpf4 0 GPIO_ACTIVE_HIGH>;
-		interrupt-parent = <&gpa2>;
-		interrupts = <6 IRQ_TYPE_EDGE_RISING>;
-		interrupt-names = "host-wakeup";
-	};
-};
-
-&hsi2c_9 {
-	status = "okay";
-	clock-frequency = <200000>;
-
-	nfc@28 {
-		compatible = "nxp,nxp-nci-i2c";
-		reg = <0x28>;
-		interrupt-parent = <&gpa2>;
-		interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
-		enable-gpios = <&gpc3 0 GPIO_ACTIVE_HIGH>;
-		firmware-gpios = <&gpc3 4 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&nfc_int_pin &nfc_ctrl_pins>;
-	};
-};
-
-&hsi2c_10 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	light-sensor@44 {
-		compatible = "intersil,isl29125";
-		reg = <0x44>;
-		interrupt-parent = <&gpa2>;
-		interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&als_irq_pins>;
-		vdd-supply = <&ldo17_reg>;
-		meizu,lux-coef = <16399>;
-	};
-
-	proximity-sensor@1e {
-		compatible = "txc,pa224";
-		reg = <0x1e>;
-		interrupt-parent = <&gpa3>;
-		interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&ps_irq_pins>;
-		vdd-supply = <&ldo17_reg>;
-		vdd-led-supply = <&ldo25_reg>;
-	};
-};
-
-&pinctrl_bus0 {
-	vl6180_i2c_pins: vl6180-i2c-pins {
-		samsung,pins = "gpc2-2", "gpc2-3";
-		samsung,pin-function = <0>;
-		samsung,pin-pud = <3>;
-		samsung,pin-drv = <0>;
-	};
-
-	vl6180_en_pin: vl6180-en-pin {
-		samsung,pins = "gpd7-2";
-		samsung,pin-function = <1>;
-		samsung,pin-pud = <0>;
-		samsung,pin-drv = <0>;
-	};
-
-	vl6180_irq_pin: vl6180-irq-pin {
-		samsung,pins = "gpc3-6";
-		samsung,pin-function = <0>;
-		samsung,pin-pud = <3>;
-		samsung,pin-drv = <0>;
-	};
-
-	lm3644_i2c_pins: lm3644-i2c-pins {
-		samsung,pins = "gpc2-4", "gpc2-5";
-		samsung,pin-function = <0>;
-		samsung,pin-pud = <3>;
-		samsung,pin-drv = <0>;
-	};
-
-	lm3644_ctrl_pins: lm3644-ctrl-pins {
-		samsung,pins = "gpc0-0", "gpc0-3", "gpc0-4";
-		samsung,pin-function = <0>;
-		samsung,pin-pud = <0>;
-		samsung,pin-drv = <0>;
-	};
-};
-
-/ {
 	i2c-vl6180 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpc2 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -1588,7 +751,589 @@
 	};
 };
 
+&{/cpus} {
+	/* Native capacity parsing requires a complete cpu-map. */
+	cpu-map {
+		cluster0 {
+			core0 {
+				cpu = <&cpu_apollo0>;
+			};
+			core1 {
+				cpu = <&cpu_apollo1>;
+			};
+			core2 {
+				cpu = <&cpu_apollo2>;
+			};
+			core3 {
+				cpu = <&cpu_apollo3>;
+			};
+		};
+		cluster1 {
+			core0 {
+				cpu = <&cpu_atlas0>;
+			};
+			core1 {
+				cpu = <&cpu_atlas1>;
+			};
+			core2 {
+				cpu = <&cpu_atlas2>;
+			};
+			core3 {
+				cpu = <&cpu_atlas3>;
+			};
+		};
+	};
+
+	apollo_l2: l2-cache1 {
+		compatible = "cache";
+		cache-level = <2>;
+		cache-unified;
+	};
+};
+
+/* 24 MHz arch timer; the virtual timer PPI is not listed. */
+&{/timer} {
+	clock-frequency = <24000000>;
+	interrupt-names = "sec-phys", "phys", "hyp-phys";
+	interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+		     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+		     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
+};
+
+&adma {
+	status = "okay";
+};
+
+&atlas_thermal {
+	status = "disabled";
+};
+
+&cmu_aud {
+	status = "okay";
+};
+
+&cmu_disp {
+	/* Decode the inherited DISP PLL correctly without retuning the live display. */
+	compatible = "meizu,m86-clock-disp";
+	status = "okay";
+};
+
+&cmu_g3d {
+	status = "okay";
+};
+
+/*
+ * Relative per-MHz capacities derived from the Android nominal max-capacity
+ * ratio 419/1024 at 1.5/2.1 GHz. arch_topology multiplies by each policy max
+ * frequency: 2933*1500*1024/(5120*2100)=419, not 419*1500/(1024*2100).
+ * Nominal compatibility values, not new DMIPS benchmark measurements.
+ */
+&cpu_apollo0 {
+	cpu-supply = <&m86_buck3_cpu>;
+	clocks = <&m86_apollo_clk>;
+	capacity-dmips-mhz = <2933>;
+	next-level-cache = <&apollo_l2>;
+};
+
+&cpu_apollo1 {
+	cpu-supply = <&m86_buck3_cpu>;
+	clocks = <&m86_apollo_clk>;
+	capacity-dmips-mhz = <2933>;
+	next-level-cache = <&apollo_l2>;
+};
+
+&cpu_apollo2 {
+	cpu-supply = <&m86_buck3_cpu>;
+	clocks = <&m86_apollo_clk>;
+	capacity-dmips-mhz = <2933>;
+	next-level-cache = <&apollo_l2>;
+};
+
+&cpu_apollo3 {
+	cpu-supply = <&m86_buck3_cpu>;
+	clocks = <&m86_apollo_clk>;
+	capacity-dmips-mhz = <2933>;
+	next-level-cache = <&apollo_l2>;
+};
+
+&cpu_atlas0 {
+	cpu-supply = <&m86_buck2_cpu>;
+	clocks = <&m86_atlas_clk>;
+	capacity-dmips-mhz = <5120>;
+};
+
+&cpu_atlas1 {
+	cpu-supply = <&m86_buck2_cpu>;
+	clocks = <&m86_atlas_clk>;
+	capacity-dmips-mhz = <5120>;
+};
+
+&cpu_atlas2 {
+	cpu-supply = <&m86_buck2_cpu>;
+	clocks = <&m86_atlas_clk>;
+	capacity-dmips-mhz = <5120>;
+};
+
+&cpu_atlas3 {
+	cpu-supply = <&m86_buck2_cpu>;
+	clocks = <&m86_atlas_clk>;
+	capacity-dmips-mhz = <5120>;
+};
+
+&decon {
+	/*
+	 * The bootloader leaves the DISP PLL at 134 MHz and VCLK at 33.5 MHz,
+	 * which needs ~21 ms per command-mode frame, so every other 60 Hz
+	 * frame is dropped. Set the vendor rates for this 1080p MIC panel in
+	 * the vendor order (decon_int_set_clocks(): DISP PLL 267 MHz, the
+	 * closest table rate being 266 MHz, then VCLK 60 MHz): VCLK becomes
+	 * 266 / 5 = 53.2 MHz.
+	 */
+	assigned-clocks = <&cmu_disp CLK_FOUT_DISP_PLL>,
+			  <&cmu_disp CLK_DOUT_SUB_SCLK_DECON_INT_VCLK>;
+	assigned-clock-rates = <266000000>, <60000000>;
+	te-gpios = <&gpc0 1 GPIO_ACTIVE_HIGH>;
+	samsung,bus = <&bus_mif>;
+	interconnects = <&bus_int &bus_mif>;
+	interconnect-names = "dma-mem";
+	memory-region = <&decon_iova_resv>;
+	status = "okay";
+
+	i80-if-timings {
+	};
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			m86_decon_out: endpoint {
+				remote-endpoint = <&m86_dsim_in>;
+			};
+		};
+	};
+};
+
+&fin_pll {
+	clock-frequency = <24000000>;
+};
+
+/* G3D power is owned by m86-gpu-dvfs, not by Panfrost through pd_g3d. */
+&gpu {
+	/delete-property/ power-domains;
+	status = "okay";
+	mali-supply = <&m86_gpu_buck6_observed>;
+	clocks = <&m86_gpu_dvfs>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
+	clock-names = "core", "bus";
+	operating-points-v2 = <&m86_gpu_opps>;
+	meizu,gpu-dvfs-coordinator = <&m86_gpu_dvfs>;
+};
+
+&hsi2c_0 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	sensor-hub@3a {
+		compatible = "meizu,m86-cwmcu", "st,sensor_hub";
+		reg = <0x3a>;
+		vdd-supply = <&ldo17_reg>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+		wakeup-gpios = <&gpf3 3 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&gpf0 2 GPIO_ACTIVE_HIGH>;
+		busy-gpios = <&gpf4 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpr0 0 GPIO_ACTIVE_HIGH>;
+		boot0-gpios = <&gpr0 2 GPIO_ACTIVE_HIGH>;
+		mount-matrix = "-1", "0", "0",
+			       "0", "-1", "0",
+			       "0", "0", "1";
+		pinctrl-names = "default";
+		pinctrl-0 = <&cwmcu_irq_pin &cwmcu_wkup_pin &cwmcu_in_pins &cwmcu_ctrl_pins>;
+		wakeup-source;
+	};
+};
+
+&hsi2c_1 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	audio_codec_wm8998: audio-codec-wm8998@1a {
+		compatible = "wlf,wm8998";
+		reg = <0x1a>;
+		interrupt-parent = <&gpa3>;
+		interrupts = <6 IRQ_TYPE_LEVEL_HIGH>;
+
+		wlf,reset = <&gpd0 1 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpd0 1 GPIO_ACTIVE_HIGH>;
+		wlf,ldoena = <&gpj0 2 GPIO_ACTIVE_HIGH>;
+
+		wlf,micd-ranges = <
+			105 226 /* KEY_MEDIA */
+			270 115 /* KEY_VOLUMEUP */
+			752 114 /* KEY_VOLUMEDOWN */ >;
+		wlf,micd-configs = <0 1 0>;
+		wlf,micbias1 = <2600 0 1 0 0>;
+		wlf,micbias2 = <1800 0 1 0 0>;
+		wlf,micbias3 = <1800 0 1 0 0>;
+		wlf,clk32k-src = <2>; /* MCLK2 */
+		wlf,micd-detect-debounce = <500>;
+		wlf,micd-bias-start-time = <9>;
+		wlf,micd-rate = <5>;
+		wlf,micd-dbtime = <1>;
+		wlf,micd-force-micbias = <1>;
+		wlf,micd-open-circuit-declare = <1>;
+
+		#sound-dai-cells = <1>;
+
+		AVDD-supply = <&m86_wm8998_1v8>;
+		LDOVDD-supply = <&m86_wm8998_1v8>;
+		DBVDD-supply = <&m86_wm8998_1v8>;
+		DBVDD1-supply = <&m86_wm8998_1v8>;
+		DBVDD2-supply = <&m86_wm8998_1v8>;
+		DBVDD3-supply = <&m86_wm8998_1v8>;
+		CPVDD-supply = <&m86_wm8998_1v8>;
+		SPKVDD-supply = <&m86_wm8998_1v8>;
+		SPKVDDL-supply = <&m86_wm8998_1v8>;
+		SPKVDDR-supply = <&m86_wm8998_1v8>;
+	};
+};
+
+&hsi2c_2 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	haptics@5a {
+		compatible = "ti,drv2605";
+		reg = <0x5a>;
+		vbat-supply = <&reg_vsys>;
+		enable-gpios = <&gpf1 1 GPIO_ACTIVE_HIGH>;
+		mode = <DRV260X_LRA_NO_CAL_MODE>;
+		library-sel = <DRV260X_LIB_LRA>;
+		vib-rated-mv = <1757>;
+		vib-overdrive-mv = <2900>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&motor_en_pin>;
+	};
+};
+
+&hsi2c_4 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	touchscreen@49 {
+		compatible = "meizu,m86-fts";
+		reg = <0x49>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&m86_touch_irq_pin>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
+		touchscreen-size-x = <1080>;
+		touchscreen-size-y = <1920>;
+		/* Sleep while the panel is unprepared (DPMS off, suspend). */
+		panel = <&m86_panel>;
+	};
+};
+
+&hsi2c_6 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	m86_gauge: gauge@55 {
+		compatible = "meizu,m86-bq27532-readonly";
+		reg = <0x55>;
+	};
+
+	m86_secondary_charger: charger@6b {
+		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
+		reg = <0x6b>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <2 IRQ_TYPE_EDGE_FALLING>;
+		enable-gpios = <&gpr3 2 GPIO_ACTIVE_LOW>;
+		linux,skip-reset;
+		ti,charge-current = <2250000>;
+		ti,battery-regulation-voltage = <4352000>;
+		ti,termination-current = <64000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5000000>;
+		ti,boost-max-current = <500000>;
+		ti,thermal-regulation-threshold = <80>;
+		meizu,secondary-charger;
+	};
+};
+
+&hsi2c_7 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	audio_pa_tfa9890: audio-codec@34 {
+		compatible = "nxp,tfa9890";
+		reg = <0x34>;
+		vddd-supply = <&m86_wm8998_1v8>;
+		reset-gpios = <&gpf3 1 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+	};
+
+	ess9018k2m: ess9018k2m@48 {
+		compatible = "ess,ess9018k2m";
+		reg = <0x48>;
+		osc48k-gpios = <&gpf2 1 GPIO_ACTIVE_HIGH>;
+		osc44k-gpios = <&gpf2 3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpf0 4 GPIO_ACTIVE_HIGH>;
+		mute-gpios = <&gpf1 3 GPIO_ACTIVE_HIGH>;
+		open-gpios = <&gpf5 0 GPIO_ACTIVE_HIGH>;
+		low-gain-gpios = <&gpf1 0 GPIO_ACTIVE_HIGH>;
+		out-select-gpios = <&gpf1 4 GPIO_ACTIVE_HIGH>;
+		dvdd18-gpios = <&gpf4 1 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+	};
+};
+
+&hsi2c_8 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	m86_fusb302: typec-portc@22 {
+		compatible = "fcs,fusb302";
+		reg = <0x22>;
+		interrupt-parent = <&gpa1>;
+		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
+		pd-on-gpios = <&gpr3 4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ccd_int>;
+		vbus-supply = <&usb_otg_vbus>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "dual";
+			data-role = "dual";
+			/*
+			 * FUSB302 is PD 2.0 silicon: a PD 3.0 Get_Source_Cap_Extended
+			 * from a PD 3.0 host ends in a Hard Reset loop every ~1.2 s.
+			 */
+			pd-revision = /bits/ 8 <0x2 0x0 0x1 0x3>;
+			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_USB_COMM)>;
+			sink-pdos = <
+				PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
+				PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)
+				PDO_FIXED(12000, 2000, PDO_FIXED_USB_COMM)
+			>;
+			op-sink-microwatt = <24000000>;
+			usb-role-switch = <&m86_dwc3>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usbc_hs: endpoint {
+						remote-endpoint = <&dwc3_ep>;
+					};
+				};
+			};
+		};
+	};
+
+	m86_muic: muic@25 {
+		compatible = "meizu,m86-tsu6721";
+		reg = <0x25>;
+	};
+};
+
+&hsi2c_9 {
+	status = "okay";
+	clock-frequency = <200000>;
+
+	nfc@28 {
+		compatible = "nxp,nxp-nci-i2c";
+		reg = <0x28>;
+		interrupt-parent = <&gpa2>;
+		interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
+		enable-gpios = <&gpc3 0 GPIO_ACTIVE_HIGH>;
+		firmware-gpios = <&gpc3 4 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&nfc_int_pin &nfc_ctrl_pins>;
+	};
+};
+
+&hsi2c_10 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	light-sensor@44 {
+		compatible = "intersil,isl29125";
+		reg = <0x44>;
+		interrupt-parent = <&gpa2>;
+		interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&als_irq_pins>;
+		vdd-supply = <&ldo17_reg>;
+		meizu,lux-coef = <16399>;
+	};
+
+	proximity-sensor@1e {
+		compatible = "txc,pa224";
+		reg = <0x1e>;
+		interrupt-parent = <&gpa3>;
+		interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ps_irq_pins>;
+		vdd-supply = <&ldo17_reg>;
+		vdd-led-supply = <&ldo25_reg>;
+	};
+};
+
+&hsi2c_11 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	m86_primary_charger: charger@6b {
+		compatible = "meizu,m86-bq25892", "ti,bq25892", "ti,bq25890";
+		reg = <0x6b>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
+		enable-gpios = <&gpr3 0 GPIO_ACTIVE_LOW>;
+		linux,skip-reset;
+		ti,charge-current = <2250000>;
+		ti,battery-regulation-voltage = <4352000>;
+		ti,termination-current = <64000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5000000>;
+		ti,boost-max-current = <1500000>;
+		ti,thermal-regulation-threshold = <80>;
+		meizu,battery = <&m86_gauge>;
+		meizu,usb-source = <&m86_fusb302>;
+		linux,secondary-charger-name = "m86-charger-aux";
+
+		usb_otg_vbus: usb-otg-vbus {
+			regulator-name = "usb_otg_vbus";
+		};
+	};
+};
+
+&i2s0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2s0_bus>;
+};
+
+&i2s1 {
+	status = "okay";
+};
+
+&mfc {
+	memory-region = <&mfc_iova_resv>;
+	status = "okay";
+};
+
+&mmc_2 {
+	status = "okay";
+	num-slots = <1>;
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	sd-uhs-ddr50;
+	card-detect-delay = <200>;
+	samsung,dw-mshc-ciu-div = <3>;
+	samsung,dw-mshc-sdr-timing = <3 0 3 2>;
+	samsung,dw-mshc-ddr-timing = <3 0 2 1>;
+	fifo-depth = <0x40>;
+	bus-width = <4>;
+	cd-gpios = <&gpa1 3 GPIO_ACTIVE_LOW>;
+	vmmc-supply = <&dvdd29_tf>;
+	vqmmc-supply = <&ldo2_reg>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sd2_clk &sd2_cmd &sd2_bus1 &sd2_bus4 &m86_sd2_cd>;
+};
+
+&pd_g3d {
+	status = "okay";
+};
+
+&pdma0 {
+	status = "okay";
+};
+
+&pdma1 {
+	status = "okay";
+};
+
 &pinctrl_alive {
+	ccd_int: ccd-int-pin {
+		samsung,pins = "gpa1-5";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+	};
+
+	m86_touch_irq_pin: m86-touch-irq-pin {
+		samsung,pins = "gpa1-1";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+	};
+
+	m86_keys_pins: m86-keys-pins {
+		samsung,pins = "gpa2-4", "gpa1-2", "gpa0-7", "gpa3-2";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+	};
+
+	als_irq_pins: als-irq-pins {
+		samsung,pins = "gpa2-5";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	ps_irq_pins: ps-irq-pins {
+		samsung,pins = "gpa3-4";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	fpc_irq_pin: fpc-irq-pins {
+		samsung,pins = "gpa2-2";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+	};
+
+	m86_sd2_cd: sd2-cd-pin {
+		samsung,pins = "gpa1-3";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <3>;
+	};
+
+	nfc_int_pin: nfc-int-pin {
+		samsung,pins = "gpa2-1";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <1>;
+	};
+
+	pro5_pcie_clock_request_pins: pro5-pcie-clock-request-pins {
+		samsung,pins = "gpa3-5";
+		samsung,pin-function = <0xf>;
+		samsung,pin-pud = <0>;
+	};
+
+	pro5_pcie_wake_pins: pro5-pcie-wake-pins {
+		samsung,pins = "gpa3-3";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <0>;
+	};
+
+	bt_hostwake: bt-hostwake-pins {
+		samsung,pins = "gpa2-6";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+
 	cwmcu_irq_pin: cwmcu-irq-pin {
 		samsung,pins = "gpa1-7";
 		samsung,pin-function = <0xf>;
@@ -1597,7 +1342,91 @@
 	};
 };
 
+&pinctrl_aud {
+	status = "okay";
+};
+
+&pinctrl_bus0 {
+	/*
+	 * Vendor disp_teson: GPG0-1 function 2 routes the hardware TE input.
+	 * Not selected: DECON triggers from the gpc0-1 TE EINT, as during the
+	 * bootloader handoff.
+	 */
+	m86_hw_te_on: m86-hw-te-on {
+		samsung,pins = "gpg0-1";
+		samsung,pin-function = <2>;
+	};
+
+	nfc_ctrl_pins: nfc-ctrl-pins {
+		samsung,pins = "gpc3-0", "gpc3-4", "gpc3-7";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-con-pdn = <3>;
+	};
+
+	vl6180_i2c_pins: vl6180-i2c-pins {
+		samsung,pins = "gpc2-2", "gpc2-3";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	vl6180_en_pin: vl6180-en-pin {
+		samsung,pins = "gpd7-2";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	vl6180_irq_pin: vl6180-irq-pin {
+		samsung,pins = "gpc3-6";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	lm3644_i2c_pins: lm3644-i2c-pins {
+		samsung,pins = "gpc2-4", "gpc2-5";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <3>;
+		samsung,pin-drv = <0>;
+	};
+
+	lm3644_ctrl_pins: lm3644-ctrl-pins {
+		samsung,pins = "gpc0-0", "gpc0-3", "gpc0-4";
+		samsung,pin-function = <0>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+};
+
 &pinctrl_bus1 {
+	pro5_pcie_gpio_pins: pro5-pcie-gpio-pins {
+		samsung,pins = "gpf5-6", "gpg2-0";
+		samsung,pin-function = <1>;
+		samsung,pin-drv = <3>;
+	};
+
+	pro5_pcie_clkreq_pins: pro5-pcie-clkreq-pins {
+		samsung,pins = "gpf0-6";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <3>;
+	};
+
+	pro5_pcie_reset_clear_pins: pro5-pcie-reset-clear-pins {
+		samsung,pins = "gpg2-2";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <3>;
+	};
+
+	bt_ctrl: bt-ctrl-pins {
+		samsung,pins = "gpf5-7", "gpf4-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+
 	cwmcu_wkup_pin: cwmcu-wkup-pin {
 		samsung,pins = "gpf3-3";
 		samsung,pin-function = <1>;
@@ -1634,6 +1463,36 @@
 	};
 };
 
+&pinctrl_ese {
+	fpc_rst_pin: fpc-rst-pins {
+		samsung,pins = "gpv7-4";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+	};
+
+	/* SPI4 CLK/MISO/MOSI only: nCS (gpv7-1) is a GPIO, see &spi_4. */
+	m86_spi4_bus: m86-spi4-bus-pins {
+		samsung,pins = "gpv7-0", "gpv7-2", "gpv7-3";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <3>;
+	};
+
+	m86_spi4_cs: m86-spi4-cs-pins {
+		samsung,pins = "gpv7-1";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <3>;
+	};
+};
+
+&pinctrl_ff {
+	spi3_cs: spi3-cs-pins {
+		samsung,pins = "gpg4-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
+	};
+};
+
 &pinctrl_fsys1 {
 	cwmcu_ctrl_pins: cwmcu-ctrl-pins {
 		samsung,pins = "gpr0-0", "gpr0-2";
@@ -1643,44 +1502,231 @@
 	};
 };
 
-&hsi2c_0 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	sensor-hub@3a {
-		compatible = "meizu,m86-cwmcu", "st,sensor_hub";
-		reg = <0x3a>;
-		vdd-supply = <&ldo17_reg>;
-		interrupt-parent = <&gpa1>;
-		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
-		wakeup-gpios = <&gpf3 3 GPIO_ACTIVE_HIGH>;
-		sleep-gpios = <&gpf0 2 GPIO_ACTIVE_HIGH>;
-		busy-gpios = <&gpf4 5 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpr0 0 GPIO_ACTIVE_HIGH>;
-		boot0-gpios = <&gpr0 2 GPIO_ACTIVE_HIGH>;
-		mount-matrix = "-1", "0", "0",
-			       "0", "-1", "0",
-			       "0", "0", "1";
-		pinctrl-names = "default";
-		pinctrl-0 = <&cwmcu_irq_pin &cwmcu_wkup_pin &cwmcu_in_pins &cwmcu_ctrl_pins>;
-		wakeup-source;
+&pmu_system_controller {
+	/*
+	 * S-Boot reads SYSIP_DAT0 after SWRESET (vendor common.c
+	 * exynos_restart()). Only the modes S-Boot was seen to honour are
+	 * listed; 0xfe ("bootloader") leaves it stuck at the boot logo.
+	 */
+	reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x810>; /* SYSIP_DAT0 */
+		mode-normal = <0x00>;
+		mode-fastboot = <0xfc>;
+		mode-recovery = <0xff>;
 	};
 };
 
-&hsi2c_2 {
-	status = "okay";
-	clock-frequency = <400000>;
+&pwm {
+	status = "disabled";
+};
 
-	haptics@5a {
-		compatible = "ti,drv2605";
-		reg = <0x5a>;
-		vbat-supply = <&reg_vsys>;
-		enable-gpios = <&gpf1 1 GPIO_ACTIVE_HIGH>;
-		mode = <DRV260X_LRA_NO_CAL_MODE>;
-		library-sel = <DRV260X_LIB_LRA>;
-		vib-rated-mv = <1757>;
-		vib-overdrive-mv = <2900>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&motor_en_pin>;
+/*
+ * SoC RTC alarm (GIC SPI 355) is the only RTC wake source: the S2MPS15 IRQ
+ * line is not wired in this DT. RTCCON CLKOUTEN[9] stays owned by m86-audio;
+ * rtc-s3c only read-modify-writes RTCEN/CNTSEL/CLKRST/TICEN.
+ */
+&rtc {
+	clocks = <&clock_ccore PCLK_RTC>, <&m86_rtc_32k>;
+	clock-names = "rtc", "rtc_src";
+	status = "okay";
+};
+
+&serial_2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_data>;
+	status = "okay";
+};
+
+&serial_4 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4_bus &bt_ctrl &bt_hostwake>;
+	samsung,uart-fifosize = <64>;
+
+	bluetooth {
+		compatible = "brcm,bcm4345c5";
+		max-speed = <1500000>;
+		shutdown-gpios = <&gpf5 7 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpf4 0 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&gpa2>;
+		interrupts = <6 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "host-wakeup";
 	};
+};
+
+&soc {
+	/* Preserve SoC MMIO and translate the channel-1 PCIe outbound aperture. */
+	ranges = <0x00000000 0x0 0x00000000 0x18000000>,
+		 <0x1c000000 0x0 0x1c000000 0x04000000>;
+
+	/* Narrow SYSREG field, no existing syscon covers this register. */
+	pro5_pcie_sysreg: syscon@1005265c {
+		compatible = "samsung,exynos7420-pcie-sysreg", "syscon";
+		reg = <0x1005265c 4>;
+	};
+
+	/* This word lies outside clock_fsys1's existing 0xd00 range. */
+	pro5_pcie_cmu_control: syscon@156e0f00 {
+		compatible = "samsung,exynos7420-pcie-cmu-control", "syscon";
+		reg = <0x156e0f00 4>;
+	};
+
+	pro5_pcie1: pcie@15660000 {
+		compatible = "samsung,exynos7420-pro5-pcie-enumeration";
+		reg = <0x15660000 0x1000>, <0x15630000 0x1000>,
+		      <0x156f00e4 4>, <0x157b0000 0x1000>,
+		      <0x1c000000 0x1000>;
+		reg-names = "elbi", "phy", "pcs", "dbi", "config";
+		samsung,pcie-sysreg = <&pro5_pcie_sysreg>;
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		samsung,pcie-cmu-control = <&pro5_pcie_cmu_control>;
+		device_type = "pci";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		bus-range = <0 255>;
+		/* Inbound identity DMA aperture for the installed 3GB DRAM. */
+		dma-ranges = <0x02000000 0 0x40000000 0x40000000 0 0xc0000000>;
+		ranges = <0x82000000 0 0x1c011000 0x1c011000 0 0x03feefff>;
+		num-lanes = <1>;
+		max-link-speed = <1>;
+		/* Interrupts are masked by the enumeration-only driver. */
+		interrupts = <GIC_SPI 205 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "elbi";
+		reset-gpios = <&gpg2 0 GPIO_ACTIVE_LOW>;
+		reg-on-gpios = <&gpf5 6 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pro5_pcie_gpio_pins &pro5_pcie_clkreq_pins
+			     &pro5_pcie_reset_clear_pins &pro5_pcie_wake_pins
+			     &pro5_pcie_clock_request_pins>;
+		/* The driver selects the four mux parents itself after stage0. */
+		clocks = <&clock_fsys1 ACLK_XIU_WIFI1X>,
+			 <&clock_fsys1 ACLK_AHB2AXI_PCIE_WIFI1>,
+			 <&clock_fsys1 ACLK_PCIE_WIFI1_MSTR>,
+			 <&clock_fsys1 ACLK_PCIE_WIFI1_SLV>,
+			 <&clock_fsys1 ACLK_PCIE_WIFI1_DBI>,
+			 <&clock_fsys1 ACLK_COMBO_PHY_PCS_WIFI1>,
+			 <&clock_fsys1 PCLK_ASYNC_COMBO_PHY_WIFI1>,
+			 <&clock_fsys1 SCLK_PCIE_LINK_WIFI1>,
+			 <&clock_fsys1 SCLK_COMBO_PHY_WIFI1_26M>,
+			 <&clock_fsys1 SCLK_PHY_FSYS1_USER>,
+			 <&clock_fsys1 PHYCLK_PCIE_WIFI1_TX0_USER>,
+			 <&clock_fsys1 PHYCLK_PCIE_WIFI1_RX0_USER>,
+			 <&clock_fsys1 MOUT_FSYS1_PHYCLK_SEL0>,
+			 <&clock_fsys1 MOUT_PHYCLK_PCIE_WIFI1_TX0_USER>,
+			 <&clock_fsys1 MOUT_PHYCLK_PCIE_WIFI1_RX0_USER>,
+			 <&clock_fsys1 MOUT_SCLK_PHY_FSYS1_USER>,
+			 <&fin_pll>, <&clock_fsys1 PHYCLK_PCIE_WIFI1_TX0>,
+			 <&clock_fsys1 PHYCLK_PCIE_WIFI1_RX0>,
+			 <&clock_top1 CLK_SCLK_PHY_FSYS1>;
+		clock-names = "aclk_xiu_wifi1x", "aclk_ahb2axi_pcie_wifi1",
+			      "aclk_pcie_wifi1_mstr_aclk", "aclk_pcie_wifi1_slv_aclk",
+			      "aclk_pcie_wifi1_dbi_aclk", "aclk_combo_phy_pcs_pclk_wifi1",
+			      "pclk_async_combo_phy_wifi1", "sclk_pcie_link_wifi1_gated",
+			      "sclk_combo_phy_wifi1_26m_gated", "sclk_phy_fsys1_gated",
+			      "phyclk_pcie_wifi1_tx0_gated", "phyclk_pcie_wifi1_rx0_gated",
+			      "combo-ref-mux", "phy-tx-mux", "phy-rx-mux", "phy-user-mux",
+			      "combo-ref-parent", "phy-tx-parent", "phy-rx-parent", "phy-user-parent";
+		status = "okay";
+	};
+};
+
+&spi_3 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3_bus &spi3_cs>;
+	cs-gpios = <&gpg4 1 GPIO_ACTIVE_LOW>;
+	num-cs = <1>;
+
+	es705: audio-dsp@0 {
+		compatible = "audience,es705";
+		reg = <0>;
+		spi-max-frequency = <4000000>;
+		spi-cpha;
+
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+		};
+	};
+};
+
+/*
+ * Fingerprint sensor bus (vendor DT: secure-mode). Normal-world access
+ * verified with diagnostics/kmods/m86-spi4-probe and m86-fpc-hwid: the
+ * sensor reports HWID 0x150b (FPC1150 rev B).
+ */
+&spi_4 {
+	status = "okay";
+	/* Vendor 3.10 drives nCS manually; CS_AUTO read back MISO as 0. */
+	pinctrl-0 = <&m86_spi4_bus &m86_spi4_cs>;
+	cs-gpios = <&gpv7 1 GPIO_ACTIVE_LOW>;
+
+	fpc_spi: fingerprint@0 {
+		compatible = "fpc,fpc1150";
+		reg = <0>;
+		spi-max-frequency = <4800000>;
+	};
+};
+
+&sysmmu_disp_ro {
+	status = "okay";
+};
+
+&sysmmu_disp_rw {
+	status = "okay";
+};
+
+&sysmmu_mfc_0 {
+	status = "okay";
+};
+
+&sysmmu_mfc_1 {
+	status = "okay";
+};
+
+/* Replaced by m86_tmu_monitor. */
+&tmuctrl_0 {
+	status = "disabled";
+};
+
+&tmuctrl_1 {
+	status = "disabled";
+};
+
+&tmuctrl_2 {
+	status = "disabled";
+};
+
+&tmuctrl_3 {
+	status = "disabled";
+};
+
+&ufs {
+	samsung,bus = <&bus_mif>;
+	interconnects = <&bus_int &bus_mif>;
+	interconnect-names = "dma-mem";
+	status = "okay";
+};
+
+&usbdrd {
+	status = "okay";
+
+	m86_dwc3: usb@0 {
+		dr_mode = "otg";
+		usb-role-switch;
+		role-switch-default-mode = "peripheral";
+		maximum-speed = "high-speed";
+		snps,dis_u2_susphy_quirk;
+		snps,dis_enblslpm_quirk;
+
+		port {
+			dwc3_ep: endpoint {
+				remote-endpoint = <&usbc_hs>;
+			};
+		};
+	};
+};
+
+&usbdrd_phy {
+	status = "okay";
 };
