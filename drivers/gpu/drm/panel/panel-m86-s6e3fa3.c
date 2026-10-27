@@ -85,7 +85,8 @@ static int m86_modes(struct drm_panel *panel,struct drm_connector *connector)
 {
  static const struct drm_display_mode mode = {
   .clock=125216, .hdisplay=1080, .hsync_start=1081, .hsync_end=1082, .htotal=1083,
-  .vdisplay=1920, .vsync_start=1925, .vsync_end=1926, .vtotal=1927,
+  /* Vendor DT timing,v-porch = <5 1 1>: vbp 5, vfp 1, vsa 1. */
+  .vdisplay=1920, .vsync_start=1921, .vsync_end=1922, .vtotal=1927,
   .width_mm=72,.height_mm=147,
  };
  struct drm_display_mode *m=drm_mode_duplicate(connector->dev,&mode);
