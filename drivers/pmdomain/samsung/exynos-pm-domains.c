@@ -231,8 +231,14 @@ static const struct exynos7420_reg_bits exynos7420_top_clks_disp[] = {
 	{ 0x105d080c, BIT(28) },
 	{ 0x105d0a20, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) },
 };
+/*
+ * Vendor local_clks_disp is bits 31..28. Bits 27/26 (aclk_xiu_disp_ro/rw)
+ * are added: under CCF they are gated whenever DECON is suspended, which
+ * the vendor never does, and with them off DISP stuck at STATUS 0x9000c
+ * on power off (ADR 0012 S4).
+ */
 static const struct exynos7420_reg_bits exynos7420_local_clks_disp[] = {
-	{ 0x13ad0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) },
+	{ 0x13ad0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) | BIT(27) | BIT(26) },
 };
 /* The DISP async bridges sit in CMU_VPP. */
 static const struct exynos7420_reg_bits exynos7420_async_clks_disp[] = {
