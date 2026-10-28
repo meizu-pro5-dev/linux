@@ -129,6 +129,7 @@ static u32 lv2ent_offset(sysmmu_iova_t iova)
 #define CTRL_ENABLE	0x5
 #define CTRL_BLOCK	0x7
 #define CTRL_DISABLE	0x0
+#define CTRL_BLOCK_DISABLE	0x3
 
 #define CFG_LRU		0x1
 #define CFG_EAP		(1 << 2)
@@ -299,6 +300,7 @@ struct sysmmu_drvdata {
 	struct list_head owner_node;	/* node for owner controllers list */
 	phys_addr_t pgtable;		/* assigned page table structure */
 	unsigned int version;		/* our version */
+	bool block_when_stop;		/* block the master bus on disable */
 
 	struct iommu_device iommu;	/* IOMMU core handle */
 	const struct sysmmu_variant *variant; /* version specific data */
@@ -615,7 +617,8 @@ static void __sysmmu_disable(struct sysmmu_drvdata *data)
 	clk_enable(data->clk_master);
 
 	spin_lock_irqsave(&data->lock, flags);
-	writel(CTRL_DISABLE, data->sfrbase + REG_MMU_CTRL);
+	writel(data->block_when_stop ? CTRL_BLOCK_DISABLE : CTRL_DISABLE,
+	       data->sfrbase + REG_MMU_CTRL);
 	writel(0, data->sfrbase + REG_MMU_CFG);
 	data->active = false;
 	spin_unlock_irqrestore(&data->lock, flags);
@@ -788,6 +791,14 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 
 	data->sysmmu = dev;
 	spin_lock_init(&data->lock);
+
+	/*
+	 * Keep the master's bus blocked while the SYSMMU is off, so nothing is
+	 * left in flight when its clocks stop and the power domain goes down
+	 * (vendor 3.10 exynos-iommu-v6.c:866-874, sysmmu,block-when-stop).
+	 */
+	data->block_when_stop = of_property_read_bool(dev->of_node,
+						      "samsung,block-when-stop");
 
 	/*
 	 * On Exynos7420 the SYSMMU sits on the live display path. Toggling its
