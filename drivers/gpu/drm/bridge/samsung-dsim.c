@@ -1022,14 +1022,6 @@ static void samsung_dsim_disable_clock(struct samsung_dsim *dsi)
 	samsung_dsim_write(dsi, DSIM_PLLCTRL_REG, reg);
 }
 
-static void samsung_dsim_disable_lanes(struct samsung_dsim *dsi)
-{
-	u32 reg = samsung_dsim_read(dsi, DSIM_CONFIG_REG);
-
-	reg &= ~(DSIM_LANE_EN_CLK | DSIM_LANE_EN(0xf));
-	samsung_dsim_write(dsi, DSIM_CONFIG_REG, reg);
-}
-
 static void samsung_dsim_enable_lane(struct samsung_dsim *dsi, u32 lane)
 {
 	u32 reg = samsung_dsim_read(dsi, DSIM_CONFIG_REG);
@@ -2356,22 +2348,9 @@ static int __maybe_unused samsung_dsim_suspend(struct device *dev)
 	usleep_range(10000, 20000);
 
 	if (dsi->state & DSIM_STATE_INITIALIZED) {
-		bool is_7420 = dsi->plat_data->hw_type == DSIM_TYPE_EXYNOS7420;
-
 		dsi->state &= ~DSIM_STATE_INITIALIZED;
 
-		/*
-		 * Exynos7420 vendor stop (dsim_drv.c:1003-1010): lanes to LP-00,
-		 * clocks off, then a full software reset, so the block is idle
-		 * before the DISP power domain goes down.
-		 */
-		if (is_7420)
-			samsung_dsim_disable_lanes(dsi);
-
 		samsung_dsim_disable_clock(dsi);
-
-		if (is_7420)
-			samsung_dsim_write(dsi, DSIM_SWRST_REG, DSIM_SWRST);
 
 		samsung_dsim_disable_irq(dsi);
 	}
