@@ -881,7 +881,6 @@
 				 <&cmu_disp CLK_ACLK_DECON0>;
 			clock-names = "aclk", "pclk", "master";
 			#iommu-cells = <0>;
-			samsung,block-when-stop;
 		};
 
 		sysmmu_disp_rw: sysmmu@13a10000 {
@@ -894,7 +893,6 @@
 				 <&cmu_disp CLK_ACLK_DECON0>;
 			clock-names = "aclk", "pclk", "master";
 			#iommu-cells = <0>;
-			samsung,block-when-stop;
 		};
 
 		decon: decon@13930000 {
