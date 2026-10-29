@@ -141,53 +141,81 @@ static const struct regmap_config es9018k2m_regmap_config = {
 	.num_reg_defaults = ARRAY_SIZE(es9018k2m_reg_defaults),
 };
 
-static void es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
+static int es9018k2m_load_custom_fir(struct es9018k2m_priv *priv)
 {
-	int i;
+	int i, ret;
 
 	if (!priv->is_v_version)
-		return;
+		return 0;
 
 	for (i = 0; i < 128; i++) {
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, i);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
-			     es9018k2m_fir_coeff_stage1[i] & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
-			     (es9018k2m_fir_coeff_stage1[i] >> 8) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
-			     (es9018k2m_fir_coeff_stage1[i] >> 16) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, i);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
+				   es9018k2m_fir_coeff_stage1[i] & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
+				   (es9018k2m_fir_coeff_stage1[i] >> 8) & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
+				   (es9018k2m_fir_coeff_stage1[i] >> 16) & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
+		if (ret)
+			return ret;
 	}
-	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+	ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < 16; i++) {
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, 0x80 + i);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
-			     es9018k2m_fir_coeff_stage2[i] & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
-			     (es9018k2m_fir_coeff_stage2[i] >> 8) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
-			     (es9018k2m_fir_coeff_stage2[i] >> 16) & 0xff);
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_ADDR, 0x80 + i);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA1,
+				   es9018k2m_fir_coeff_stage2[i] & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATA2,
+				   (es9018k2m_fir_coeff_stage2[i] >> 8) & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_DATAC,
+				   (es9018k2m_fir_coeff_stage2[i] >> 16) & 0xff);
+		if (ret)
+			return ret;
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x02);
+		if (ret)
+			return ret;
 	}
-	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+	ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+	if (ret)
+		return ret;
 
 	/* Enable custom FIR: bit 0 = enable, bit 2 = cosine stage 2 -> 0x05 */
-	regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x05);
+	return regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x05);
 }
 
-static void es9018k2m_apply_filter(struct es9018k2m_priv *priv)
+static int es9018k2m_apply_filter(struct es9018k2m_priv *priv)
 {
+	int ret;
+
 	if (!priv->power_state)
-		return;
+		return 0;
 
 	if (priv->filter_mode < 3) {
-		regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
-		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
-				   0x60, priv->filter_mode << 5);
-	} else {
-		es9018k2m_load_custom_fir(priv);
+		ret = regmap_write(priv->regmap, ES9018K2M_PROGRAM_FIR_CONTROL, 0x00);
+		if (ret)
+			return ret;
+		return regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+					  0x60, priv->filter_mode << 5);
 	}
+
+	return es9018k2m_load_custom_fir(priv);
 }
 
 /*
@@ -219,23 +247,34 @@ static void es9018k2m_select_osc_locked(struct es9018k2m_priv *priv, bool use_44
  * - Switching to High Gain: drive Reg 8 = 0x0f (GPIO1 HIGH) BEFORE setting low_gain_gpio = 0.
  * - Switching to Low Gain: drive low_gain_gpio = 1 BEFORE setting Reg 8 = 0x07 (GPIO1 LOW).
  */
-static void es9018k2m_apply_gain_locked(struct es9018k2m_priv *priv)
+static int es9018k2m_apply_gain_locked(struct es9018k2m_priv *priv)
 {
+	int ret;
+
 	if (!priv->power_state)
-		return;
+		return 0;
 
 	if (priv->gain) {
-		regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
-				   0x0f, 0x0f);
+		ret = regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
+					 0x0f, 0x0f);
+		if (ret) {
+			dev_warn(priv->dev, "Failed to write GPIO_CONFIG for high gain: %d\n", ret);
+			return ret;
+		}
 		usleep_range(1000, 1500);
 		gpiod_set_value_cansleep(priv->low_gain_gpio, 0);
 	} else {
 		gpiod_set_value_cansleep(priv->low_gain_gpio, 1);
 		usleep_range(1000, 1500);
-		regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
-				   0x0f, 0x07);
+		ret = regmap_update_bits(priv->regmap, ES9018K2M_GPIO_CONFIG,
+					 0x0f, 0x07);
+		if (ret) {
+			dev_warn(priv->dev, "Failed to write GPIO_CONFIG for low gain: %d\n", ret);
+			return ret;
+		}
 	}
 	usleep_range(1000, 1500);
+	return 0;
 }
 
 /*
@@ -245,6 +284,7 @@ static void es9018k2m_apply_gain_locked(struct es9018k2m_priv *priv)
 static int es9018k2m_hw_power_locked(struct es9018k2m_priv *priv, bool enable)
 {
 	bool use_44k = (priv->sysclk == 45158400);
+	int ret;
 
 	if (enable == priv->power_state)
 		return 0;
@@ -270,20 +310,48 @@ static int es9018k2m_hw_power_locked(struct es9018k2m_priv *priv, bool enable)
 		priv->power_state = true;
 
 		regcache_mark_dirty(priv->regmap);
-		regcache_sync(priv->regmap);
+		ret = regcache_sync(priv->regmap);
+		if (ret)
+			goto err_power_on;
 
 		/* Configure hardware gain & GPIO1 output safely after reset */
-		es9018k2m_apply_gain_locked(priv);
+		ret = es9018k2m_apply_gain_locked(priv);
+		if (ret)
+			goto err_power_on;
 
 		/* Configure digital reconstruction filter */
-		es9018k2m_apply_filter(priv);
+		ret = es9018k2m_apply_filter(priv);
+		if (ret)
+			goto err_power_on;
 
 		/* Soft start & unmute */
-		regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START, 0x80, 0x80);
-		regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x03, 0x00);
+		ret = regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START, 0x80, 0x80);
+		if (ret)
+			goto err_power_on;
+		ret = regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET, 0x03, 0x00);
+		if (ret)
+			goto err_power_on;
+
 		usleep_range(5000, 6000);
 		gpiod_set_value_cansleep(priv->mute_gpio, 0);
 		usleep_range(1000, 1500);
+		return 0;
+
+err_power_on:
+		dev_err(priv->dev, "Failed to power on ES9018K2M hardware: %d\n", ret);
+		/* Keep mute_gpio = 1 (muted) to protect headphones/speakers */
+		priv->power_state = false;
+		gpiod_set_value_cansleep(priv->reset_gpio, 0);
+		gpiod_set_value_cansleep(priv->osc48k_gpio, 0);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->osc44k_gpio, 0);
+		gpiod_set_value_cansleep(priv->low_gain_gpio, 0);
+		usleep_range(1000, 1500);
+		gpiod_set_value_cansleep(priv->open_gpio, 0);
+		gpiod_set_value_cansleep(priv->dvdd18_gpio, 0);
+		regcache_mark_dirty(priv->regmap);
+		regcache_cache_only(priv->regmap, true);
+		return ret;
 	} else {
 		/* Pop-free power-off sequence */
 		gpiod_set_value_cansleep(priv->mute_gpio, 1);
@@ -347,11 +415,17 @@ static int es9018k2m_power_switch_put(struct snd_kcontrol *kcontrol,
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool enable = !!ucontrol->value.integer.value[0];
 	bool changed = false;
+	int ret = 0;
 
 	mutex_lock(&priv->lock);
 	priv->manual_power = enable;
 	if ((enable || priv->stream_active) != priv->power_state) {
-		es9018k2m_hw_power_locked(priv, enable || priv->stream_active);
+		ret = es9018k2m_hw_power_locked(priv, enable || priv->stream_active);
+		if (ret) {
+			priv->manual_power = !enable;
+			mutex_unlock(&priv->lock);
+			return ret;
+		}
 		changed = true;
 	}
 	mutex_unlock(&priv->lock);
@@ -408,6 +482,7 @@ static int es9018k2m_gain_put(struct snd_kcontrol *kcontrol,
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool val = !!ucontrol->value.enumerated.item[0];
 	bool changed = false;
+	int ret;
 
 	mutex_lock(&priv->lock);
 	if (val != priv->gain) {
@@ -417,7 +492,12 @@ static int es9018k2m_gain_put(struct snd_kcontrol *kcontrol,
 			usleep_range(1000, 1500);
 			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
 					   0x03, 0x03);
-			es9018k2m_apply_gain_locked(priv);
+			ret = es9018k2m_apply_gain_locked(priv);
+			if (ret) {
+				priv->gain = !val;
+				mutex_unlock(&priv->lock);
+				return ret;
+			}
 			usleep_range(5000, 6000);
 			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
 					   0x03, 0x00);
@@ -451,15 +531,23 @@ static int es9018k2m_filter_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	unsigned int val = ucontrol->value.enumerated.item[0];
+	unsigned int old_mode;
 	bool changed = false;
+	int ret;
 
 	if (val >= ARRAY_SIZE(es9018k2m_filter_texts))
 		return -EINVAL;
 
 	mutex_lock(&priv->lock);
 	if (val != priv->filter_mode) {
+		old_mode = priv->filter_mode;
 		priv->filter_mode = val;
-		es9018k2m_apply_filter(priv);
+		ret = es9018k2m_apply_filter(priv);
+		if (ret) {
+			priv->filter_mode = old_mode;
+			mutex_unlock(&priv->lock);
+			return ret;
+		}
 		changed = true;
 	}
 	mutex_unlock(&priv->lock);
@@ -492,13 +580,16 @@ static int es9018k2m_dai_startup(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_component *comp = dai->component;
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
+	int ret = 0;
 
 	mutex_lock(&priv->lock);
 	priv->stream_active = true;
-	es9018k2m_hw_power_locked(priv, true);
+	ret = es9018k2m_hw_power_locked(priv, true);
+	if (ret)
+		priv->stream_active = false;
 	mutex_unlock(&priv->lock);
 
-	return 0;
+	return ret;
 }
 
 static void es9018k2m_dai_shutdown(struct snd_pcm_substream *substream,
@@ -522,6 +613,7 @@ static int es9018k2m_set_dai_sysclk(struct snd_soc_dai *dai,
 	struct snd_soc_component *comp = dai->component;
 	struct es9018k2m_priv *priv = snd_soc_component_get_drvdata(comp);
 	bool use_44k;
+	int ret = 0;
 
 	if (freq != 49152000 && freq != 45158400) {
 		dev_err(comp->dev, "Unsupported MCLK frequency: %u\n", freq);
@@ -545,13 +637,23 @@ static int es9018k2m_set_dai_sysclk(struct snd_soc_dai *dai,
 			usleep_range(10000, 12000);
 
 			regcache_mark_dirty(priv->regmap);
-			regcache_sync(priv->regmap);
-			es9018k2m_apply_gain_locked(priv);
-			es9018k2m_apply_filter(priv);
-			regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START,
-					   0x80, 0x80);
-			regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
-					   0x03, 0x00);
+			ret = regcache_sync(priv->regmap);
+			if (ret)
+				goto err_sysclk;
+			ret = es9018k2m_apply_gain_locked(priv);
+			if (ret)
+				goto err_sysclk;
+			ret = es9018k2m_apply_filter(priv);
+			if (ret)
+				goto err_sysclk;
+			ret = regmap_update_bits(priv->regmap, ES9018K2M_SOFT_START,
+						 0x80, 0x80);
+			if (ret)
+				goto err_sysclk;
+			ret = regmap_update_bits(priv->regmap, ES9018K2M_GENERAL_SET,
+						 0x03, 0x00);
+			if (ret)
+				goto err_sysclk;
 			usleep_range(5000, 6000);
 			gpiod_set_value_cansleep(priv->mute_gpio, 0);
 			usleep_range(1000, 1500);
@@ -560,6 +662,11 @@ static int es9018k2m_set_dai_sysclk(struct snd_soc_dai *dai,
 	mutex_unlock(&priv->lock);
 
 	return 0;
+
+err_sysclk:
+	dev_err(comp->dev, "Failed to re-sequence ES9018K2M on sysclk switch: %d\n", ret);
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 static int es9018k2m_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
