@@ -218,8 +218,8 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	 * Setup default thresholds for the simple_ondemand governor.
 	 * The values are chosen based on experiments.
 	 */
-	pfdevfreq->gov_data.upthreshold = 45;
-	pfdevfreq->gov_data.downdifferential = 5;
+	pfdevfreq->gov_data.upthreshold = 70;
+	pfdevfreq->gov_data.downdifferential = 10;
 
 	devfreq = devm_devfreq_add_device(dev, &panfrost_devfreq_profile,
 					  DEVFREQ_GOV_SIMPLE_ONDEMAND,
