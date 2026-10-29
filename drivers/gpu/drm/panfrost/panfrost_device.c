@@ -437,6 +437,11 @@ static int panfrost_device_suspend(struct device *dev)
 		return -EBUSY;
 
 	panfrost_devfreq_suspend(pfdev);
+	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
+#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
+		m86_gpu_suspend_notify(dev);
+#endif
+	}
 	panfrost_job_suspend_irq(pfdev);
 	panfrost_mmu_suspend_irq(pfdev);
 	panfrost_gpu_suspend_irq(pfdev);

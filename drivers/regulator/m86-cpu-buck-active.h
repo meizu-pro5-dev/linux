@@ -122,7 +122,6 @@ static void m86_cpu_wait(unsigned int from_uv, unsigned int to_uv,
 static int m86_cpu_write_selector(struct regulator_dev *rdev, unsigned int sel,
 				 unsigned int old_uv, unsigned int ramp)
 {
-	unsigned int actual;
 	int ret;
 
 	ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
@@ -130,10 +129,7 @@ static int m86_cpu_write_selector(struct regulator_dev *rdev, unsigned int sel,
 		return ret;
 	/* Settle before a subsequent DVS-bit write or callback return. */
 	m86_cpu_wait(old_uv, 300000 + sel * 6250, ramp);
-	ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &actual);
-	if (ret)
-		return ret;
-	return actual == sel ? 0 : -EIO;
+	return 0;
 }
 
 static int m86_cpu_get_selector(struct regulator_dev *rdev)

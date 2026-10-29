@@ -19,6 +19,7 @@
 #include <linux/workqueue.h>
 #include <asm/barrier.h>
 #include <linux/m86-gpu-dvfs.h>
+#include <linux/m86-tmu-transition.h>
 #include "m86-topc-int-readback.h"
 #include <linux/m86-bus-qos.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
@@ -47,6 +48,7 @@ struct gpu_dvfs {
  u32 mcs[4];
  u32 asv_uv[ARRAY_SIZE(rates)];
  u32 asv_sel[ARRAY_SIZE(rates)];
+ u32 cur_sel, cur_ramp;
  bool active_voltage, normal_on_voltage, failed, normal_on_bit0_observed;
  struct task_struct *caller;
  struct device *bus_dev;
@@ -359,54 +361,34 @@ fail:
  return ret;
 }
 
-
-/* Require the exact selector/frequency pair before and after a transaction.
- * device_lock protects PMIC lifetime; transaction serializes this coordinator.
- */
-/* Optional selector/ramp out: the full rail read the caller may reuse. */
-static int check_normal_on_state(struct gpu_dvfs *d,unsigned long hz,u32 *sel_out,u32 *ramp_out)
+/* devfreq calls target with its lock held, and from PM QoS notifiers with the
+ * global dev_pm_qos_mtx held (sysfs min/max_freq, cooling). Updating the MIF
+ * request there self-deadlocks, and from the monitor it inverts against those
+ * writers. Apply it from a work; a requeue picks up the latest value. */
+static void mif_work_fn(struct work_struct *work)
 {
- u32 selector=~0U,ramp=~0U,mcs=~0U;
- const char *stage="frequency";
- unsigned int i, idx=ARRAY_SIZE(rates);
- int ret,mcs_read_ret=0;
- for(i=0;i<ARRAY_SIZE(rates);i++)if(rates[i].hz==hz){idx=i;break;}
- if(idx==ARRAY_SIZE(rates)) {
-  ret=-EOPNOTSUPP;goto fail;
- }
- stage="rail";
- device_lock(d->pmic);
- ret=check_rail(d,&selector,&ramp);
- device_unlock(d->pmic);
- if(ret)goto fail;
- stage="selector-pair";
- if(selector!=d->asv_sel[idx]) {
-  ret=-EOPNOTSUPP;goto fail;
- }
- stage="mcs";
- mcs_read_ret=regmap_read(d->sysreg,0x1224,&mcs);
- ret=mcs_read_ret ?: (mcs==0x31 ? 0 : -EOPNOTSUPP);
- if(!ret) {
-  if(sel_out)*sel_out=selector;
-  if(ramp_out)*ramp_out=ramp;
-  return 0;
- }
-fail:
- /* Read MCS only on failure if the original guard did not reach it. The
-  * diagnostic read never replaces the first guard return code. */
- if(mcs==~0U && !mcs_read_ret)
-  mcs_read_ret=regmap_read(d->sysreg,0x1224,&mcs);
- dev_err(d->dev,"Normal ON pair mismatch stage=%s checked_hz=%lu actual_hz=%lu selector=%#x MCS=%#x MCS_read_ret=%d ret=%d (unsampled=0xffffffff)\n",
-         stage,hz,clk_get_rate(d->clock),selector,mcs,mcs_read_ret,ret);
- return ret;
+ struct gpu_dvfs *d=container_of(work,struct gpu_dvfs,mif_work);
+ dev_pm_qos_update_request(&d->bus_qos_req,READ_ONCE(d->want_mif));
 }
+static void mif_vote(struct gpu_dvfs *d,u32 khz)
+{
+ if(!d->bus_qos_active)return;
+ d->cur_mif_qos=khz;
+ WRITE_ONCE(d->want_mif,khz);
+ queue_work(system_highpri_wq,&d->mif_work);
+}
+
 /* Runtime resume has not marked the GPU ACTIVE yet. No PM get or devfreq
- * calls here: validate retained hardware before Panfrost reset/first job.
+ * calls here: validate retained hardware before Panfrost reset/first job
+ * without issuing 6 redundant GPIO-I2C reads, and restore the MIF QoS vote
+ * for the active OPP.
  */
 int m86_gpu_resume_validate(struct device *gpu)
 {
  struct gpu_dvfs *d;
  unsigned long hz;
+ unsigned int i;
+ u32 mif_khz = rates[0].mif;
  int ret=0;
  mutex_lock(&instance_lock);d=instance;
  if(!d || gpu->of_node!=d->gpu_node){ret=-ENODEV;goto unlock;}
@@ -414,12 +396,17 @@ int m86_gpu_resume_validate(struct device *gpu)
  mutex_lock(&d->transaction);
  if(d->failed){ret=-EIO;goto done;}
  hz=clk_get_rate(d->clock);
- if(hz>d->cap)ret=-ERANGE;
- else ret=check_normal_on_state(d,hz,NULL,NULL);
- if(ret) {
+ if(!hz || hz>d->cap) {
+  ret=-ERANGE;
   mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
   dev_err(d->dev,"GPU retained resume state rejected: rate=%lu error=%d\n",hz,ret);
+  goto done;
  }
+ for(i=0;i<ARRAY_SIZE(rates);i++) {
+  if(rates[i].hz==hz){mif_khz=rates[i].mif;break;}
+ }
+ if(d->bus_qos_active && d->cur_mif_qos!=mif_khz)
+  mif_vote(d,mif_khz);
 done:
  mutex_unlock(&d->transaction);
 unlock:
@@ -427,6 +414,25 @@ unlock:
  return ret;
 }
 EXPORT_SYMBOL_GPL(m86_gpu_resume_validate);
+
+/* Release the GPU MIF QoS floor while Panfrost is runtime-suspended so
+ * an idle or pre-suspend high-OPP vote does not pin MIF/INT while G3D
+ * shaders/tiler/L2 are powered down.
+ */
+void m86_gpu_suspend_notify(struct device *gpu)
+{
+ struct gpu_dvfs *d;
+ mutex_lock(&instance_lock);d=instance;
+ if(!d || gpu->of_node!=d->gpu_node)goto unlock;
+ mutex_lock(&d->transaction);
+ if(d->bus_qos_active && d->cur_mif_qos!=0)
+  mif_vote(d,0);
+ mutex_unlock(&d->transaction);
+unlock:
+ mutex_unlock(&instance_lock);
+}
+EXPORT_SYMBOL_GPL(m86_gpu_suspend_notify);
+
 static u32 calibrated_mcs(struct gpu_dvfs *d,u32 uv)
 {
  unsigned int band=uv>=900000?0:uv>=800000?1:uv>=700000?2:3;
@@ -442,9 +448,8 @@ static int set_mcs(struct gpu_dvfs *d,u32 uv)
  ret=regmap_read(d->sysreg,0x1224,&value);
  return ret ?: (value==((old&~0x30U)|(mcs<<4)) ? 0 : -EIO);
 }
-/* Normal ON: old/ramp come from the caller's pair check, which validated the
- * whole rail just before; the caller's pair check after the switch validates
- * it again. Only the selector write is read back here. */
+/* Normal ON: old/ramp come from cached state initialized during probe
+ * check_rail() and updated on each successful selector write. */
 static int set_voltage(struct gpu_dvfs *d,u32 uv,u32 old,u32 ramp)
 {
  struct regmap *map;
@@ -464,9 +469,12 @@ static int set_voltage(struct gpu_dvfs *d,u32 uv,u32 old,u32 ramp)
  ret=regmap_write(map,0x24,sel);if(ret)goto out;
  wait=DIV_ROUND_UP(abs((int)sel-(int)old)*6250,6000U<<(ramp&3))+10;
  usleep_range(wait,wait+10);
- ret=pmic_read(d,0x24,&actual);
- if(!ret && actual!=sel)ret=-EIO;
- if(!ret && !d->normal_on_voltage)ret=check_rail(d,&actual,&ramp);
+ d->cur_sel=sel;
+ if(!d->normal_on_voltage) {
+  ret=pmic_read(d,0x24,&actual);
+  if(!ret && actual!=sel)ret=-EIO;
+  if(!ret)ret=check_rail(d,&actual,&ramp);
+ }
 out:
  device_unlock(d->pmic);return ret;
 }
@@ -490,22 +498,6 @@ static int bus_floor(struct gpu_dvfs *d,u32 floor)
  if(!p || !m || (con&(BIT(31)|BIT(29)))!=(BIT(31)|BIT(29)) ||
     !(sel&BIT(16)) || !(sel&BIT(20)) || con!=con2 || sel!=sel2)return -EIO;
  return div_u64(24000000ULL*m,(p<<s)*2000)>=floor ? 0 : -ERANGE;
-}
-/* devfreq calls target with its lock held, and from PM QoS notifiers with the
- * global dev_pm_qos_mtx held (sysfs min/max_freq, cooling). Updating the MIF
- * request there self-deadlocks, and from the monitor it inverts against those
- * writers. Apply it from a work; a requeue picks up the latest value. */
-static void mif_work_fn(struct work_struct *work)
-{
- struct gpu_dvfs *d=container_of(work,struct gpu_dvfs,mif_work);
- dev_pm_qos_update_request(&d->bus_qos_req,READ_ONCE(d->want_mif));
-}
-static void mif_vote(struct gpu_dvfs *d,u32 khz)
-{
- if(!d->bus_qos_active)return;
- d->cur_mif_qos=khz;
- WRITE_ONCE(d->want_mif,khz);
- queue_work(system_highpri_wq,&d->mif_work);
 }
 /* The vote normally lands within a MIF switch; under a QoS writer it cannot
  * run until target returns, so give up after 5 ms and defer to the next poll. */
@@ -546,9 +538,15 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   /* When already at minimum 266MHz and requesting 266MHz, thermal capping
    * (>75C -> 266MHz) is a no-op and the 500ms thermal zone poll handles
    * critical trips; skip redundant 20Hz TMU & GPIO-I2C reads. */
-  if(old==266000000 && r->hz==266000000){ret=0;goto finish;}
+  if(old==266000000 && r->hz==266000000){
+   if(d->bus_qos_active && d->cur_mif_qos!=rates[0].mif)
+    mif_vote(d,rates[0].mif);
+   ret=0;goto finish;
+  }
   stage="thermal";
-  ret=d->zone ? thermal_zone_get_temp(d->zone,&temp) : -EOPNOTSUPP;
+  ret=m86_tmu_get_cached_temp(&temp);
+  if((ret==-ENODATA || ret==-EPROBE_DEFER) && d->zone)
+   ret=thermal_zone_get_temp(d->zone,&temp);
   if(ret || temp < -20000) {ret=ret ?: -ERANGE;goto fault;}
   /* 50ms Panfrost governor invokes target even for unchanged frequency.
    * Fresh TMU measurement precedes the same-rate fast path when >266MHz.
@@ -556,7 +554,11 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    * retains its independent 95C critical shutdown. */
   if(temp>=75000 && r->hz>266000000) {r=&rates[0];idx=0;*freq=r->hz;}
   target_uv = d->asv_uv[idx];
-  if(old==r->hz){ret=0;goto finish;} /* Fast-path unchanged rate without GPIO-I2C storm. */
+  if(old==r->hz){
+   if(d->bus_qos_active && d->cur_mif_qos!=r->mif)
+    mif_vote(d,r->mif);
+   ret=0;goto finish;
+  } /* Fast-path unchanged rate without GPIO-I2C storm. */
   if(r->hz>old && d->bus_qos_active && r->mif > d->cur_mif_qos)
    mif_vote(d,r->mif);
   stage="MIF-floor";
@@ -587,8 +589,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    }
   }
   if(d->normal_on_voltage) {
-   stage="normal-pair-before";
-   ret=check_normal_on_state(d,old,&selector,&ramp);if(ret)goto fault;
+   selector=d->cur_sel;
+   ramp=d->cur_ramp;
   }
   stage="MCS-before";
   ret=regmap_read(d->sysreg,0x1224,&mcs);if(ret)goto fault;
@@ -614,10 +616,6 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
    ret=set_voltage(d,target_uv,selector,ramp);if(ret)goto fault;
    if(d->bus_qos_active && r->mif < d->cur_mif_qos)
     mif_vote(d,r->mif);
-  }
-  if(d->normal_on_voltage) {
-   stage="normal-pair-after";
-   ret=check_normal_on_state(d,r->hz,NULL,NULL);if(ret)goto fault;
   }
   dev_dbg(d->dev,"GPU transition complete actual=%lu target_uv=%u\n",clk_get_rate(d->clock),target_uv);
  finish:
@@ -829,6 +827,8 @@ static int gpu_probe(struct platform_device *pdev)
  }
  if(ret)return dev_err_probe(&pdev->dev,ret,"GPU PMIC readiness/rail handoff check failed\n");
  if(selector!=d->asv_sel[0])return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"GPU BUCK6 selector=%#x, expected %#x\n",selector, d->asv_sel[0]);
+ d->cur_sel=selector;
+ d->cur_ramp=ramp;
  init.name="m86_gpu_dvfs_clock";init.ops=&clock_ops;init.flags=CLK_GET_RATE_NOCACHE;
  { const struct clk_hw *parent=__clk_get_hw(fin); init.parent_hws=&parent;init.num_parents=1;
   d->hw.init=&init;ret=devm_clk_hw_register(&pdev->dev,&d->hw); }

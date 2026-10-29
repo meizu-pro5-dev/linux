@@ -7,4 +7,5 @@ struct device;
 int m86_gpu_devfreq_target(struct device *gpu, unsigned long *freq);
 /* No runtime-PM acquisition; caller invokes before GPU reset/resume. */
 int m86_gpu_resume_validate(struct device *gpu);
+void m86_gpu_suspend_notify(struct device *gpu);
 #endif

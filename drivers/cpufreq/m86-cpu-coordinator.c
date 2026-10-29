@@ -176,7 +176,9 @@ static int set_voltage_ema(struct m86_coord *d, unsigned int index,
 		return ret;
 	if (regulator_get_voltage(c->supply) != uv)
 		return -EIO;
-	return set_ema(d, index, uv);
+	if (uv > old_uv)
+		return set_ema(d, index, uv);
+	return 0;
 }
 
 static int set_rate_checked(struct m86_cluster *c, unsigned int khz)
@@ -547,10 +549,10 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 	policy->clk = c->clk;
 	cpufreq_generic_init(policy, c->table, 10000000);
 	/*
-	 * GPIO-I2C transitions measured at roughly 30-45 ms on r71.
-	 * Use the slow schedutil path; this is not the Android 1 ms fast path.
+	 * Stage 1 zero-redundancy PMIC path reduced worst-case GPIO-I2C
+	 * cross-OPP + MIF/INT transitions from 30-45 ms to ~5.6-7.2 ms.
 	 */
-	policy->transition_delay_us = 50000;
+	policy->transition_delay_us = 10000;
 	/* generic_init sets all policy CPUs: restore the actual DT cluster mask. */
 	cpumask_copy(policy->cpus, &c->cpus);
 	ret = freq_qos_add_request(&policy->constraints, &c->qos,

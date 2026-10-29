@@ -45,6 +45,9 @@ struct s2mps11_info {
 	int int_max;
 	int int_vthr;
 	int int_delta;
+	int buck1_sel_cache;
+	int buck4_sel_cache;
+	int ldo8_ctrl_cache;
 	int ramp_delay2;
 	int ramp_delay34;
 	int ramp_delay5;
@@ -747,6 +750,72 @@ static const struct regulator_ops s2mps15_reg_buck_ops = {
 	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
 };
 
+static int s2mps15_m86_buck14_get_voltage_sel(struct regulator_dev *rdev)
+{
+	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
+	unsigned int val = 0;
+	int id = rdev_get_id(rdev), ret;
+
+	if (id == S2MPS15_BUCK1) {
+		int cached = READ_ONCE(s2mps11->buck1_sel_cache);
+
+		if (cached >= 0)
+			return cached;
+		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &val);
+		if (ret)
+			return ret;
+		val &= rdev->desc->vsel_mask;
+		WRITE_ONCE(s2mps11->buck1_sel_cache, (int)val);
+		return val;
+	}
+
+	if (id == S2MPS15_BUCK4) {
+		int cached;
+
+		mutex_lock(&s2mps11->m86_int_lock);
+		if (s2mps11->buck4_sel_cache < 0) {
+			ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &val);
+			if (ret) {
+				mutex_unlock(&s2mps11->m86_int_lock);
+				return ret;
+			}
+			s2mps11->buck4_sel_cache = val & rdev->desc->vsel_mask;
+		}
+		cached = s2mps11->buck4_sel_cache;
+		mutex_unlock(&s2mps11->m86_int_lock);
+		return cached;
+	}
+
+	return regulator_get_voltage_sel_regmap(rdev);
+}
+
+/* Must hold s2mps11->m86_int_lock */
+static int s2mps15_m86_sync_int_m(struct s2mps11_info *s2mps11,
+				  struct regmap *regmap, unsigned int ldo_sel)
+{
+	unsigned int ctrl;
+	int ret;
+
+	ldo_sel &= 0x3f;
+	if (s2mps11->ldo8_ctrl_cache < 0) {
+		ret = regmap_read(regmap, S2MPS15_REG_L8CTRL, &ctrl);
+		if (ret)
+			return ret;
+		s2mps11->ldo8_ctrl_cache = ctrl & 0xff;
+	}
+	if ((s2mps11->ldo8_ctrl_cache & 0x3f) == ldo_sel)
+		return 0;
+
+	ctrl = (s2mps11->ldo8_ctrl_cache & ~0x3fU) | ldo_sel;
+	ret = regmap_write(regmap, S2MPS15_REG_L8CTRL, ctrl);
+	if (ret) {
+		s2mps11->ldo8_ctrl_cache = -1;
+		return ret;
+	}
+	s2mps11->ldo8_ctrl_cache = ctrl;
+	return 0;
+}
+
 static int s2mps15_m86_buck14_set_voltage_sel(struct regulator_dev *rdev,
 					      unsigned int sel)
 {
@@ -754,40 +823,64 @@ static int s2mps15_m86_buck14_set_voltage_sel(struct regulator_dev *rdev,
 	unsigned int old_sel = 0, buck_val, buck_max, ldo_sel;
 	int old_val_buck, old_val_ldo, ret;
 
-	if (rdev_get_id(rdev) == S2MPS15_BUCK1)
-		return regulator_set_voltage_sel_regmap(rdev, sel);
+	sel &= rdev->desc->vsel_mask;
+
+	if (rdev_get_id(rdev) == S2MPS15_BUCK1) {
+		if (READ_ONCE(s2mps11->buck1_sel_cache) == (int)sel)
+			return 0;
+		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
+		if (ret) {
+			WRITE_ONCE(s2mps11->buck1_sel_cache, -1);
+			return ret;
+		}
+		WRITE_ONCE(s2mps11->buck1_sel_cache, (int)sel);
+		return 0;
+	}
 
 	if (rdev_get_id(rdev) != S2MPS15_BUCK4)
 		return -EINVAL;
 
-	ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &old_sel);
-	if (ret)
-		return ret;
+	mutex_lock(&s2mps11->m86_int_lock);
+	if (s2mps11->buck4_sel_cache < 0) {
+		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &old_sel);
+		if (ret)
+			goto out;
+		s2mps11->buck4_sel_cache = old_sel & rdev->desc->vsel_mask;
+	}
+	old_sel = s2mps11->buck4_sel_cache;
+	if (sel == old_sel) {
+		ret = 0;
+		goto out;
+	}
 
-	old_val_buck = 300000 + (old_sel & rdev->desc->vsel_mask) * 6250;
+	old_val_buck = 300000 + old_sel * 6250;
 	buck_val = 300000 + sel * 6250;
 
-	mutex_lock(&s2mps11->m86_int_lock);
 	old_val_ldo = s2mps11->int_max;
 	if ((int)buck_val + s2mps11->int_delta > s2mps11->int_max) {
 		u32 target_int_max = buck_val + s2mps11->int_delta;
 		ldo_sel = DIV_ROUND_UP(target_int_max - 300000, 25000);
-		ret = regmap_update_bits(rdev->regmap, S2MPS15_REG_L8CTRL,
-					 0x3f, ldo_sel);
+		ret = s2mps15_m86_sync_int_m(s2mps11, rdev->regmap, ldo_sel);
 		if (ret)
 			goto out;
 		s2mps11->int_max = target_int_max;
 		udelay(DIV_ROUND_UP(s2mps11->int_max - old_val_ldo, 12000));
 
 		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
-		if (ret)
+		if (ret) {
+			s2mps11->buck4_sel_cache = -1;
 			goto out;
+		}
+		s2mps11->buck4_sel_cache = sel;
 		udelay(DIV_ROUND_UP(abs((int)buck_val - old_val_buck), 12000));
 		s2mps11->buck_int = buck_val;
 	} else {
 		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
-		if (ret)
+		if (ret) {
+			s2mps11->buck4_sel_cache = -1;
 			goto out;
+		}
+		s2mps11->buck4_sel_cache = sel;
 		udelay(DIV_ROUND_UP(abs((int)buck_val - old_val_buck), 12000));
 		s2mps11->buck_int = buck_val;
 
@@ -797,8 +890,8 @@ static int s2mps15_m86_buck14_set_voltage_sel(struct regulator_dev *rdev,
 						 s2mps11->int_vthr);
 			if (target_int_max != old_val_ldo) {
 				ldo_sel = DIV_ROUND_UP(target_int_max - 300000, 25000);
-				ret = regmap_update_bits(rdev->regmap, S2MPS15_REG_L8CTRL,
-							 0x3f, ldo_sel);
+				ret = s2mps15_m86_sync_int_m(s2mps11, rdev->regmap,
+							     ldo_sel);
 				if (ret)
 					goto out;
 				s2mps11->int_max = target_int_max;
@@ -825,7 +918,7 @@ static const struct regulator_ops s2mps15_m86_buck14_ops = {
 	.list_voltage		= regulator_list_voltage_linear_range,
 	.map_voltage		= regulator_map_voltage_linear_range,
 	.is_enabled		= regulator_is_enabled_regmap,
-	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
+	.get_voltage_sel	= s2mps15_m86_buck14_get_voltage_sel,
 	.set_voltage_sel	= s2mps15_m86_buck14_set_voltage_sel,
 	.set_voltage_time_sel	= s2mps15_m86_buck14_set_voltage_time_sel,
 };
@@ -1247,6 +1340,9 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 
 	mutex_init(&s2mps11->m86_cpu_lock);
 	mutex_init(&s2mps11->m86_int_lock);
+	s2mps11->buck1_sel_cache = -1;
+	s2mps11->buck4_sel_cache = -1;
+	s2mps11->ldo8_ctrl_cache = -1;
 	s2mps11->dev_type = platform_get_device_id(pdev)->driver_data;
 	switch (s2mps11->dev_type) {
 	case S2MPS11X:
@@ -1315,6 +1411,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 		if (ret)
 			goto out;
 
+		s2mps11->buck4_sel_cache = b4_sel & 0xff;
 		s2mps11->buck_int = 300000 + (b4_sel & 0xff) * 6250;
 		s2mps11->buck_disp = 300000 + (b5_sel & 0xff) * 6250;
 
@@ -1339,6 +1436,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 			unsigned int l8_sel = 0;
 			if (!regmap_read(iodev->regmap_pmic, S2MPS15_REG_L8CTRL, &l8_sel)) {
 				u32 physical_ldo = 300000 + (l8_sel & 0x3f) * 25000;
+				s2mps11->ldo8_ctrl_cache = l8_sel & 0xff;
 				if (physical_ldo > s2mps11->int_max)
 					s2mps11->int_max = physical_ldo;
 			}
