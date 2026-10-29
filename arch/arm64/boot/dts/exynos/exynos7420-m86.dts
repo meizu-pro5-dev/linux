@@ -809,8 +809,6 @@
 };
 
 &cmu_disp {
-	/* Decode the inherited DISP PLL correctly without retuning the live display. */
-	compatible = "meizu,m86-clock-disp";
 	status = "okay";
 };
 

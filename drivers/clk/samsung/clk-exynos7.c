@@ -1773,9 +1773,11 @@ CLK_OF_DECLARE(exynos7_clk_g3d, "samsung,exynos7-clock-g3d",
 #define ENABLE_SCLK_DISP4		0x0A10
 
 static const struct samsung_pll_rate_table disp_pll_tbl[] = {
+	PLL_36XX_RATE(24 * MHZ, 266000000, 67, 3, 1, -32768),
 	PLL_36XX_RATE(24 * MHZ, 252000000, 42, 2, 1, 0),
 	PLL_36XX_RATE(24 * MHZ, 240000000, 20, 1, 1, 0),
 	PLL_36XX_RATE(24 * MHZ, 142000000, 71, 3, 2, 0),
+	PLL_36XX_RATE(24 * MHZ, 133000000, 67, 3, 2, -32768),
 	PLL_36XX_RATE(24 * MHZ, 126000000, 21, 1, 2, 0),
 	PLL_36XX_RATE(24 * MHZ, 96000000, 32, 1, 3, 0),
 	{},
@@ -1800,7 +1802,7 @@ PNAME(mout_mipidphy0_rx_p) = { "fin_pll", "phyclk_mipidphy0_rx" };
  * (vendor clk-exynos7420.c disp_pll); it follows the PLL enable state.
  */
 static const struct samsung_pll_clock disp_pll_clks[] = {
-	PLL_SEL(pll_1460x, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
+	PLL_SEL(pll_1460x_signed, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
 		DISP_PLL_LOCK, DISP_PLL_CON0, disp_pll_tbl,
 		MUX_SEL_DISP0, MUX_STAT_DISP0, 28),
 };
@@ -1925,41 +1927,6 @@ static const struct samsung_cmu_info disp_cmu_info = {
 	.nr_fixed_clks = ARRAY_SIZE(disp_fixed_clks),
 	.pll_clks		= disp_pll_clks,
 	.nr_pll_clks		= ARRAY_SIZE(disp_pll_clks),
-	.mux_clks		= disp_mux_clks,
-	.nr_mux_clks		= ARRAY_SIZE(disp_mux_clks),
-	.div_clks		= disp_div_clks,
-	.nr_div_clks		= ARRAY_SIZE(disp_div_clks),
-	.gate_clks		= disp_gate_clks,
-	.nr_gate_clks		= ARRAY_SIZE(disp_gate_clks),
-	.nr_clk_ids		= DISP_NR_CLK,
-	.clk_regs		= disp_clk_regs,
-	.nr_clk_regs		= ARRAY_SIZE(disp_clk_regs),
-	.clk_name		= "aclk_disp_400",
-	.no_pm_smc		= true,
-};
-
-/* Official m86 DISP table requires signed 16-bit fractional K. */
-static const struct samsung_pll_rate_table m86_disp_pll_tbl[] = {
-	PLL_36XX_RATE(24 * MHZ, 266000000, 67, 3, 1, -32768),
-	PLL_36XX_RATE(24 * MHZ, 252000000, 42, 2, 1, 0),
-	PLL_36XX_RATE(24 * MHZ, 240000000, 20, 1, 1, 0),
-	PLL_36XX_RATE(24 * MHZ, 133000000, 67, 3, 2, -32768),
-	PLL_36XX_RATE(24 * MHZ, 126000000, 21, 1, 2, 0),
-	PLL_36XX_RATE(24 * MHZ, 96000000, 32, 1, 3, 0),
-	{},
-};
-static const struct samsung_pll_clock m86_disp_pll_clks[] = {
-	PLL_SEL(pll_1460x_signed, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
-		DISP_PLL_LOCK, DISP_PLL_CON0, m86_disp_pll_tbl,
-		MUX_SEL_DISP0, MUX_STAT_DISP0, 28),
-};
-
-/* Same CMU as disp_cmu_info with the m86 DISP_PLL table. */
-static const struct samsung_cmu_info m86_disp_cmu_info = {
-	.fixed_clks		= disp_fixed_clks,
-	.nr_fixed_clks		= ARRAY_SIZE(disp_fixed_clks),
-	.pll_clks		= m86_disp_pll_clks,
-	.nr_pll_clks		= ARRAY_SIZE(m86_disp_pll_clks),
 	.mux_clks		= disp_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(disp_mux_clks),
 	.div_clks		= disp_div_clks,
@@ -2098,9 +2065,6 @@ static const struct of_device_id exynos7_cmu_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos7-clock-disp",
 		.data = &disp_cmu_info,
-	}, {
-		.compatible = "meizu,m86-clock-disp",
-		.data = &m86_disp_cmu_info,
 	}, {
 		.compatible = "samsung,exynos7-clock-vpp",
 		.data = &vpp_cmu_info,
