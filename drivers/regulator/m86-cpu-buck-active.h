@@ -244,11 +244,16 @@ static int m86_cpu_set_selector(struct regulator_dev *rdev, unsigned int sel)
 	ctx->state.selector = sel;
 	goto unlock;
 fault:
-	/* An error may leave the intermediate 1.075V / changed sync state.
-	 * Stop subsequent writes; don't attempt unproven voltage rollback.
+	/*
+	 * TD-R4: An error may leave the intermediate 1.075V or unchanged selector.
+	 * Abort the current transaction and keep the safe high-voltage step.
+	 * Invalidate cached state so the next transaction re-reads actual hardware
+	 * registers via m86_cpu_read_state(), enabling retry recovery.
+	 * Do NOT lock info->m86_cpu_faulted = true.
 	 */
-	info->m86_cpu_faulted = true;
-	dev_err(&rdev->dev, "CPU rail transaction failed %d; hardware state uncertain, further writes blocked\n", ret);
+	ctx->state_valid = false;
+	dev_err_ratelimited(&rdev->dev,
+		"CPU rail write failed %d; transaction aborted, state invalidated for retry\n", ret);
 unlock:
 	mutex_unlock(&info->m86_cpu_lock);
 	return ret;

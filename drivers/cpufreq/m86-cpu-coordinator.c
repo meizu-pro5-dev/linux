@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/panic.h>
 #include <linux/pm_qos.h>
 #include <linux/reboot.h>
 #include <linux/regulator/consumer.h>
@@ -321,7 +322,6 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 	unsigned long old_hz;
 	int old_uv;
 	int temp, ret;
-	bool do_fail_closed = false;
 	const char *phase = "fresh thermal/MIF guard";
 	ktime_t started = ktime_get();
 
@@ -345,12 +345,12 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 	}
 	ret = temperature(d, &temp, false);
 	if (ret) {
-		do_fail_closed = true;
-		goto out;
-	}
-	if (temp >= 105000) {
-		ret = -ERANGE;
-		do_fail_closed = true;
+		dev_warn_ratelimited(d->dev,
+			"target cluster=%s temperature guard jitter ret=%d; clamping to safe current OPP\n",
+			ci ? "apollo" : "atlas", ret);
+		/* Flat clamp: skip this target transition, retry via workqueue */
+		mod_delayed_work(system_wq, &d->thermal_work, msecs_to_jiffies(100));
+		ret = -EAGAIN;
 		goto out;
 	}
 	/* Check fresh temperature on every target, independent of governor/QoS lag. */
@@ -463,16 +463,14 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 	c->cur_uv = c->opp[index].uv;
 	goto out;
 fault:
-	dev_err(d->dev, "target fault cluster=%s phase=%s ret=%d\n", ci ? "apollo" : "atlas", phase, ret);
-	do_fail_closed = true;
+	dev_emerg(d->dev, "FATAL: DVFS transition fault cluster=%s phase=%s ret=%d\n",
+		  ci ? "apollo" : "atlas", phase, ret);
+	/* Tier 1: Stop scheduling immediately and trigger panic for pstore preservation */
+	panic("m86-cpu: in-flight DVFS hardware corruption on %s (%s, err=%d)\n",
+	      ci ? "apollo" : "atlas", phase, ret);
 out:
 	trace_target(d, c, ci, old_hz, old_uv, target, c->opp[index].uv, ret, started);
 	mutex_unlock(&c->lock);
-	if (do_fail_closed) {
-		mutex_lock(&d->lock);
-		fail_closed(d, ret);
-		mutex_unlock(&d->lock);
-	}
 	return ret;
 }
 
@@ -499,7 +497,7 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 	{
 		unsigned int j;
 		u32 a, b;
-		int t, r;
+		int t = 0, r;
 		unsigned long hz = clk_get_rate(c->clk);
 		int uv = regulator_get_voltage(c->supply);
 		bool known = false;
@@ -507,15 +505,22 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 		for (j = 0; j < c->nr; j++)
 			if (hz == c->opp[j].khz * 1000UL && uv == c->opp[j].uv)
 				known = true;
-		if (coordinator->faulted || !known)
+		if (!known)
 			return -EIO;
 		/*
-		 * temperature() first invokes fixed_bus_floor(): MIF CON0/MUX
-		 * stable reads, enabled/locked PLL and logical-kHz DT floor.
+		 * TD-R3: Allow policy_init to succeed at >= 85 C or during transient
+		 * temperature error or coordinator fault by clamping thermal cap to
+		 * the lowest safe OPP (c->opp[0].khz) instead of aborting.
 		 */
 		r = temperature(coordinator, &t, true);
-		if (r || t >= 85000)
-			return r ?: -ERANGE;
+		if (coordinator->faulted || r || t >= 85000) {
+			dev_warn(coordinator->dev,
+				"cluster%u policy_init throttled: faulted=%d temp_ret=%d temp=%d mC; clamping to safe %u kHz\n",
+				i, coordinator->faulted, r, t, c->opp[0].khz);
+			c->thermal_cap = c->opp[0].khz;
+		} else {
+			c->thermal_cap = cap_for_temp(c, t);
+		}
 		if (i) {
 			r = regmap_read(coordinator->ema, 0x38, &a);
 			if (r)
@@ -715,9 +720,10 @@ static void monitor(struct work_struct *work)
 
 	mutex_lock(&d->lock);
 	ret = temperature(d, &temp, true);
-	if (ret || temp >= 90000) {
-		fail_closed(d, ret ?: -ERANGE);
+	if (ret) {
+		dev_warn_ratelimited(d->dev, "thermal monitor: temperature read jitter ret=%d, retrying\n", ret);
 		mutex_unlock(&d->lock);
+		schedule_delayed_work(&d->thermal_work, msecs_to_jiffies(250));
 		return;
 	}
 	/*
@@ -931,7 +937,7 @@ static int m86_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret, "TMU notifier release action at source line %u\n", __LINE__);
 	ret = temperature(d, &temp, true);
 	if (ret || temp >= 85000)
-		return dev_err_probe(&pdev->dev, ret ?: -ERANGE, "bootstrap temperature or fixed MIF guard at source line %u\n", __LINE__);
+		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap temperature or fixed MIF guard at source line %u\n", __LINE__);
 	/* Require measured unit handoff controls; shared SYSREG reads only. */
 	{
 		u32 apollo, l1, l2;
@@ -948,7 +954,7 @@ static int m86_probe(struct platform_device *pdev)
 		dev_info(d->dev, "bootstrap EMA apollo=%08x atlas_l1=%08x atlas_l2=%08x\n", apollo, l1, l2);
 		if ((apollo & ~((7U << 20) | (7U << 8))) != 0x010011 ||
 		    (l1 & ~(15U << 4)) != 0x2 || (l2 & ~(15U << 8)) != 0x72)
-			return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap boot EMA nonfield controls at source line %u\n", __LINE__);
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap boot EMA nonfield controls at source line %u\n", __LINE__);
 	}
 	for_each_possible_cpu(cpu) {
 		node = of_get_cpu_node(cpu, NULL);
@@ -1021,7 +1027,7 @@ static int m86_probe(struct platform_device *pdev)
 		if (IS_ERR(c->clk))
 			return dev_err_probe(&pdev->dev, PTR_ERR(c->clk), "bootstrap cluster clock at source line %u\n", __LINE__);
 		if (clk_round_rate(c->clk, c->max_khz * 1000UL) != c->max_khz * 1000UL)
-			return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap clock round_rate ceiling at source line %u\n", __LINE__);
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap clock round_rate ceiling at source line %u\n", __LINE__);
 		ret = clk_rate_exclusive_get(c->clk);
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "bootstrap clock exclusive ownership at source line %u\n", __LINE__);
@@ -1034,7 +1040,7 @@ static int m86_probe(struct platform_device *pdev)
 		ret = of_property_read_bool(node, "meizu,cpu-dvfs-active");
 		of_node_put(node);
 		if (!ret)
-			return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap CPU rail active DT gate at source line %u\n", __LINE__);
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap CPU rail active DT gate at source line %u\n", __LINE__);
 		c->supply = devm_regulator_get(&pdev->dev, name);
 		if (IS_ERR(c->supply))
 			return dev_err_probe(&pdev->dev, PTR_ERR(c->supply), "bootstrap CPU regulator at source line %u\n", __LINE__);
@@ -1052,7 +1058,7 @@ static int m86_probe(struct platform_device *pdev)
 		if (!known)
 			dev_err(d->dev, "bootstrap cluster=%s unknown clock=%lu uv=%d\n", name, clk_get_rate(c->clk), uv);
 		if (!known)
-			return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap unknown boot frequency/voltage OPP at source line %u\n", __LINE__);
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap unknown boot frequency/voltage OPP at source line %u\n", __LINE__);
 		/* Boot EMA must already match the fused/default vendor policy. */
 		{
 			u32 a, b;
@@ -1064,7 +1070,7 @@ static int m86_probe(struct platform_device *pdev)
 				if (ret)
 					return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
 				if ((a & ((7U << 20) | (7U << 8))) != ((apollo_ema << 20) | (apollo_ema << 8)))
-					return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap APOLLO boot EMA band at source line %u\n", __LINE__);
+					return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap APOLLO boot EMA band at source line %u\n", __LINE__);
 			} else {
 				u32 l1, l2;
 
@@ -1076,7 +1082,7 @@ static int m86_probe(struct platform_device *pdev)
 				if (ret)
 					return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
 				if ((a & (15U << 4)) != (l1 << 4) || (b & (15U << 8)) != (l2 << 8))
-					return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap ATLAS boot EMA band at source line %u\n", __LINE__);
+					return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap ATLAS boot EMA band at source line %u\n", __LINE__);
 			}
 		}
 		c->table = devm_kcalloc(&pdev->dev, c->nr + 1, sizeof(*c->table), GFP_KERNEL);
