@@ -63,9 +63,6 @@ struct exynos7420_pd_cfg {
 	/* Content firewall IDs to protect again after every power on. */
 	const u32 *cfw_ids;
 	size_t num_cfw_ids;
-	/* Gate registers reported when the domain fails to power off. */
-	const phys_addr_t *dump_regs;
-	size_t num_dump_regs;
 };
 
 /* Vendor include/linux/smc.h:48-49, 113-115. */
@@ -247,12 +244,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_disp[] = {
 	{ 0x105c1590, BIT(0) },
 };
 static const u32 exynos7420_cfw_disp[] = { EXYNOS7420_CFW_DISP_RW };
-/* CMU_DISP and CMU_VPP gates (regs-clock-exynos7420.h), TOP0 DISP inputs. */
-static const phys_addr_t exynos7420_dump_disp[] = {
-	0x13ad0800, 0x13ad0804, 0x13ad0808, 0x13ad080c, 0x13ad0810,
-	0x13ad0900, 0x13ad0a04, 0x13ad0a08, 0x13ad0a10,
-	0x13ed0800, 0x13ed0900, 0x105d080c, 0x105d0a20,
-};
 
 static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
@@ -354,8 +345,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_disp),
 		.cfw_ids = exynos7420_cfw_disp,
 		.num_cfw_ids = ARRAY_SIZE(exynos7420_cfw_disp),
-		.dump_regs = exynos7420_dump_disp,
-		.num_dump_regs = ARRAY_SIZE(exynos7420_dump_disp),
 	},
 };
 
@@ -485,26 +474,10 @@ static void exynos7420_apply_async_clks(void __iomem *pmu_base,
 	}
 }
 
-static u32 exynos7420_read_phys(phys_addr_t pa)
-{
-	void __iomem *base = ioremap(pa & PAGE_MASK, PAGE_SIZE);
-	u32 val;
-
-	if (!base)
-		return 0;
-	val = readl_relaxed(base + (pa & ~PAGE_MASK));
-	iounmap(base);
-	return val;
-}
-
-#define EXYNOS7420_MAX_DUMP	16
-
 static int exynos7420_power_off_one(void __iomem *pmu_base,
 					  const struct exynos7420_pd_cfg *pd)
 {
 	u32 stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
-	u32 dump[EXYNOS7420_MAX_DUMP];
-	size_t i, n;
 	int timeout;
 
 	if (stat == 0)
@@ -518,11 +491,6 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
 	exynos7420_apply_async_clks(pmu_base, pd);
 	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
-
-	/* Read now: once the switch is half way, the block may not answer. */
-	n = min_t(size_t, pd->num_dump_regs, EXYNOS7420_MAX_DUMP);
-	for (i = 0; i < n; i++)
-		dump[i] = exynos7420_read_phys(pd->dump_regs[i]);
 
 	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
 	writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
@@ -557,9 +525,6 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 		       pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x0),
 		       readl_relaxed(pmu_base + pd->pmu_off + 0x4),
 		       readl_relaxed(pmu_base + pd->pmu_off + 0x8));
-		for (i = 0; i < n; i++)
-			pr_err("exynos-pd: %s before power off: %pa = %#010x\n",
-			       pd->name, &pd->dump_regs[i], dump[i]);
 		/*
 		 * Writing the domain back on from here hangs the SoC on Exynos
 		 * 7420 DISP, so only report it.
