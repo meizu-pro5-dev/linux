@@ -7,11 +7,10 @@
 
 #ifdef CONFIG_M86_SECLOG
 void __init m86_seclog_init(void);
-#define m86_seclog_mark(stage) \
-	pr_notice("PRO5-SECLOG-seclog-r1: %s\n", stage)
 #else
 static inline void m86_seclog_init(void) { }
-#define m86_seclog_mark(stage) do { } while (0)
 #endif
+
+#define m86_seclog_mark(stage) do { } while (0)
 
 #endif

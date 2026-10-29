@@ -314,9 +314,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	m86_seclog_init();
 	early_ioremap_init();
 
-	m86_seclog_mark("setup_machine_fdt ENTER");
 	setup_machine_fdt(__fdt_pointer);
-	m86_seclog_mark("setup_machine_fdt EXIT");
 
 	/*
 	 * Initialise the static keys early as they may be enabled by the
@@ -350,13 +348,9 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 			   FW_BUG "Booted with MMU enabled!");
 	}
 
-	m86_seclog_mark("arm64_memblock_init ENTER");
 	arm64_memblock_init();
-	m86_seclog_mark("arm64_memblock_init EXIT");
 
-	m86_seclog_mark("paging_init ENTER");
 	paging_init();
-	m86_seclog_mark("paging_init EXIT");
 
 	acpi_table_upgrade();
 
@@ -366,9 +360,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	if (acpi_disabled)
 		unflatten_device_tree();
 
-	m86_seclog_mark("bootmem_init ENTER");
 	bootmem_init();
-	m86_seclog_mark("bootmem_init EXIT");
 
 	kasan_init();
 
@@ -381,11 +373,9 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	else
 		psci_acpi_init();
 
-	m86_seclog_mark("PSCI setup complete");
 	init_bootcpu_ops();
 	smp_init_cpus();
 	smp_build_mpidr_hash();
-	m86_seclog_mark("setup_arch CPU discovery complete");
 
 	/* Init percpu seeds for random tags after cpus are set up. */
 	kasan_init_sw_tags();
