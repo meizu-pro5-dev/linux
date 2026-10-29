@@ -31,7 +31,7 @@
 		i2c8 = &hsi2c_8;
 		i2c10 = &hsi2c_10;
 		i2c11 = &hsi2c_11;
-		i2c5 = &i2c_pmic;
+		i2c5 = &hsi2c_5;
 	};
 
 	m86_rtc_32k: clock-rtc-32k {
@@ -110,135 +110,6 @@
 		regulator-min-microvolt = <3800000>;
 		regulator-max-microvolt = <3800000>;
 		regulator-always-on;
-	};
-
-	/*
-	 * PMIC path. The adapter checks/holds non-running APM in reset before
-	 * requesting GPIOs. No default pinctrl state may run ahead of that
-	 * guard.
-	 */
-	i2c_pmic: i2c-pmic {
-		compatible = "meizu,m86-pmic-i2c", "i2c-gpio";
-		meizu,pmu = <&pmu_system_controller>;
-		#address-cells = <1>;
-		#size-cells = <0>;
-		sda-gpios = <&gpg3 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpg3 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-		i2c-gpio,timeout-ms = <100>;
-		status = "okay";
-
-		m86_pmic: pmic@66 {
-			compatible = "samsung,s2mps15-pmic";
-			reg = <0x66>;
-			/* No PMIC IRQ: no RTC alarm or wakeup from the PMIC. */
-			regulators {
-				/* Dynamic MIF, CPU, and INT rails: BUCK1, BUCK2, BUCK3, BUCK4 */
-				m86_buck1_mif: BUCK1 {
-					regulator-name = "vdd_mif";
-					regulator-min-microvolt = <500000>;
-					regulator-max-microvolt = <1100000>;
-					regulator-always-on;
-				};
-				m86_buck2_cpu: BUCK2 {
-					regulator-name = "vdd_atlas";
-					regulator-min-microvolt = <500000>;
-					regulator-max-microvolt = <1300000>;
-					regulator-always-on;
-					meizu,cpu-dvfs-active;
-				};
-				m86_buck3_cpu: BUCK3 {
-					regulator-name = "vdd_apollo";
-					regulator-min-microvolt = <500000>;
-					regulator-max-microvolt = <1200000>;
-					regulator-always-on;
-					meizu,cpu-dvfs-active;
-				};
-				m86_buck4_int: BUCK4 {
-					regulator-name = "vdd_int";
-					regulator-min-microvolt = <500000>;
-					regulator-max-microvolt = <1000000>;
-					regulator-always-on;
-				};
-				/*
-				 * Board LDOs. These constraints can write the voltage
-				 * at probe if the firmware setting differs.
-				 */
-				m86_wm8998_1v8: LDO16 {
-					regulator-name = "vdd18_audio";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <1800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				ldo17_reg: LDO17 {
-					regulator-name = "vdd28_sen";
-					regulator-min-microvolt = <2800000>;
-					regulator-max-microvolt = <2800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				m86_lcd_1v8: LDO18 {
-					regulator-name = "vdd18_lcd";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <1800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				m86_lcd_3v3: LDO19 {
-					regulator-name = "vdd33_lcd";
-					regulator-min-microvolt = <3300000>;
-					regulator-max-microvolt = <3300000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				m86_touch_3v3: LDO21 {
-					regulator-name = "vdd33_touch";
-					regulator-min-microvolt = <2900000>;
-					regulator-max-microvolt = <2900000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				m86_es705_1v1: LDO22 {
-					regulator-name = "vdd11_nr";
-					regulator-min-microvolt = <1100000>;
-					regulator-max-microvolt = <1100000>;
-				};
-				m86_touch_1v8: LDO23 {
-					regulator-name = "vdd18_touch";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <1800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				ldo25_reg: LDO25 {
-					regulator-name = "vdd28_ps";
-					regulator-min-microvolt = <2800000>;
-					regulator-max-microvolt = <2800000>;
-					regulator-boot-on;
-				};
-				ldo14_reg: LDO14 {
-					regulator-name = "vdd28_fp";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <1800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-				ldo2_reg: LDO2 {
-					regulator-name = "vqmmc_sdcard";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <3300000>;
-					regulator-boot-on;
-				};
-				ldo27_reg: LDO27 {
-					regulator-name = "vdd18_nfc";
-					regulator-min-microvolt = <1800000>;
-					regulator-max-microvolt = <1800000>;
-					regulator-boot-on;
-					regulator-always-on;
-				};
-			};
-		};
 	};
 
 	m86_gpio_keys: gpio-keys {
@@ -1025,6 +896,131 @@
 		touchscreen-size-y = <1920>;
 		/* Sleep while the panel is unprepared (DPMS off, suspend). */
 		panel = <&m86_panel>;
+	};
+};
+
+/*
+ * PMIC hardware HSI2C_5 (0x13670000). exynos5_i2c_m86_apm_guard() verifies
+ * and holds non-running Cortex-M3 APM in reset before selecting apm_safe_bus
+ * (gpg3-2/gpg3-3 FUNC_2), preventing any default pinctrl bind before the guard.
+ */
+&hsi2c_5 {
+	status = "okay";
+	clock-frequency = <400000>;
+	meizu,pmu = <&pmu_system_controller>;
+	pinctrl-names = "apm_safe_bus";
+	pinctrl-0 = <&hs_i2c5_bus>;
+
+	m86_pmic: pmic@66 {
+		compatible = "samsung,s2mps15-pmic";
+		reg = <0x66>;
+		/* No PMIC IRQ: no RTC alarm or wakeup from the PMIC. */
+		regulators {
+			/* Dynamic MIF, CPU, and INT rails: BUCK1, BUCK2, BUCK3, BUCK4 */
+			m86_buck1_mif: BUCK1 {
+				regulator-name = "vdd_mif";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-always-on;
+			};
+			m86_buck2_cpu: BUCK2 {
+				regulator-name = "vdd_atlas";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1300000>;
+				regulator-always-on;
+				meizu,cpu-dvfs-active;
+			};
+			m86_buck3_cpu: BUCK3 {
+				regulator-name = "vdd_apollo";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+				meizu,cpu-dvfs-active;
+			};
+			m86_buck4_int: BUCK4 {
+				regulator-name = "vdd_int";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1000000>;
+				regulator-always-on;
+			};
+			/*
+			 * Board LDOs. These constraints can write the voltage
+			 * at probe if the firmware setting differs.
+			 */
+			m86_wm8998_1v8: LDO16 {
+				regulator-name = "vdd18_audio";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			ldo17_reg: LDO17 {
+				regulator-name = "vdd28_sen";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			m86_lcd_1v8: LDO18 {
+				regulator-name = "vdd18_lcd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			m86_lcd_3v3: LDO19 {
+				regulator-name = "vdd33_lcd";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			m86_touch_3v3: LDO21 {
+				regulator-name = "vdd33_touch";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <2900000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			m86_es705_1v1: LDO22 {
+				regulator-name = "vdd11_nr";
+				regulator-min-microvolt = <1100000>;
+				regulator-max-microvolt = <1100000>;
+			};
+			m86_touch_1v8: LDO23 {
+				regulator-name = "vdd18_touch";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			ldo25_reg: LDO25 {
+				regulator-name = "vdd28_ps";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-boot-on;
+			};
+			ldo14_reg: LDO14 {
+				regulator-name = "vdd28_fp";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+			ldo2_reg: LDO2 {
+				regulator-name = "vqmmc_sdcard";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-boot-on;
+			};
+			ldo27_reg: LDO27 {
+				regulator-name = "vdd18_nfc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-boot-on;
+				regulator-always-on;
+			};
+		};
 	};
 };
 

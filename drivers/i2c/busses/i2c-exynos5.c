@@ -18,7 +18,10 @@
 #include <linux/clk.h>
 #include <linux/slab.h>
 #include <linux/io.h>
+#include <linux/mfd/syscon.h>
 #include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/regmap.h>
 #include <linux/spinlock.h>
 
 /*
@@ -857,11 +860,97 @@ static const struct i2c_algorithm exynos5_i2c_algorithm = {
 	.functionality		= exynos5_i2c_func,
 };
 
+/*
+ * M86's Cortex-M3 APM and HSI2C_5 share the PMIC bus (gpg3-2/gpg3-3).
+ * Verify APM is not running and hold it in reset before switching the
+ * pins from default/input to FUNC_2 ("hs_i2c5_bus").
+ */
+static int exynos5_i2c_m86_apm_guard(struct device *dev)
+{
+	struct regmap *pmu;
+	struct pinctrl *pctl;
+	struct pinctrl_state *bus_state;
+	unsigned int config[2], status[2], option;
+	int i, ret;
+
+	if (!of_find_property(dev->of_node, "meizu,pmu", NULL))
+		return 0;
+
+	/* Core selects "default" pinctrl before probe: DT must omit it. */
+	if (of_find_property(dev->of_node, "pinctrl-0", NULL)) {
+		const char *first_name = NULL;
+
+		if (of_property_read_string_index(dev->of_node, "pinctrl-names", 0,
+						  &first_name) == 0 &&
+		    strcmp(first_name, "default") == 0)
+			return dev_err_probe(dev, -EINVAL,
+					     "APM guard requires no default pinctrl\n");
+	}
+
+	pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "meizu,pmu");
+	if (IS_ERR(pmu))
+		return dev_err_probe(dev, PTR_ERR(pmu), "APM PMU lookup failed\n");
+	ret = regmap_read(pmu, 0x2508, &option);
+	if (ret)
+		return dev_err_probe(dev, ret, "APM option read failed\n");
+	for (i = 0; i < 2; i++) {
+		ret = regmap_read(pmu, 0x2500, &config[i]);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM configuration read failed\n");
+		ret = regmap_read(pmu, 0x2504, &status[i]);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM status read failed\n");
+		if (!i)
+			usleep_range(1000, 2000);
+	}
+	dev_info(dev, "APM before: config=%#010x/%#010x status=%#010x/%#010x option=%#010x\n",
+		 config[0], config[1], status[0], status[1], option);
+	if ((status[0] | status[1]) & BIT(0))
+		return dev_err_probe(dev, -EBUSY, "APM running; refusing HSI2C5 takeover\n");
+
+	if ((config[0] | config[1]) & BIT(0)) {
+		ret = regmap_update_bits(pmu, 0x2500, BIT(0), 0);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM reset hold failed\n");
+	}
+	for (i = 0; i < 2; i++) {
+		ret = regmap_read_poll_timeout(pmu, 0x2500, config[i],
+					       !(config[i] & BIT(0)), 100, 10000);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM configuration timeout\n");
+		ret = regmap_read_poll_timeout(pmu, 0x2504, status[i],
+					       !(status[i] & BIT(0)), 100, 10000);
+		if (ret)
+			return dev_err_probe(dev, ret, "APM status timeout\n");
+		if (!i)
+			usleep_range(1000, 2000);
+	}
+
+	pctl = devm_pinctrl_get(dev);
+	if (IS_ERR(pctl))
+		return dev_err_probe(dev, PTR_ERR(pctl), "APM pinctrl get failed\n");
+	bus_state = pinctrl_lookup_state(pctl, "apm_safe_bus");
+	if (IS_ERR(bus_state))
+		return dev_err_probe(dev, PTR_ERR(bus_state),
+				     "APM apm_safe_bus pinctrl lookup failed\n");
+	ret = pinctrl_select_state(pctl, bus_state);
+	if (ret)
+		return dev_err_probe(dev, ret, "APM apm_safe_bus pinctrl select failed\n");
+
+	dev_info(dev, "APM after: config=%#010x/%#010x status=%#010x/%#010x; HSI2C5 pinmux active\n",
+		 config[0], config[1], status[0], status[1]);
+	return 0;
+}
+
 static int exynos5_i2c_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct exynos5_i2c *i2c;
 	int ret;
+
+	ret = exynos5_i2c_m86_apm_guard(&pdev->dev);
+	if (ret)
+		return ret;
 
 	i2c = devm_kzalloc(&pdev->dev, sizeof(struct exynos5_i2c), GFP_KERNEL);
 	if (!i2c)
@@ -925,13 +1014,16 @@ static int exynos5_i2c_probe(struct platform_device *pdev)
 
 	i2c->variant = of_device_get_match_data(&pdev->dev);
 
+	ret = of_alias_get_id(np, "i2c");
+	i2c->adap.nr = (ret >= 0) ? ret : -1;
+
 	ret = exynos5_hsi2c_clock_setup(i2c);
 	if (ret)
 		goto err_clk;
 
 	exynos5_i2c_reset(i2c);
 
-	ret = i2c_add_adapter(&i2c->adap);
+	ret = i2c_add_numbered_adapter(&i2c->adap);
 	if (ret < 0)
 		goto err_clk;
 

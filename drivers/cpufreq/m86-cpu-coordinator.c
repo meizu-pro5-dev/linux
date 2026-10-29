@@ -549,10 +549,10 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 	policy->clk = c->clk;
 	cpufreq_generic_init(policy, c->table, 10000000);
 	/*
-	 * Stage 1 zero-redundancy PMIC path reduced worst-case GPIO-I2C
-	 * cross-OPP + MIF/INT transitions from 30-45 ms to ~5.6-7.2 ms.
+	 * With PMIC on hardware hsi2c_5 and zero-redundancy regulator reads,
+	 * worst-case cross-OPP + MIF/INT transitions take ~0.5-2.5 ms.
 	 */
-	policy->transition_delay_us = 10000;
+	policy->transition_delay_us = 5000;
 	/* generic_init sets all policy CPUs: restore the actual DT cluster mask. */
 	cpumask_copy(policy->cpus, &c->cpus);
 	ret = freq_qos_add_request(&policy->constraints, &c->qos,
