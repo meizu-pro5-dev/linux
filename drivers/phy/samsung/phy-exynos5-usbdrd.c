@@ -48,8 +48,6 @@
 
 #define EXYNOS5_DRD_PHYPIPE			0x0c
 
-#define PHY_CLOCK_SEL				BIT(4)
-
 #define EXYNOS5_DRD_PHYCLKRST			0x10
 
 #define PHYCLKRST_EN_UTMISUSPEND		BIT(31)
@@ -111,10 +109,6 @@
 
 #define PHYPARAM1_PCS_TXDEEMPH_MASK		(0x1f << 0)
 #define PHYPARAM1_PCS_TXDEEMPH			(0x1c)
-#define PHYPARAM1_PCS_TXDEEMPH_3P5DB_MASK	(0x3f << 0)
-#define PHYPARAM1_PCS_TXDEEMPH_3P5DB(_x)	((_x) << 0)
-#define PHYPARAM1_PCS_TXSWING_FULL_MASK		(0x7f << 12)
-#define PHYPARAM1_PCS_TXSWING_FULL(_x)		((_x) << 12)
 
 #define PHYPARAM0_TXVREFTUNE_MASK		(0xf << 22)
 #define PHYPARAM0_TXVREFTUNE(_x)		((_x) << 22)
@@ -126,14 +120,6 @@
 #define PHYPARAM0_SQRXTUNE(_x)			((_x) << 6)
 #define PHYPARAM0_COMPDISTUNE_MASK		(0x7 << 0)
 #define PHYPARAM0_COMPDISTUNE(_x)		((_x) << 0)
-
-#define EXYNOS5_DRD_PHYPCSVAL			0x3c
-#define PHYPCSVAL_PCS_RX_LOS_MASK_VAL_MASK	(0x3ff << 0)
-#define PHYPCSVAL_PCS_RX_LOS_MASK_VAL(_x)	((_x) << 0)
-
-#define EXYNOS5_DRD_PHYPARAM2			0x50
-#define PHYPARAM2_TX_VBOOST_LVL_MASK		(0x7 << 4)
-#define PHYPARAM2_TX_VBOOST_LVL(_x)		((_x) << 4)
 
 #define EXYNOS5_DRD_PHYTERM			0x24
 
@@ -262,7 +248,6 @@ struct exynos5_usbdrd_phy {
 	struct clk *ref_clk;
 	struct regulator *vbus;
 	struct regulator *vbus_boost;
-	bool ss_phy_calibrated;
 	bool hs_host_tune;
 };
 
@@ -441,79 +426,6 @@ static void exynos7_usbdrd_hs_tune(struct exynos5_usbdrd_phy *phy_drd)
 		       PHYPARAM0_TXVREFTUNE(0xf);
 	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0);
 }
-
-/*
- * Exynos7420 14nm PIPE3 PHY tuning, ported from the vendor
- * phy-samsung-usb3-cal.c tune sequence. PHYPCSVAL_PCS_RX_LOS_MASK_VAL(0x18)
- * masks the abnormal LFPS glitches that otherwise produce spurious
- * SuperSpeed disconnects on this PHY.
- */
-static void exynos7_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
-{
-	u32 reg;
-
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_LINKSYSTEM);
-	reg &= ~LINKSYSTEM_FLADJ_MASK;
-	reg |= LINKSYSTEM_FLADJ(0x20) | LINKSYSTEM_XHCI_VERSION_CONTROL;
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_LINKSYSTEM);
-
-	/* Select the PHY (not free-running) UTMI clock. */
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPIPE);
-	reg |= PHY_CLOCK_SEL;
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPIPE);
-
-	exynos7_usbdrd_hs_tune(phy_drd);
-
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1);
-	reg &= ~PHYPARAM1_PCS_TXSWING_FULL_MASK;
-	reg |= PHYPARAM1_PCS_TXSWING_FULL(0x7f);
-	reg &= ~PHYPARAM1_PCS_TXDEEMPH_3P5DB_MASK;
-	reg |= PHYPARAM1_PCS_TXDEEMPH_3P5DB(0x18);
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1);
-
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM2);
-	reg &= ~PHYPARAM2_TX_VBOOST_LVL_MASK;
-	reg |= PHYPARAM2_TX_VBOOST_LVL(0x5);
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM2);
-
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPCSVAL);
-	reg &= ~PHYPCSVAL_PCS_RX_LOS_MASK_VAL_MASK;
-	reg |= PHYPCSVAL_PCS_RX_LOS_MASK_VAL(0x18);
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYPCSVAL);
-
-	reg = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
-	reg &= ~PHYTEST_POWERDOWN_SSP;
-	writel(reg, phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
-
-	phy_drd->ss_phy_calibrated = true;
-	dev_info(phy_drd->dev,
-		 "Exynos7 USB 3.0 PIPE3 PHY tuned (param0=0x%08x param1=0x%08x param2=0x%08x pcsval=0x%08x)\n",
-		 readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM0),
-		 readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM1),
-		 readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPARAM2),
-		 readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYPCSVAL));
-}
-
-static ssize_t ss_phy_calibrated_show(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct exynos5_usbdrd_phy *phy_drd = dev_get_drvdata(dev);
-	bool calibrated = false;
-
-	if (phy_drd && phy_drd->reg_phy) {
-		u32 test = readl(phy_drd->reg_phy + EXYNOS5_DRD_PHYTEST);
-		calibrated = phy_drd->ss_phy_calibrated || !(test & PHYTEST_POWERDOWN_SSP);
-	}
-
-	return sysfs_emit(buf, "%d\n", calibrated ? 1 : 0);
-}
-static DEVICE_ATTR_RO(ss_phy_calibrated);
-
-static struct attribute *ss_phy_attrs[] = {
-	&dev_attr_ss_phy_calibrated.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(ss_phy);
 
 static void exynos5_usbdrd_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
 {
@@ -1104,21 +1016,6 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_exynos5[] = {
 	},
 };
 
-static const struct exynos5_usbdrd_phy_config phy_cfg_exynos7[] = {
-	{
-		.id		= EXYNOS5_DRDPHY_UTMI,
-		.phy_isol	= exynos5_usbdrd_phy_isol,
-		.phy_init	= exynos5_usbdrd_utmi_init,
-		.set_refclk	= exynos5_usbdrd_utmi_set_refclk,
-	},
-	{
-		.id		= EXYNOS5_DRDPHY_PIPE3,
-		.phy_isol	= exynos5_usbdrd_phy_isol,
-		.phy_init	= exynos7_usbdrd_pipe3_init,
-		.set_refclk	= exynos5_usbdrd_pipe3_set_refclk,
-	},
-};
-
 static const struct exynos5_usbdrd_phy_config phy_cfg_exynos850[] = {
 	{
 		.id		= EXYNOS5_DRDPHY_UTMI,
@@ -1151,7 +1048,7 @@ static const struct exynos5_usbdrd_phy_drvdata exynos5433_usbdrd_phy = {
 };
 
 static const struct exynos5_usbdrd_phy_drvdata exynos7_usbdrd_phy = {
-	.phy_cfg		= phy_cfg_exynos7,
+	.phy_cfg		= phy_cfg_exynos5,
 	.phy_ops		= &exynos7_usbdrd_phy_ops,
 	.pmu_offset_usbdrd0_phy	= EXYNOS5_USBDRD_PHY_CONTROL,
 	.has_common_clk_gate	= false,
@@ -1291,10 +1188,6 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 		dev_err(phy_drd->dev, "Failed to register phy provider\n");
 		return PTR_ERR(phy_provider);
 	}
-
-	ret = devm_device_add_groups(dev, ss_phy_groups);
-	if (ret)
-		dev_warn(dev, "failed to create ss_phy_calibrated sysfs: %d\n", ret);
 
 	return 0;
 }
