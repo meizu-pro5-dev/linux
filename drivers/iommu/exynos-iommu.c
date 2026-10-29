@@ -1165,36 +1165,6 @@ void exynos_iommu_master_ready(struct device *master)
 }
 EXPORT_SYMBOL_GPL(exynos_iommu_master_ready);
 
-/*
- * exynos_iommu_map_identity - map a physical range one-to-one
- * @master: master device whose IOMMU domain should be used
- * @phys: physical address of the range
- * @size: size of the range in bytes
- *
- * Used by the display driver to keep the bootloader's framebuffer readable
- * after the SYSMMUs start translating.  Mirrors the vendor iovmm_map_oto().
- */
-int exynos_iommu_map_identity(struct device *master, phys_addr_t phys,
-			      size_t size)
-{
-	struct exynos_iommu_owner *owner = dev_iommu_priv_get(master);
-	phys_addr_t start, end;
-	int ret;
-
-	if (!owner || !owner->domain)
-		return -ENODEV;
-
-	start = ALIGN_DOWN(phys, SZ_2M);
-	end = ALIGN(phys + size, SZ_2M);
-
-	ret = iommu_map(owner->domain, start, start, end - start,
-			IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
-	pr_debug("IOMMU: map_identity %s phys=%pa start=%pa size=%#zx ret=%d\n",
-		 dev_name(master), &phys, &start, (size_t)(end - start), ret);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(exynos_iommu_map_identity);
-
 static sysmmu_pte_t *alloc_lv2entry(struct exynos_iommu_domain *domain,
 		sysmmu_pte_t *sent, sysmmu_iova_t iova, short *pgcounter)
 {

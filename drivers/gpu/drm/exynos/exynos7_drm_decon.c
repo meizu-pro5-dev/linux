@@ -74,8 +74,6 @@ struct decon_context {
 	void __iomem			*regs;
 	unsigned long			irq_flags;
 	bool				i80_if;
-	bool				i80_handoff_processed;
-	bool				scanout_iova;
 	wait_queue_head_t		wait_vsync_queue;
 	atomic_t			wait_vsync_event;
 	struct gpio_desc		*te_gpio;
@@ -768,9 +766,6 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	for (i = 0; i < WINDOWS_NR; i++)
 		decon_shadow_protect_win(ctx, i, false);
 
-	/* From here on the windows only scan IOVA-mapped framebuffers. */
-	ctx->scanout_iova = true;
-
 	writel(readl(ctx->regs + DECON_UPDATE) |
 	       DECON_UPDATE_STANDALONE_F, ctx->regs + DECON_UPDATE);
 
@@ -936,30 +931,10 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 		return;
 	}
 
-	if (ctx->i80_if && !ctx->i80_handoff_processed) {
-		phys_addr_t fb = 0;
-		int i;
-
-		/*
-		 * The bootloader's framebuffer is still being scanned by DECON
-		 * and is not mapped in the IOMMU domain.  Map it one-to-one
-		 * (same idea as the vendor's iovmm_map_oto()) so the SYSMMU can
-		 * be brought up without DECON faulting on it.  The first commit
-		 * then switches the window to the IOVA-mapped framebuffer.
-		 */
-		for (i = 0; i < WINDOWS_NR; i++) {
-			phys_addr_t addr = readl(ctx->regs + VIDW_BUF_START(i));
-
-			if (addr && (!fb || addr < fb))
-				fb = addr;
-		}
-		if (fb)
-			exynos_iommu_map_identity(ctx->dev, fb, SZ_16M);
-	}
+	/* Stop and reset DECON before its SYSMMUs start translating. */
+	decon_init(ctx);
 
 	exynos_iommu_master_ready(ctx->dev);
-
-	decon_init(ctx);
 
 	if (ctx->i80_if)
 		writel(readl(ctx->regs + VIDINTCON0) | VIDINTCON0_INT_ENABLE |
@@ -971,10 +946,6 @@ static void decon_atomic_enable(struct exynos_drm_crtc *crtc)
 		decon_enable_vblank(ctx->crtc);
 
 	decon_commit(ctx->crtc);
-
-	/* Later window addresses are Linux IOVAs, even if no boot FB existed. */
-	if (ctx->i80_if)
-		ctx->i80_handoff_processed = true;
 }
 
 static void decon_atomic_disable(struct exynos_drm_crtc *crtc)
@@ -1070,25 +1041,15 @@ out:
 }
 
 /*
- * SYSMMU fault on the window DMA, called from the SYSMMU interrupt. Before
- * the first commit the windows may still scan the bootloader framebuffer,
- * which only the identity map covers: report it and wait for the commit to
- * move them. Afterwards a fault means a window scans an unmapped IOVA; stop
- * the window DMA so it does not fault again every frame. The next commit
- * re-enables the windows with valid buffers.
+ * SYSMMU fault on the window DMA, called from the SYSMMU interrupt: a window
+ * scans an unmapped IOVA. Stop the window DMA so it does not fault again
+ * every frame. The next commit re-enables the windows with valid buffers.
  */
 static int decon_iommu_fault(struct iommu_domain *domain, struct device *dev,
 			     unsigned long iova, int flags, void *token)
 {
 	struct decon_context *ctx = token;
 	unsigned int win;
-
-	if (!ctx->scanout_iova) {
-		dev_warn_ratelimited(ctx->dev,
-				     "SYSMMU fault at %#lx during handover\n",
-				     iova);
-		return 0;
-	}
 
 	dev_err_ratelimited(ctx->dev,
 			    "SYSMMU fault at %#lx, disabling windows\n", iova);
