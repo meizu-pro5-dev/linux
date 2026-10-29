@@ -95,10 +95,6 @@
 			no-map;
 		};
 
-		decon_iova_resv: decon-iova-reserved {
-			iommu-addresses = <&decon 0xe0000000 0x04200000>;
-		};
-
 		/*
 		 * MFC buffers must sit above the firmware block (RISC base,
 		 * 0x20000000); keep the IOVA allocator out of the range below.
@@ -896,7 +892,6 @@
 	samsung,bus = <&bus_mif>;
 	interconnects = <&bus_int &bus_mif>;
 	interconnect-names = "dma-mem";
-	memory-region = <&decon_iova_resv>;
 	status = "okay";
 
 	i80-if-timings {
