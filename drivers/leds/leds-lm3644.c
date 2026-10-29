@@ -59,6 +59,12 @@
 #define LM3644_TORCH_MAX_LEVEL		0x7F
 #define LM3644_FLASH_MAX_LEVEL		0x7F
 
+/* Flash current limits in microamperes (Linux sysfs-class-led-flash ABI) */
+#define LM3644_MIN_FLASH_UA		11310
+#define LM3644_MAX_FLASH_UA		1499750
+#define LM3644_FLASH_STEP_UA		11720
+#define LM3644_DEFAULT_FLASH_UA		761390	/* Level 0x40: 11310 + 64 * 11720 */
+
 enum lm3644_channel_id {
 	LM3644_ID_TORCH0 = 0,
 	LM3644_ID_TORCH1,
@@ -114,6 +120,22 @@ static u8 lm3644_timeout_to_reg(u32 timeout_us)
 	return 9 + (timeout_us - 100000 + 49999) / 50000;
 }
 
+static inline u8 lm3644_flash_current_to_reg(u32 brightness_ua)
+{
+	if (brightness_ua <= LM3644_MIN_FLASH_UA)
+		return 0;
+	if (brightness_ua >= LM3644_MAX_FLASH_UA)
+		return LM3644_FLASH_MAX_LEVEL;
+	return (brightness_ua - LM3644_MIN_FLASH_UA) / LM3644_FLASH_STEP_UA;
+}
+
+static inline u32 lm3644_flash_reg_to_current(u8 reg_val)
+{
+	if (reg_val > LM3644_FLASH_MAX_LEVEL)
+		reg_val = LM3644_FLASH_MAX_LEVEL;
+	return LM3644_MIN_FLASH_UA + (u32)reg_val * LM3644_FLASH_STEP_UA;
+}
+
 static int lm3644_hw_init(struct lm3644_chip *chip)
 {
 	int ret;
@@ -148,13 +170,11 @@ static int lm3644_hw_init(struct lm3644_chip *chip)
 	if (ret)
 		return ret;
 	ret = regmap_write(chip->regmap, LM3644_REG_FLASH_LED0_BR,
-			   min_t(u32, chip->leds[LM3644_ID_FLASH0].fled_cdev.brightness.val,
-				 LM3644_FLASH_MAX_LEVEL));
+			   lm3644_flash_current_to_reg(chip->leds[LM3644_ID_FLASH0].fled_cdev.brightness.val));
 	if (ret)
 		return ret;
 	return regmap_write(chip->regmap, LM3644_REG_FLASH_LED1_BR,
-			    min_t(u32, chip->leds[LM3644_ID_FLASH1].fled_cdev.brightness.val,
-				  LM3644_FLASH_MAX_LEVEL));
+			    lm3644_flash_current_to_reg(chip->leds[LM3644_ID_FLASH1].fled_cdev.brightness.val));
 }
 
 static int lm3644_set_hw_power(struct lm3644_chip *chip, bool on)
@@ -220,7 +240,9 @@ static int lm3644_brightness_set_blocking(struct led_classdev *cdev,
 			 LM3644_REG_FLASH_LED0_BR : LM3644_REG_FLASH_LED1_BR;
 
 		if (brightness > 0) {
-			u8 val = min_t(u32, brightness, LM3644_FLASH_MAX_LEVEL);
+			u32 val_ua = (brightness < LM3644_MIN_FLASH_UA) ?
+				     led->fled_cdev.brightness.val : brightness;
+			u8 val = lm3644_flash_current_to_reg(val_ua);
 
 			ret = regmap_write(chip->regmap, reg_br, val);
 			if (ret)
@@ -313,7 +335,7 @@ static int lm3644_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32
 	if (chip->hw_enabled) {
 		reg_br = (led->led_index == 0) ?
 			 LM3644_REG_FLASH_LED0_BR : LM3644_REG_FLASH_LED1_BR;
-		ret = regmap_write(chip->regmap, reg_br, min_t(u32, brightness, LM3644_FLASH_MAX_LEVEL));
+		ret = regmap_write(chip->regmap, reg_br, lm3644_flash_current_to_reg(brightness));
 	}
 	mutex_unlock(&chip->lock);
 
@@ -596,7 +618,7 @@ static int lm3644_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&chip->strobe_work, lm3644_strobe_work);
 	for (i = 0; i < LM3644_ID_MAX; i++)
 		chip->leds[i].fled_cdev.brightness.val =
-			lm3644_led_defs[i].is_flash ? 0x40 : 0x20;
+			lm3644_led_defs[i].is_flash ? LM3644_DEFAULT_FLASH_UA : 0x20;
 	i2c_set_clientdata(client, chip);
 
 	chip->regmap = devm_regmap_init_i2c(client, &lm3644_regmap_cfg);
@@ -686,10 +708,10 @@ static int lm3644_probe(struct i2c_client *client)
 			led->fled_cdev.timeout.step = 10000;
 			led->fled_cdev.timeout.val = 150000;
 
-			led->fled_cdev.brightness.min = 1;
-			led->fled_cdev.brightness.max = LM3644_FLASH_MAX_LEVEL;
-			led->fled_cdev.brightness.step = 1;
-			/* Keep the safe 0x40 baseline programmed by hw_init. */
+			led->fled_cdev.brightness.min = LM3644_MIN_FLASH_UA;
+			led->fled_cdev.brightness.max = LM3644_MAX_FLASH_UA;
+			led->fled_cdev.brightness.step = LM3644_FLASH_STEP_UA;
+			led->fled_cdev.brightness.val = LM3644_DEFAULT_FLASH_UA;
 
 			ret = devm_led_classdev_flash_register_ext(dev, &led->fled_cdev, NULL);
 			if (ret) {
