@@ -251,6 +251,10 @@ struct samsung_clk_reg_dump {
  * @con_offset: offset of the register for configuring the PLL.
  * @lock_offset: offset of the register for locking the PLL.
  * @type: Type of PLL to be registered.
+ * @sel_offset: offset of the mux register selecting between the PLL input
+ *	and the PLL output for its consumers, or 0 if there is none.
+ * @sel_stat_offset: offset of the status register of that mux.
+ * @sel_shift: bit of the selector in both registers.
  */
 struct samsung_pll_clock {
 	unsigned int		id;
@@ -261,6 +265,9 @@ struct samsung_pll_clock {
 	int			lock_offset;
 	enum samsung_pll_type	type;
 	const struct samsung_pll_rate_table *rate_table;
+	int			sel_offset;
+	int			sel_stat_offset;
+	u8			sel_shift;
 };
 
 #define __PLL(_typ, _id, _name, _pname, _flags, _lock, _con, _rtable)	\
@@ -278,6 +285,22 @@ struct samsung_pll_clock {
 #define PLL(_typ, _id, _name, _pname, _lock, _con, _rtable)	\
 	__PLL(_typ, _id, _name, _pname, CLK_GET_RATE_NOCACHE, _lock,	\
 	      _con, _rtable)
+
+#define PLL_SEL(_typ, _id, _name, _pname, _lock, _con, _rtable,	\
+		_sel, _sel_stat, _sel_shift)				\
+	{								\
+		.id		= _id,					\
+		.type		= _typ,					\
+		.name		= _name,				\
+		.parent_name	= _pname,				\
+		.flags		= CLK_GET_RATE_NOCACHE,			\
+		.con_offset	= _con,					\
+		.lock_offset	= _lock,				\
+		.rate_table	= _rtable,				\
+		.sel_offset	= _sel,					\
+		.sel_stat_offset = _sel_stat,				\
+		.sel_shift	= _sel_shift,				\
+	}
 
 struct samsung_cpu_clock {
 	unsigned int	id;

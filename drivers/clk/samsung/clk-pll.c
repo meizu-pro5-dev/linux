@@ -31,6 +31,12 @@ struct samsung_clk_pll {
 	enum samsung_pll_type	type;
 	unsigned int		rate_count;
 	const struct samsung_pll_rate_table *rate_table;
+	/* Optional mux feeding consumers the PLL input (0) or output (1) */
+	void __iomem		*sel_reg;
+	void __iomem		*sel_stat_reg;
+	unsigned short		sel_shift;
+	/* Lock shared with the other clocks in @sel_reg */
+	spinlock_t		*lock;
 };
 
 #define to_clk_pll(_hw) container_of(_hw, struct samsung_clk_pll, hw)
@@ -140,6 +146,77 @@ static int samsung_pll3xxx_is_enabled(struct clk_hw *hw)
 	struct samsung_clk_pll *pll = to_clk_pll(hw);
 
 	return !!(readl_relaxed(pll->con_reg) & BIT(pll->enable_offs));
+}
+
+#define PLL_SEL_STAT_MASK	0x7
+#define PLL_SEL_STAT_OSC	0x0
+#define PLL_SEL_STAT_PLL	0x1
+
+static int samsung_pll_sel_switch(struct samsung_clk_pll *pll, bool to_pll)
+{
+	u32 want = to_pll ? PLL_SEL_STAT_PLL : PLL_SEL_STAT_OSC;
+	unsigned long flags;
+	int i, ret;
+	u32 val;
+
+	spin_lock_irqsave(pll->lock, flags);
+	val = readl_relaxed(pll->sel_reg);
+	if (to_pll)
+		val |= BIT(pll->sel_shift);
+	else
+		val &= ~BIT(pll->sel_shift);
+	writel_relaxed(val, pll->sel_reg);
+	spin_unlock_irqrestore(pll->lock, flags);
+
+	/* Same early-boot constraints as samsung_pll_lock_wait() */
+	if (pll_early_timeout || timekeeping_suspended) {
+		for (i = PLL_TIMEOUT_LOOPS; i > 0; i--) {
+			val = readl_relaxed(pll->sel_stat_reg);
+			if (((val >> pll->sel_shift) & PLL_SEL_STAT_MASK) == want)
+				return 0;
+			cpu_relax();
+		}
+		ret = -ETIMEDOUT;
+	} else {
+		ret = readl_relaxed_poll_timeout_atomic(pll->sel_stat_reg, val,
+				((val >> pll->sel_shift) & PLL_SEL_STAT_MASK) == want,
+				0, PLL_TIMEOUT_US);
+	}
+
+	if (ret < 0)
+		pr_err("Could not switch %s to its %s\n",
+		       clk_hw_get_name(&pll->hw), to_pll ? "output" : "input");
+
+	return ret;
+}
+
+/*
+ * The consumers of a PLL with an output mux get the PLL input while the PLL
+ * is off, as the vendor composite PLL clocks do: the mux is switched to the
+ * input before the PLL stops and back once it is locked. On Exynos7420 the
+ * DISP block cannot be powered off while its PLL consumers have no clock.
+ */
+static int samsung_pll_sel_enable(struct clk_hw *hw)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+	int ret;
+
+	ret = samsung_pll3xxx_enable(hw);
+	if (ret)
+		return ret;
+
+	return samsung_pll_sel_switch(pll, true);
+}
+
+static void samsung_pll_sel_disable(struct clk_hw *hw)
+{
+	struct samsung_clk_pll *pll = to_clk_pll(hw);
+
+	/* Keep the PLL running if its consumers still use it. */
+	if (samsung_pll_sel_switch(pll, false))
+		return;
+
+	samsung_pll3xxx_disable(hw);
 }
 
 /*
@@ -904,6 +981,22 @@ static const struct clk_ops samsung_pll1460x_clk_min_ops = {
 	.is_enabled = samsung_pll3xxx_is_enabled,
 };
 
+static const struct clk_ops samsung_pll1460x_sel_clk_ops = {
+	.recalc_rate = samsung_pll46xx_recalc_rate,
+	.round_rate = samsung_pll_round_rate,
+	.set_rate = samsung_pll46xx_set_rate,
+	.enable = samsung_pll_sel_enable,
+	.disable = samsung_pll_sel_disable,
+	.is_enabled = samsung_pll3xxx_is_enabled,
+};
+
+static const struct clk_ops samsung_pll1460x_sel_clk_min_ops = {
+	.recalc_rate = samsung_pll46xx_recalc_rate,
+	.enable = samsung_pll_sel_enable,
+	.disable = samsung_pll_sel_disable,
+	.is_enabled = samsung_pll3xxx_is_enabled,
+};
+
 /*
  * PLL6552 Clock Type
  */
@@ -1412,7 +1505,11 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 	case pll_1460x_signed:
 		pll->enable_offs = __ffs(PLL46XX_ENABLE);
 		pll->lock_offs = __ffs(PLL46XX_LOCKED);
-		if (!pll->rate_table)
+		if (pll_clk->sel_offset)
+			init.ops = pll->rate_table ?
+				   &samsung_pll1460x_sel_clk_ops :
+				   &samsung_pll1460x_sel_clk_min_ops;
+		else if (!pll->rate_table)
 			init.ops = &samsung_pll1460x_clk_min_ops;
 		else
 			init.ops = &samsung_pll1460x_clk_ops;
@@ -1447,6 +1544,12 @@ static void __init _samsung_clk_register_pll(struct samsung_clk_provider *ctx,
 	pll->type = pll_clk->type;
 	pll->lock_reg = ctx->reg_base + pll_clk->lock_offset;
 	pll->con_reg = ctx->reg_base + pll_clk->con_offset;
+	if (pll_clk->sel_offset) {
+		pll->sel_reg = ctx->reg_base + pll_clk->sel_offset;
+		pll->sel_stat_reg = ctx->reg_base + pll_clk->sel_stat_offset;
+		pll->sel_shift = pll_clk->sel_shift;
+		pll->lock = &ctx->lock;
+	}
 
 	ret = clk_hw_register(ctx->dev, &pll->hw);
 	if (ret) {

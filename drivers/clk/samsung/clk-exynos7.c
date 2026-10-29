@@ -1756,6 +1756,7 @@ CLK_OF_DECLARE(exynos7_clk_g3d, "samsung,exynos7-clock-g3d",
 #define MUX_SEL_DISP3			0x020C
 #define MUX_SEL_DISP4			0x0210
 #define MUX_SEL_DISP5			0x0214
+#define MUX_STAT_DISP0			0x0400
 #define DIV_DISP			0x0600
 #define ENABLE_ACLK_DISP		0x0800
 #define ENABLE_ACLK_DISP_RO_SMMU	0x0804
@@ -1794,9 +1795,14 @@ static const struct samsung_fixed_rate_clock disp_fixed_clks[] = {
 PNAME(mout_mipidphy0_bit_p) = { "fin_pll", "phyclk_mipidphy0_bit" };
 PNAME(mout_mipidphy0_rx_p) = { "fin_pll", "phyclk_mipidphy0_rx" };
 
+/*
+ * MUX_SEL_DISP0[28] feeds the DISP_PLL consumers fin_pll or the PLL output
+ * (vendor clk-exynos7420.c disp_pll); it follows the PLL enable state.
+ */
 static const struct samsung_pll_clock disp_pll_clks[] = {
-	PLL(pll_1460x, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
-		DISP_PLL_LOCK, DISP_PLL_CON0, disp_pll_tbl),
+	PLL_SEL(pll_1460x, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
+		DISP_PLL_LOCK, DISP_PLL_CON0, disp_pll_tbl,
+		MUX_SEL_DISP0, MUX_STAT_DISP0, 28),
 };
 
 PNAME(mout_aclk_disp_400_user_p) = { "fin_pll", "top_aclk_disp_400" };
@@ -1943,8 +1949,9 @@ static const struct samsung_pll_rate_table m86_disp_pll_tbl[] = {
 	{},
 };
 static const struct samsung_pll_clock m86_disp_pll_clks[] = {
-	PLL(pll_1460x_signed, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
-		DISP_PLL_LOCK, DISP_PLL_CON0, m86_disp_pll_tbl),
+	PLL_SEL(pll_1460x_signed, CLK_FOUT_DISP_PLL, "disp_pll", "fin_pll",
+		DISP_PLL_LOCK, DISP_PLL_CON0, m86_disp_pll_tbl,
+		MUX_SEL_DISP0, MUX_STAT_DISP0, 28),
 };
 
 /* Same CMU as disp_cmu_info with the m86 DISP_PLL table. */
