@@ -837,5 +837,6 @@ static struct platform_driver modem_driver = {
 
 module_platform_driver(modem_driver);
 
+MODULE_SOFTDEP("pre: exynos-mipi-lli-mphy mipi-lli modem_spi_boot");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Samsung Modem Interface Driver");

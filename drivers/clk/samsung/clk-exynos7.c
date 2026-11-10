@@ -333,28 +333,6 @@ PNAME(mout_aclk_disp_400_p) = {"mout_top0_bus0_pll_user",
 	"ffac_top0_bus1_pll_div2", "ffac_top0_cc_pll_div2",
 	"ffac_top0_mfc_pll_div2"};
 
-/* ISP_PLL and CAM_PLL feed the CAM0/CAM1/ISP aclk muxes (MUX_SEL_TOP05/06). */
-static const struct samsung_pll_rate_table exynos7420_isp_pll_rates[] __initconst = {
-	PLL_35XX_RATE(24 * MHZ, 590000000U, 295, 6, 1),
-	PLL_35XX_RATE(24 * MHZ, 552000000U, 92, 2, 1),
-	PLL_35XX_RATE(24 * MHZ, 432000000U, 144, 2, 2),
-	{ /* sentinel */ }
-};
-
-static const struct samsung_pll_rate_table exynos7420_cam_pll_rates[] __initconst = {
-	PLL_35XX_RATE(24 * MHZ, 690000000U, 115, 2, 1),
-	PLL_35XX_RATE(24 * MHZ, 660000000U, 165, 3, 1),
-	PLL_35XX_RATE(24 * MHZ, 532000000U, 133, 3, 1),
-	{ /* sentinel */ }
-};
-
-static const struct samsung_pll_clock top0_pll_clks[] __initconst = {
-	PLL(pll_1451x, CLK_FOUT_ISP_PLL, "fout_isp_pll", "fin_pll",
-		ISP_PLL_LOCK, ISP_PLL_CON0, exynos7420_isp_pll_rates),
-	PLL(pll_1451x, CLK_FOUT_CAM_PLL, "fout_cam_pll", "fin_pll",
-		CAM_PLL_LOCK, CAM_PLL_CON0, exynos7420_cam_pll_rates),
-};
-
 PNAME(mout_top0_isp_pll_p)	= { "fin_pll", "fout_isp_pll" };
 PNAME(mout_top0_cam_pll_p)	= { "fin_pll", "fout_cam_pll" };
 PNAME(mout_top0_group2) = {"mout_top0_bus0_pll_half",
@@ -471,10 +449,10 @@ static const struct samsung_mux_clock top0_mux_clks[] __initconst = {
 		MUX_SEL_TOP06, 20, 3),
 	MUX(0, "mout_aclk_cam0_nocp_133", mout_top0_group2,
 		MUX_SEL_TOP06, 16, 3),
-	MUX(0, "mout_sclk_isp_sensor0", mout_sclk_isp_sensor_p,
-		MUX_SEL_TOP0_CAM11, 16, 2),
-	MUX(0, "mout_sclk_isp_sensor1", mout_sclk_isp_sensor_p,
-		MUX_SEL_TOP0_CAM11, 8, 2),
+	MUX(CLK_MOUT_SCLK_ISP_SENSOR0, "mout_sclk_isp_sensor0",
+		mout_sclk_isp_sensor_p, MUX_SEL_TOP0_CAM11, 16, 2),
+	MUX(CLK_MOUT_SCLK_ISP_SENSOR1, "mout_sclk_isp_sensor1",
+		mout_sclk_isp_sensor_p, MUX_SEL_TOP0_CAM11, 8, 2),
 };
 
 static const struct samsung_div_clock top0_div_clks[] __initconst = {
@@ -588,17 +566,27 @@ static const struct samsung_gate_clock top0_gate_clks[] __initconst = {
 		"dout_sclk_decon_vclk", ENABLE_SCLK_TOP0_DISP, 20, 0, 0),
 
 	GATE(CLK_ACLK_CAM0_CSIS0_690, "aclk_cam0_csis0_690",
-		"dout_aclk_cam0_csis0_690", ENABLE_ACLK_TOP05, 28, 0, 0),
+		"dout_aclk_cam0_csis0_690", ENABLE_ACLK_TOP05, 28,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CAM0_BNSA_690, "aclk_cam0_bnsa_690",
-		"dout_aclk_cam0_bnsa_690", ENABLE_ACLK_TOP05, 24, 0, 0),
+		"dout_aclk_cam0_bnsa_690", ENABLE_ACLK_TOP05, 24,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CAM0_BNSB_690, "aclk_cam0_bnsb_690",
-		"dout_aclk_cam0_bnsb_690", ENABLE_ACLK_TOP05, 20, 0, 0),
+		"dout_aclk_cam0_bnsb_690", ENABLE_ACLK_TOP05, 20,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CAM0_CSIS1_174, "aclk_cam0_csis1_174",
-		"dout_aclk_cam0_csis1_174", ENABLE_ACLK_TOP05, 12, 0, 0),
+		"dout_aclk_cam0_csis1_174", ENABLE_ACLK_TOP05, 12,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_cam0_3aa0_690", "dout_aclk_cam0_trex_532",
+		ENABLE_ACLK_TOP06, 28, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_cam0_3aa1_468", "dout_aclk_cam0_trex_532",
+		ENABLE_ACLK_TOP06, 24, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CAM0_TREX_532, "aclk_cam0_trex_532",
-		"dout_aclk_cam0_trex_532", ENABLE_ACLK_TOP06, 20, 0, 0),
+		"dout_aclk_cam0_trex_532", ENABLE_ACLK_TOP06, 20,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CAM0_NOCP_133, "aclk_cam0_nocp_133",
-		"dout_aclk_cam0_nocp_133", ENABLE_ACLK_TOP06, 16, 0, 0),
+		"dout_aclk_cam0_nocp_133", ENABLE_ACLK_TOP06, 16,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_SCLK_ISP_SENSOR0, "sclk_isp_sensor0", "dout_sclk_isp_sensor0",
 		ENABLE_SCLK_TOP0_CAM11, 16, CLK_SET_RATE_PARENT, 0),
 	GATE(CLK_SCLK_ISP_SENSOR1, "sclk_isp_sensor1", "dout_sclk_isp_sensor1",
@@ -636,10 +624,10 @@ static const struct samsung_pll_rate_table cam_pll_24mhz_tbl[] __initconst = {
 };
 
 static const struct samsung_pll_clock top0_pll_clks[] __initconst = {
-	PLL(pll_1451x, 0, "fout_isp_pll", "fin_pll", ISP_PLL_LOCK,
-		ISP_PLL_CON0, isp_pll_24mhz_tbl),
-	PLL(pll_1451x, 0, "fout_cam_pll", "fin_pll", CAM_PLL_LOCK,
-		CAM_PLL_CON0, cam_pll_24mhz_tbl),
+	PLL(pll_1451x, CLK_FOUT_ISP_PLL, "fout_isp_pll", "fin_pll",
+		ISP_PLL_LOCK, ISP_PLL_CON0, isp_pll_24mhz_tbl),
+	PLL(pll_1451x, CLK_FOUT_CAM_PLL, "fout_cam_pll", "fin_pll",
+		CAM_PLL_LOCK, CAM_PLL_CON0, cam_pll_24mhz_tbl),
 };
 
 static const struct samsung_cmu_info top0_cmu_info __initconst = {
@@ -1759,55 +1747,81 @@ static const struct samsung_div_clock cam0_div_clks[] = {
 
 static const struct samsung_gate_clock cam0_gate_clks[] = {
 	GATE(CLK_ACLK_FIMC_BNS_A, "aclk_fimc_bns_a", "mout_aclk_cam0_bnsa_user",
-		ENABLE_ACLK_CAM00, 2, 0, 0),
+		ENABLE_ACLK_CAM00, 2, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_FIMC_BNS_B, "aclk_fimc_bns_b", "mout_aclk_cam0_bnsb_user",
-		ENABLE_ACLK_CAM00, 3, 0, 0),
+		ENABLE_ACLK_CAM00, 3, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CSIS0, "aclk_csis0_i_wrap", "mout_aclk_cam0_csis0_user",
-		ENABLE_ACLK_CAM00, 16, 0, 0),
+		ENABLE_ACLK_CAM00, 16, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_CSIS1, "aclk_csis1_i_wrap", "mout_aclk_cam0_csis1_user",
-		ENABLE_ACLK_CAM00, 17, 0, 0),
+		ENABLE_ACLK_CAM00, 17, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_TREX_A_5X1, "aclk_trex_a_5x1", "mout_aclk_cam0_trex_user",
-		ENABLE_ACLK_CAM00, 20, 0, 0),
+		ENABLE_ACLK_CAM00, 20, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_TREX_BNS_A, "aclk_trex_a_5x1_bns_a",
-		"mout_aclk_cam0_bnsa_user", ENABLE_ACLK_CAM00, 23, 0, 0),
+		"mout_aclk_cam0_bnsa_user", ENABLE_ACLK_CAM00, 23,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_TREX_BNS_B, "aclk_trex_a_5x1_bns_b",
-		"mout_aclk_cam0_bnsb_user", ENABLE_ACLK_CAM00, 24, 0, 0),
+		"mout_aclk_cam0_bnsb_user", ENABLE_ACLK_CAM00, 24,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	/* USERMUX: MUX_SEL_CAM01[0] selects aclk_cam0_nocp_133 while enabled. */
 	GATE(0, "mout_aclk_cam0_nocp_user", "aclk_cam0_nocp_133", MUX_SEL_CAM01,
-		0, 0, 0),
+		0, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	/* CAM0 NoC-P: register path to the CSIS/BNS SFRs. */
 	GATE(0, "aclk_200_cam0_noc_p_cam0", "mout_aclk_cam0_nocp_user",
-		ENABLE_ACLK_CAM01, 28, CLK_IS_CRITICAL, 0),
+		ENABLE_ACLK_CAM01, 28, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_axi2ahb_is0p", "mout_aclk_cam0_nocp_user",
+		ENABLE_ACLK_CAM01, 8, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_axi2apb_bridge_is0p", "mout_aclk_cam0_nocp_user",
+		ENABLE_ACLK_CAM01, 9, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0, "aclk_axi_lh_async_si_top_cam0",
-		"mout_aclk_cam0_trex_user", ENABLE_ACLK_CAM01, 10, 0, 0),
+		"mout_aclk_cam0_trex_user", ENABLE_ACLK_CAM01, 10,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "hclk_ahbsyncdn_cam0", "mout_aclk_cam0_nocp_user",
+		ENABLE_ACLK_CAM01, 12, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_async_mi_cam0", "mout_aclk_cam0_nocp_user",
+		ENABLE_ACLK_CAM01, 16, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_async_mi_is0x", "mout_aclk_cam0_trex_user",
+		ENABLE_ACLK_CAM01, 17, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_async_si_is0x", "mout_aclk_cam0_trex_user",
+		ENABLE_ACLK_CAM01, 18, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_xiu_is0x", "mout_aclk_cam0_trex_user",
+		ENABLE_ACLK_CAM01, 19, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_CCLK_ASYNCAPB_SOCP_BNS_A, "cclk_asyncapb_socp_fimc_bns_a",
-		"dout_pclk_cam0_bnsa_345", ENABLE_ACLK_CAM01, 22, 0, 0),
+		"dout_pclk_cam0_bnsa_345", ENABLE_ACLK_CAM01, 22,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_CCLK_ASYNCAPB_SOCP_BNS_B, "cclk_asyncapb_socp_fimc_bns_b",
-		"dout_pclk_cam0_bnsb_345", ENABLE_ACLK_CAM01, 23, 0, 0),
+		"dout_pclk_cam0_bnsb_345", ENABLE_ACLK_CAM01, 23,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_FIMC_BNS_A, "pclk_fimc_bns_a", "dout_pclk_cam0_bnsa_345",
-		ENABLE_PCLK_CAM00, 2, 0, 0),
+		ENABLE_PCLK_CAM00, 2, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_FIMC_BNS_B, "pclk_fimc_bns_b", "dout_pclk_cam0_bnsb_345",
-		ENABLE_PCLK_CAM00, 3, 0, 0),
+		ENABLE_PCLK_CAM00, 3, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_CSIS0, "pclk_csis0", "dout_pclk_cam0_trex_266",
-		ENABLE_PCLK_CAM00, 16, 0, 0),
+		ENABLE_PCLK_CAM00, 16, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_CSIS1, "pclk_csis1", "dout_pclk_cam0_trex_266",
-		ENABLE_PCLK_CAM00, 17, 0, 0),
+		ENABLE_PCLK_CAM00, 17, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_TREX_A_5X1, "pclk_trex_a_5x1", "dout_pclk_cam0_trex_133",
-		ENABLE_PCLK_CAM00, 20, 0, 0),
+		ENABLE_PCLK_CAM00, 20, CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_ASYNCAPB_SOCP_BNS_A, "pclk_asyncapb_socp_fimc_bns_a",
-		"dout_pclk_cam0_trex_266", ENABLE_PCLK_CAM01, 22, 0, 0),
+		"dout_pclk_cam0_trex_266", ENABLE_PCLK_CAM01, 22,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_ASYNCAPB_SOCP_BNS_B, "pclk_asyncapb_socp_fimc_bns_b",
-		"dout_pclk_cam0_trex_266", ENABLE_PCLK_CAM01, 23, 0, 0),
+		"dout_pclk_cam0_trex_266", ENABLE_PCLK_CAM01, 23,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_RXBYTECLKHS0_S2A, "phyclk_rxbyteclkhs0_s2a_user",
-		"mout_phyclk_rxbyteclkhs0_s2a_user", ENABLE_SCLK_CAM0, 0, 0, 0),
+		"mout_phyclk_rxbyteclkhs0_s2a_user", ENABLE_SCLK_CAM0, 0,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_RXBYTECLKHS0_S4, "phyclk_rxbyteclkhs0_s4_user",
-		"mout_phyclk_rxbyteclkhs0_s4_user", ENABLE_SCLK_CAM0, 4, 0, 0),
+		"mout_phyclk_rxbyteclkhs0_s4_user", ENABLE_SCLK_CAM0, 4,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_RXBYTECLKHS1_S4, "phyclk_rxbyteclkhs1_s4_user",
-		"mout_phyclk_rxbyteclkhs1_s4_user", ENABLE_SCLK_CAM0, 5, 0, 0),
+		"mout_phyclk_rxbyteclkhs1_s4_user", ENABLE_SCLK_CAM0, 5,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_RXBYTECLKHS2_S4, "phyclk_rxbyteclkhs2_s4_user",
-		"mout_phyclk_rxbyteclkhs2_s4_user", ENABLE_SCLK_CAM0, 6, 0, 0),
+		"mout_phyclk_rxbyteclkhs2_s4_user", ENABLE_SCLK_CAM0, 6,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PHYCLK_RXBYTECLKHS3_S4, "phyclk_rxbyteclkhs3_s4_user",
-		"mout_phyclk_rxbyteclkhs3_s4_user", ENABLE_SCLK_CAM0, 7, 0, 0),
+		"mout_phyclk_rxbyteclkhs3_s4_user", ENABLE_SCLK_CAM0, 7,
+		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
 };
 
 static const struct samsung_cmu_info cam0_cmu_info = {
@@ -1824,62 +1838,8 @@ static const struct samsung_cmu_info cam0_cmu_info = {
 	.nr_clk_regs		= ARRAY_SIZE(cam0_clk_regs),
 	/* CMU_CAM0 SFRs sit behind the CAM0 NoC peripheral (APB) clock. */
 	.clk_name		= "aclk_cam0_nocp_133",
+	.no_pm_smc		= true,
 };
-
-/*
- * M86 bring-up guard for the first CMU_CAM0 SFR access (boot hung here with
- * the CAM0 NoC clock gated). Arm WDT 0x101d0000 for ~32 s before probing;
- * s3c2410_wdt stops it at device_initcall. If PMU RST_STAT bit 23 shows the
- * previous reset came from that WDT, skip CMU_CAM0 so the board boots.
- */
-#define M86_WDT_BASE		0x101d0000
-#define M86_PMU_RST_STAT	0x0404
-#define M86_PMU_DISABLE_WDT	0x0408
-#define M86_PMU_MASK_WDT_RESET	0x040c
-#define M86_PMU_WDT_BIT		BIT(23)
-
-static int __init exynos7_cam0_boot_guard(struct device *dev)
-{
-	struct of_phandle_args spec = { .args_count = 1, .args = { PCLK_WDT } };
-	unsigned long count;
-	void __iomem *wdt;
-	struct regmap *pmu;
-	struct clk *pclk;
-	u32 rst_stat;
-
-	pmu = syscon_regmap_lookup_by_compatible("samsung,exynos7-pmu");
-	if (IS_ERR(pmu))
-		return PTR_ERR(pmu);
-	regmap_read(pmu, M86_PMU_RST_STAT, &rst_stat);
-	if (rst_stat & M86_PMU_WDT_BIT) {
-		dev_err(dev, "previous boot was reset by WDT (RST_STAT %#x), skipping CMU_CAM0\n",
-			rst_stat);
-		return -ENODEV;
-	}
-
-	spec.np = of_find_compatible_node(NULL, NULL, "samsung,exynos7-clock-peris");
-	pclk = of_clk_get_from_provider(&spec);
-	of_node_put(spec.np);
-	if (IS_ERR(pclk))
-		return PTR_ERR(pclk);
-	clk_prepare_enable(pclk);
-	wdt = ioremap(M86_WDT_BASE, 0x100);
-	if (!wdt)
-		return -ENOMEM;
-
-	count = min(32 * (clk_get_rate(pclk) / (256 * 128)), 0xffffUL);
-	writel(0, wdt + 0x00);
-	writel(count, wdt + 0x04);
-	writel(count, wdt + 0x08);
-	regmap_update_bits(pmu, M86_PMU_DISABLE_WDT, M86_PMU_WDT_BIT, 0);
-	regmap_update_bits(pmu, M86_PMU_MASK_WDT_RESET, M86_PMU_WDT_BIT, 0);
-	/* prescaler 255, divider 128, enable, reset enable */
-	writel(0xff << 8 | 3 << 3 | BIT(5) | BIT(0), wdt + 0x00);
-	iounmap(wdt);
-	dev_info(dev, "WDT armed (count %lu) for CMU_CAM0 probe, RST_STAT %#x\n",
-		 count, rst_stat);
-	return 0;
-}
 
 /* Register Offset definitions for CMU_AUD (0x114C0000) */
 #define	MUX_SEL_AUD			0x0200
@@ -2435,15 +2395,6 @@ static const struct samsung_cmu_info vpp_cmu_info = {
 
 static int __init exynos7_cmu_probe(struct platform_device *pdev)
 {
-	int ret;
-
-	if (of_device_is_compatible(pdev->dev.of_node,
-				    "samsung,exynos7-clock-cam0")) {
-		ret = exynos7_cam0_boot_guard(&pdev->dev);
-		if (ret)
-			return ret;
-	}
-
 	return exynos_arm64_register_cmu_pm(pdev, false);
 }
 
@@ -2506,6 +2457,10 @@ static const struct samsung_gate_clock bus0_gate_clks[] __initconst = {
 	 */
 	GATE(0, "aclk_noc_bus0_rt", "usermux_aclk_bus0_532",
 		ENABLE_ACLK_BUS0, 0, CLK_IS_CRITICAL, 0),
+	GATE(0, "aclk_lh_cam0", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 1, CLK_IS_CRITICAL, 0),
+	GATE(0, "aclk_lh_cam1", "usermux_aclk_bus0_532",
+		ENABLE_ACLK_BUS0, 2, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk_noc_bus0_nrt", "usermux_aclk_bus0_532",
 		ENABLE_ACLK_BUS0, 7, CLK_IS_CRITICAL, 0),
 	/*

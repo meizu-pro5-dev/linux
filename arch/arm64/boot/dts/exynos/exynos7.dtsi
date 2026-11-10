@@ -659,6 +659,13 @@
 			label = "AUD";
 		};
 
+		pd_cam1: power-domain@105c4060 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4060 0x20>;
+			#power-domain-cells = <0>;
+			label = "CAM1";
+		};
+
 		pd_cam0: power-domain@105c4040 {
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4040 0x20>;
@@ -667,11 +674,11 @@
 			label = "CAM0";
 		};
 
-		pd_cam1: power-domain@105c4060 {
+		pd_vpp: power-domain@105c41e0 {
 			compatible = "samsung,exynos7420-pd";
-			reg = <0x105c4060 0x20>;
+			reg = <0x105c41e0 0x20>;
 			#power-domain-cells = <0>;
-			label = "CAM1";
+			label = "VPP";
 		};
 
 		pd_disp: power-domain@105c4080 {
@@ -692,20 +699,20 @@
 			label = "G3D";
 		};
 
-		pd_isp0: power-domain@105c4140 {
-			compatible = "samsung,exynos7420-pd";
-			reg = <0x105c4140 0x20>;
-			#power-domain-cells = <0>;
-			power-domains = <&pd_isp1>, <&pd_cam0>, <&pd_cam1>;
-			label = "ISP0";
-		};
-
 		pd_isp1: power-domain@105c4180 {
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4180 0x20>;
 			#power-domain-cells = <0>;
 			power-domains = <&pd_cam1>;
 			label = "ISP1";
+		};
+
+		pd_isp0: power-domain@105c4140 {
+			compatible = "samsung,exynos7420-pd";
+			reg = <0x105c4140 0x20>;
+			#power-domain-cells = <0>;
+			power-domains = <&pd_isp1>, <&pd_cam0>, <&pd_cam1>;
+			label = "ISP0";
 		};
 
 		pd_mfc: power-domain@105c41a0 {
@@ -720,13 +727,6 @@
 			reg = <0x105c41c0 0x20>;
 			#power-domain-cells = <0>;
 			label = "MSCL";
-		};
-
-		pd_vpp: power-domain@105c41e0 {
-			compatible = "samsung,exynos7420-pd";
-			reg = <0x105c41e0 0x20>;
-			#power-domain-cells = <0>;
-			label = "VPP";
 		};
 
 		rtc: rtc@10590000 {
@@ -889,9 +889,35 @@
 			status = "disabled";
 		};
 
-		fimc_bns_a: fimc-bns@14000000 {
-			compatible = "samsung,exynos7420-fimc-bns";
+		mipi_csis_0: csis@14000000 {
+			compatible = "samsung,exynos7420-mipi-csis";
 			reg = <0x14000000 0x1000>;
+			interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_PCLK_CSIS0>,
+				 <&clock_cam0 CLK_ACLK_CSIS0>,
+				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
+			clock-names = "pclk", "wrap", "phy";
+			clock-frequency = <532000000>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		mipi_csis_1: csis@14010000 {
+			compatible = "samsung,exynos7420-mipi-csis";
+			reg = <0x14010000 0x1000>;
+			interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_PCLK_CSIS1>,
+				 <&clock_cam0 CLK_ACLK_CSIS1>,
+				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
+			clock-names = "pclk", "wrap", "phy";
+			clock-frequency = <266000000>;
+			power-domains = <&pd_cam0>;
+			status = "disabled";
+		};
+
+		fimc_bns_a: fimc-bns@14020000 {
+			compatible = "samsung,exynos7420-fimc-bns";
+			reg = <0x14020000 0x1000>;
 			interrupts = <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clock_cam0 CLK_ACLK_FIMC_BNS_A>,
 				 <&clock_cam0 CLK_PCLK_FIMC_BNS_A>,
@@ -905,9 +931,9 @@
 			status = "disabled";
 		};
 
-		fimc_bns_b: fimc-bns@14010000 {
+		fimc_bns_b: fimc-bns@14030000 {
 			compatible = "samsung,exynos7420-fimc-bns";
-			reg = <0x14010000 0x1000>;
+			reg = <0x14030000 0x1000>;
 			interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clock_cam0 CLK_ACLK_FIMC_BNS_B>,
 				 <&clock_cam0 CLK_PCLK_FIMC_BNS_B>,
@@ -917,32 +943,6 @@
 				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
-			power-domains = <&pd_cam0>;
-			status = "disabled";
-		};
-
-		mipi_csis_0: csis@14020000 {
-			compatible = "samsung,exynos7420-mipi-csis";
-			reg = <0x14020000 0x1000>;
-			interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clock_cam0 CLK_PCLK_CSIS0>,
-				 <&clock_cam0 CLK_ACLK_CSIS0>,
-				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S4>;
-			clock-names = "pclk", "wrap", "phy";
-			clock-frequency = <532000000>;
-			power-domains = <&pd_cam0>;
-			status = "disabled";
-		};
-
-		mipi_csis_1: csis@14030000 {
-			compatible = "samsung,exynos7420-mipi-csis";
-			reg = <0x14030000 0x1000>;
-			interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clock_cam0 CLK_PCLK_CSIS1>,
-				 <&clock_cam0 CLK_ACLK_CSIS1>,
-				 <&clock_cam0 CLK_PHYCLK_RXBYTECLKHS0_S2A>;
-			clock-names = "pclk", "wrap", "phy";
-			clock-frequency = <266000000>;
 			power-domains = <&pd_cam0>;
 			status = "disabled";
 		};

@@ -1036,6 +1036,11 @@
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
 			};
+			ldo24_reg: LDO24 {
+				regulator-name = "avdd28_drv";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
 			ldo26_reg: LDO26 {
 				regulator-name = "vdd11_bcam";
 				regulator-min-microvolt = <1150000>;
@@ -1752,6 +1757,15 @@
  * 3.10 fimc-is-device-imx230.c/ov5670.c power tables.
  */
 / {
+	bcam_vcm: regulator-dvdd20-vcm {
+		compatible = "regulator-fixed";
+		regulator-name = "dvdd20_vcm";
+		regulator-min-microvolt = <2000000>;
+		regulator-max-microvolt = <2000000>;
+		gpio = <&gpc3 1 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
 	bcam_vana: regulator-vcc25-bcam {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc25_bcam";
@@ -1797,9 +1811,13 @@
 			vana-supply = <&bcam_vana>;
 			vdig-supply = <&ldo26_reg>;
 			vif-supply = <&ldo15_reg>;
+			vcm-supply = <&bcam_vcm>;
+			vdrv-supply = <&ldo24_reg>;
 			reset-gpios = <&gpc1 1 GPIO_ACTIVE_LOW>;
+			orientation = <1>;
+			rotation = <0>;
 			pinctrl-names = "default";
-			pinctrl-0 = <&bcam_mclk_pin &bcam_ctrl_pins>;
+			pinctrl-0 = <&bcam_mclk_pin &bcam_ctrl_pins &bcam_xbootldo_pin>;
 
 			port {
 				imx230_out: endpoint {
@@ -1822,7 +1840,11 @@
 		avdd-supply = <&fcam_vana>;
 		dvdd-supply = <&fcam_vdig>;
 		dovdd-supply = <&ldo20_reg>;
+		vcm-supply = <&bcam_vcm>;
+		vdrv-supply = <&ldo24_reg>;
 		reset-gpios = <&gpc0 7 GPIO_ACTIVE_LOW>;
+		orientation = <0>;
+		rotation = <0>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&fcam_mclk_pin &fcam_ctrl_pins>;
 
@@ -1848,44 +1870,59 @@
 		samsung,pins = "gpd7-0";
 		samsung,pin-function = <2>;	/* CIS_CLK0 */
 		samsung,pin-pud = <0>;
-		samsung,pin-drv = <0>;
+		samsung,pin-drv = <3>;
 	};
 
 	fcam_mclk_pin: fcam-mclk-pin {
 		samsung,pins = "gpd7-1";
 		samsung,pin-function = <2>;	/* CIS_CLK1 */
 		samsung,pin-pud = <0>;
-		samsung,pin-drv = <0>;
+		samsung,pin-drv = <3>;
 	};
 
 	bcam_ctrl_pins: bcam-ctrl-pins {
-		samsung,pins = "gpc1-1";
+		samsung,pins = "gpc1-1", "gpc0-5", "gpc3-1";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
 		samsung,pin-drv = <0>;
 	};
 
 	fcam_ctrl_pins: fcam-ctrl-pins {
-		samsung,pins = "gpc0-7";
+		samsung,pins = "gpc0-7", "gpc0-6", "gpc3-5";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
 		samsung,pin-drv = <0>;
 	};
 };
 
+&pinctrl_bus1 {
+	bcam_xbootldo_pin: bcam-xbootldo-pin {
+		samsung,pins = "gpv6-2";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+		samsung,pin-val = <1>;
+	};
+};
+
 /*
  * Feed the CAM0 aclks from the running CC_PLL/2 (532 MHz, as CAM0 TREX)
- * instead of ISP_PLL/CAM_PLL, which are disabled at boot.
+ * instead of ISP_PLL/CAM_PLL, which are disabled at boot, and ensure
+ * CIS_CLK0/CIS_CLK1 muxes select the 24 MHz fin_pll parent (selector 3).
  */
 &clock_top0 {
 	assigned-clocks = <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS0_690>,
 			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSA_690>,
 			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSB_690>,
-			  <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS1_174>;
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS1_174>,
+			  <&clock_top0 CLK_MOUT_SCLK_ISP_SENSOR0>,
+			  <&clock_top0 CLK_MOUT_SCLK_ISP_SENSOR1>;
 	assigned-clock-parents = <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
 				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
 				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
-				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>;
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&fin_pll>,
+				 <&fin_pll>;
 };
 
 &clock_cam0 {
@@ -1992,29 +2029,8 @@
 	};
 };
 
-&pinctrl_bus0 {
-	/* SPI1 CLK/MISO/MOSI only: nCS (gpd6-3) is a GPIO, see &spi_1. */
-	m86_spi1_bus: m86-spi1-bus-pins {
-		samsung,pins = "gpd6-2", "gpd6-4", "gpd6-5";
-		samsung,pin-function = <2>;
-		samsung,pin-pud = <3>;
-	};
-	m86_spi1_cs: m86-spi1-cs-pins {
-		samsung,pins = "gpd6-3";
-		samsung,pin-function = <1>;
-		samsung,pin-pud = <3>;
-	};
-};
-
 &spi_1 {
 	status = "okay";
-	/*
-	 * PIO transfers are split into FIFO-sized packets and CS_AUTO deasserts
-	 * nCS between them; the CP BootROM needs nCS held across the 0x20e4-byte
-	 * BOOT image, so drive it as a GPIO as on &spi_4.
-	 */
-	pinctrl-0 = <&m86_spi1_bus &m86_spi1_cs>;
-	cs-gpios = <&gpd6 3 GPIO_ACTIVE_LOW>;
 
 	modem-boot@0 {
 		compatible = "spi_boot_link";

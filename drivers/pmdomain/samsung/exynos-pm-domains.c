@@ -173,6 +173,17 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam0[] = {
 	{ 0x105c1548, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
 	{ 0x105c1588, BIT(0) },
 };
+static struct exynos7420_sfr exynos7420_save_cam0[] = {
+	{ .pa = 0x144d0600 },	/* DIV_CAM0 */
+	{ .pa = 0x144d0200 },	/* MUX_SEL_CAM00 */
+	{ .pa = 0x144d0204 },	/* MUX_SEL_CAM01 */
+	{ .pa = 0x144d0208 },	/* MUX_SEL_CAM02 */
+	{ .pa = 0x144d0800 },	/* ENABLE_ACLK_CAM00 */
+	{ .pa = 0x144d0804 },	/* ENABLE_ACLK_CAM01 */
+	{ .pa = 0x144d0900 },	/* ENABLE_PCLK_CAM00 */
+	{ .pa = 0x144d0904 },	/* ENABLE_PCLK_CAM01 */
+	{ .pa = 0x144d0a00 },	/* ENABLE_SCLK_CAM0 */
+};
 
 static const struct exynos7420_reg_bits exynos7420_top_clks_cam1[] = {
 	{ 0x105d081c, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
@@ -186,6 +197,9 @@ static const struct exynos7420_reg_bits exynos7420_local_clks_cam1[] = {
 	{ 0x141f0800, BIT(2) | BIT(1) | BIT(0) },
 	{ 0x141f0900, BIT(2) | BIT(1) | BIT(0) },
 };
+static const struct exynos7420_reg_bits exynos7420_async_clks_cam1[] = {
+	{ 0x144d0804, BIT(16) },
+};
 static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] = {
 	{ 0x105c144c, BIT(0) },
 	{ 0x105c148c, BIT(0) },
@@ -193,6 +207,20 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam1[] = {
 	{ 0x105c150c, BIT(0) },
 	{ 0x105c154c, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
 	{ 0x105c158c, BIT(0) },
+};
+static struct exynos7420_sfr exynos7420_save_cam1[] = {
+	{ .pa = 0x145d0600 },	/* DIV_CAM1 */
+	{ .pa = 0x145d0200 },	/* MUX_SEL_CAM10 */
+	{ .pa = 0x145d0204 },	/* MUX_SEL_CAM11 */
+	{ .pa = 0x145d0800 },	/* ENABLE_ACLK_CAM10 */
+	{ .pa = 0x145d0804 },	/* ENABLE_ACLK_CAM11 */
+	{ .pa = 0x145d0808 },	/* ENABLE_ACLK_CAM12 */
+	{ .pa = 0x145d080c },	/* ENABLE_ACLK_CAM13 */
+	{ .pa = 0x145d0900 },	/* ENABLE_PCLK_CAM10 */
+	{ .pa = 0x145d0904 },	/* ENABLE_PCLK_CAM11 */
+	{ .pa = 0x145d0908 },	/* ENABLE_PCLK_CAM12 */
+	{ .pa = 0x145d0a00 },	/* ENABLE_SCLK_CAM10 */
+	{ .pa = 0x145d0a08 },	/* ENABLE_SCLK_CAM12 */
 };
 
 /* Vendor pm_domains-exynos7420-cal.h:315-389, regs-pmu-exynos7420.h. */
@@ -302,8 +330,11 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam0),
 		.async_clks = exynos7420_async_clks_cam0,
 		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_cam0),
+		.async_before_on = true,
 		.sys_pwr_regs = exynos7420_sys_pwr_cam0,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam0),
+		.save_regs = exynos7420_save_cam0,
+		.num_save_regs = ARRAY_SIZE(exynos7420_save_cam0),
 	},
 	{
 		.name = "pd-cam1",
@@ -314,8 +345,13 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam1),
 		.local_clks = exynos7420_local_clks_cam1,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam1),
+		.async_clks = exynos7420_async_clks_cam1,
+		.num_async_clks = ARRAY_SIZE(exynos7420_async_clks_cam1),
+		.async_before_on = true,
 		.sys_pwr_regs = exynos7420_sys_pwr_cam1,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam1),
+		.save_regs = exynos7420_save_cam1,
+		.num_save_regs = ARRAY_SIZE(exynos7420_save_cam1),
 	},
 	{
 		.name = "pd-vpp",

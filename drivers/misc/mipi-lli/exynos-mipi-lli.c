@@ -1176,6 +1176,7 @@ static struct platform_driver exynos_mipi_lli_driver = {
 
 module_platform_driver(exynos_mipi_lli_driver);
 
+MODULE_SOFTDEP("pre: exynos-mipi-lli-mphy");
 MODULE_DESCRIPTION("Exynos MIPI LLI driver");
 MODULE_AUTHOR("Yulgon Kim <yulgon.kim@samsung.com>");
 MODULE_LICENSE("GPL");

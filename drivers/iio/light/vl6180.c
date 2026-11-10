@@ -93,7 +93,11 @@ struct vl6180_data {
 	struct gpio_desc *enable_gpio;
 	bool disable_als;
 	bool powered;
+	bool nvm_read;
+	s8 part2part_offset;
 };
+
+static struct vl6180_data *vl6180_default_dev;
 
 enum { VL6180_ALS, VL6180_RANGE, VL6180_PROX };
 
@@ -302,6 +306,21 @@ static int vl6180_measure(struct vl6180_data *data, int addr)
 		goto fail;
 	value = ret;
 
+	if (addr == VL6180_RANGE) {
+		int status = vl6180_read_byte(client, VL6180_RANGE_STATUS);
+
+		/*
+		 * With 3x extended range scaling (RANGE_SCALER = 84), raw range
+		 * is in 3 mm units (0..600 mm). If upper nibble of RANGE_STATUS
+		 * is non-zero (no target / max convergence / overflow), report
+		 * 765 mm (255 * 3) to indicate infinity/out-of-range.
+		 */
+		if (status >= 0 && (status >> 4) != 0)
+			value = 255 * 3;
+		else
+			value *= 3;
+	}
+
 	/* Clear the interrupt flag after data read */
 	ret = vl6180_write_byte(client, VL6180_INTR_CLEAR,
 		VL6180_CLEAR_ERROR | VL6180_CLEAR_ALS | VL6180_CLEAR_RANGE);
@@ -316,6 +335,69 @@ fail:
 
 	return ret;
 }
+
+int vl6180_read_range_mm(int *range_mm, int *prox_raw, int *range_err)
+{
+	struct vl6180_data *data = READ_ONCE(vl6180_default_dev);
+	struct i2c_client *client;
+	int tries = 15, ret, status, raw, rate;
+
+	if (!data)
+		return -ENODEV;
+
+	client = data->client;
+	mutex_lock(&data->lock);
+
+	ret = vl6180_set_power(data, true);
+	if (ret < 0) {
+		mutex_unlock(&data->lock);
+		return ret;
+	}
+
+	ret = vl6180_write_byte(client, VL6180_RANGE_START, VL6180_STARTSTOP);
+	if (ret < 0)
+		goto out;
+
+	while (tries--) {
+		ret = vl6180_read_byte(client, VL6180_INTR_STATUS);
+		if (ret < 0)
+			goto out;
+		if (ret & VL6180_RANGE_READY)
+			break;
+		usleep_range(4000, 6000);
+	}
+
+	if (tries < 0) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	status = vl6180_read_byte(client, VL6180_RANGE_STATUS);
+	raw = vl6180_read_byte(client, VL6180_RANGE_VALUE);
+	rate = vl6180_read_word(client, VL6180_RANGE_RATE);
+	vl6180_write_byte(client, VL6180_INTR_CLEAR,
+			  VL6180_CLEAR_ERROR | VL6180_CLEAR_ALS | VL6180_CLEAR_RANGE);
+
+	if (status < 0 || raw < 0 || rate < 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (range_err)
+		*range_err = (status >> 4) & 0x0f;
+	if (prox_raw)
+		*prox_raw = rate;
+	if (range_mm)
+		*range_mm = ((status >> 4) != 0 || raw >= 255) ? 765 : (raw * 3);
+
+	ret = 0;
+
+out:
+	vl6180_set_power(data, false);
+	mutex_unlock(&data->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vl6180_read_range_mm);
 
 static const struct iio_chan_spec vl6180_channels[] = {
 	{
@@ -531,10 +613,60 @@ static const struct iio_info vl6180_range_info = {
 	.write_raw = vl6180_write_raw,
 };
 
+static const struct {
+	u16 reg;
+	u8 val;
+} vl6180_er02_init_regs[] = {
+	/* Mandatory ST AN4545 / ER02 private register initialization block */
+	{ 0x0207, 0x01 },
+	{ 0x0208, 0x01 },
+	{ 0x0096, 0x00 },
+	{ 0x0097, 0x54 }, /* RANGE_SCALER = 84 (3x extended range: 0..600 mm) */
+	{ 0x00e3, 0x00 },
+	{ 0x00e4, 0x04 },
+	{ 0x00e5, 0x02 },
+	{ 0x00e6, 0x01 },
+	{ 0x00e7, 0x03 },
+	{ 0x00f5, 0x02 },
+	{ 0x00d9, 0x05 },
+	{ 0x00db, 0xce },
+	{ 0x00dc, 0x03 },
+	{ 0x00dd, 0xf8 },
+	{ 0x009f, 0x00 },
+	{ 0x00a3, 0x28 },
+	{ 0x00b7, 0x00 },
+	{ 0x00bb, 0x28 },
+	{ 0x00b2, 0x09 },
+	{ 0x00ca, 0x09 },
+	{ 0x0198, 0x01 },
+	{ 0x01b0, 0x17 },
+	{ 0x01ad, 0x00 },
+	{ 0x00ff, 0x05 },
+	{ 0x0100, 0x05 },
+	{ 0x0199, 0x05 },
+	{ 0x01a6, 0x1b },
+	{ 0x01ac, 0x3e },
+	{ 0x01a7, 0x1f },
+	{ 0x0030, 0x00 },
+	/* Recommended public configuration registers */
+	{ 0x0011, 0x10 },
+	{ 0x010a, 0x30 },
+	{ 0x003f, 0x46 },
+	{ 0x0031, 0xff },
+	{ 0x0040, 0x63 },
+	{ 0x002e, 0x01 },
+	{ 0x002c, 0xff },
+	{ 0x001b, 0x09 },
+	{ 0x003e, 0x31 },
+	{ 0x001c, 0x3f }, /* Max convergence time = 63 ms */
+	{ 0x002d, 0x10 }, /* Disable ECE check for 3x scaling */
+};
+
 static int vl6180_init(struct vl6180_data *data)
 {
 	struct i2c_client *client = data->client;
 	u8 intr_cfg = VL6180_RANGE_READY;
+	unsigned int i;
 	int ret;
 
 	ret = vl6180_read_byte(client, VL6180_MODEL_ID);
@@ -544,6 +676,14 @@ static int vl6180_init(struct vl6180_data *data)
 	if (ret != VL6180_MODEL_ID_VAL) {
 		dev_err(&client->dev, "invalid model ID %02x\n", ret);
 		return -ENODEV;
+	}
+
+	if (!data->nvm_read) {
+		ret = vl6180_read_byte(client, 0x0024);
+		if (ret >= 0) {
+			data->part2part_offset = (s8)ret;
+			data->nvm_read = true;
+		}
 	}
 
 	ret = vl6180_hold(data, true);
@@ -560,6 +700,20 @@ static int vl6180_init(struct vl6180_data *data)
 	 */
 	if (ret != 0x01)
 		dev_dbg(&client->dev, "device is not fresh out of reset\n");
+
+	for (i = 0; i < ARRAY_SIZE(vl6180_er02_init_regs); i++) {
+		ret = vl6180_write_byte(client, vl6180_er02_init_regs[i].reg,
+					vl6180_er02_init_regs[i].val);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (data->nvm_read) {
+		ret = vl6180_write_byte(client, 0x0024,
+					(u8)(data->part2part_offset / 3));
+		if (ret < 0)
+			return ret;
+	}
 
 	if (!data->disable_als)
 		intr_cfg |= VL6180_ALS_READY;
@@ -640,6 +794,8 @@ static int vl6180_probe(struct i2c_client *client)
 	if (ret < 0)
 		return ret;
 	vl6180_set_power(data, false);
+
+	WRITE_ONCE(vl6180_default_dev, data);
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }

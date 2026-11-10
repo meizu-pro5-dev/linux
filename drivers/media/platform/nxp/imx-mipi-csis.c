@@ -659,14 +659,21 @@ static void mipi_csis_set_params(struct mipi_csis_device *csis,
 
 	__mipi_csis_set_format(csis, format, csis_fmt);
 
-	mipi_csis_write(csis, MIPI_CSIS_DPHY_CMN_CTRL,
-			MIPI_CSIS_DPHY_CMN_CTRL_HSSETTLE(csis->hs_settle) |
-			MIPI_CSIS_DPHY_CMN_CTRL_CLKSETTLE(csis->clk_settle));
+	if (csis->info->version == MIPI_CSIS_V3_4) {
+		val = mipi_csis_read(csis, MIPI_CSIS_DPHY_CMN_CTRL);
+		val &= ~MIPI_CSIS_DPHY_CMN_CTRL_HSSETTLE_MASK;
+		val |= MIPI_CSIS_DPHY_CMN_CTRL_HSSETTLE(csis->hs_settle);
+		mipi_csis_write(csis, MIPI_CSIS_DPHY_CMN_CTRL, val);
+	} else {
+		mipi_csis_write(csis, MIPI_CSIS_DPHY_CMN_CTRL,
+				MIPI_CSIS_DPHY_CMN_CTRL_HSSETTLE(csis->hs_settle) |
+				MIPI_CSIS_DPHY_CMN_CTRL_CLKSETTLE(csis->clk_settle));
 
-	val = (0 << MIPI_CSIS_ISP_SYNC_HSYNC_LINTV_OFFSET)
-	    | (0 << MIPI_CSIS_ISP_SYNC_VSYNC_SINTV_OFFSET)
-	    | (0 << MIPI_CSIS_ISP_SYNC_VSYNC_EINTV_OFFSET);
-	mipi_csis_write(csis, MIPI_CSIS_ISP_SYNC_CH(0), val);
+		val = (0 << MIPI_CSIS_ISP_SYNC_HSYNC_LINTV_OFFSET)
+		    | (0 << MIPI_CSIS_ISP_SYNC_VSYNC_SINTV_OFFSET)
+		    | (0 << MIPI_CSIS_ISP_SYNC_VSYNC_EINTV_OFFSET);
+		mipi_csis_write(csis, MIPI_CSIS_ISP_SYNC_CH(0), val);
+	}
 
 	val = mipi_csis_read(csis, MIPI_CSIS_CLK_CTRL);
 	val |= MIPI_CSIS_CLK_CTRL_WCLK_SRC;
@@ -691,9 +698,10 @@ static void mipi_csis_set_params(struct mipi_csis_device *csis,
 update_shadow:
 	/* Update the shadow register. */
 	val = mipi_csis_read(csis, MIPI_CSIS_CMN_CTRL);
-	mipi_csis_write(csis, MIPI_CSIS_CMN_CTRL,
-			val | MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW |
-			MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW_CTRL);
+	val |= MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW;
+	if (csis->info->version != MIPI_CSIS_V3_4)
+		val |= MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW_CTRL;
+	mipi_csis_write(csis, MIPI_CSIS_CMN_CTRL, val);
 }
 
 static int mipi_csis_clk_enable(struct mipi_csis_device *csis)
@@ -1259,7 +1267,8 @@ static int mipi_csis_notify_bound(struct v4l2_async_notifier *notifier,
 	struct mipi_csis_device *csis = mipi_notifier_to_csis_state(notifier);
 	struct media_pad *sink = &csis->sd.entity.pads[CSIS_PAD_SINK];
 
-	return v4l2_create_fwnode_links_to_pad(sd, sink, 0);
+	csis->src_sd = sd;
+	return v4l2_create_fwnode_links_to_pad(sd, sink, MEDIA_LNK_FL_ENABLED);
 }
 
 static const struct v4l2_async_notifier_operations mipi_csis_notify_ops = {

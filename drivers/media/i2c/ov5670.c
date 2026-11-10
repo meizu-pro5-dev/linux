@@ -58,8 +58,12 @@
 
 /* Analog gain controls from sensor */
 #define OV5670_REG_ANALOG_GAIN		0x3508
-#define	ANALOG_GAIN_MIN			0
-#define	ANALOG_GAIN_MAX			8191
+/*
+ * Real gain format, 1/128 steps: 0x0080 is 1x and 0x07ff is 15.99x. Codes
+ * below 0x80 alias back into 1x..2x and codes above 0x7ff wrap to 8x.
+ */
+#define	ANALOG_GAIN_MIN			128
+#define	ANALOG_GAIN_MAX			2047
 #define	ANALOG_GAIN_STEP		1
 #define	ANALOG_GAIN_DEFAULT		128
 
@@ -106,6 +110,8 @@ static const char * const ov5670_supply_names[] = {
 	"avdd",		/* Analog power */
 	"dvdd",		/* Digital power */
 	"dovdd",	/* Digital output power */
+	"vcm",		/* 2.0 V VCM digital (shared rail on M86) */
+	"vdrv",		/* 2.8 V VCM/OIS driver (shared rail on M86) */
 };
 
 #define OV5670_NUM_SUPPLIES ARRAY_SIZE(ov5670_supply_names)
@@ -1236,6 +1242,7 @@ static const struct ov5670_reg mode_2560x1440_regs[] = {
 	{0x5792, 0x00},
 	{0x5793, 0x52},
 	{0x5794, 0xa3},
+	{0x3503, 0x00},
 	{0x5045, 0x05},
 	{0x4003, 0x40},
 	{0x5048, 0x40}
@@ -1905,6 +1912,7 @@ struct ov5670 {
 
 	/* xvclk input clock */
 	struct clk *xvclk;
+	u32 xvclk_freq;
 	/* PLL settings and link frequencies for the xvclk rate */
 	const struct ov5670_link_freq_config *link_freq_configs;
 	const s64 *link_freq_menu_items;
@@ -2540,26 +2548,33 @@ static int __maybe_unused ov5670_runtime_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ov5670 *ov5670 = to_ov5670(sd);
-	unsigned long delay_us;
 	int ret;
 
-	ret = clk_prepare_enable(ov5670->xvclk);
-	if (ret)
-		return ret;
+	gpiod_set_value_cansleep(ov5670->pwdn_gpio, 1);
+	gpiod_set_value_cansleep(ov5670->reset_gpio, 1);
+	usleep_range(1000, 1500);
 
 	ret = regulator_bulk_enable(OV5670_NUM_SUPPLIES, ov5670->supplies);
+	if (ret)
+		return ret;
+	usleep_range(2000, 3000);
+
+	ret = clk_set_rate(ov5670->xvclk, ov5670->xvclk_freq);
 	if (ret) {
-		clk_disable_unprepare(ov5670->xvclk);
+		regulator_bulk_disable(OV5670_NUM_SUPPLIES, ov5670->supplies);
 		return ret;
 	}
 
+	ret = clk_prepare_enable(ov5670->xvclk);
+	if (ret) {
+		regulator_bulk_disable(OV5670_NUM_SUPPLIES, ov5670->supplies);
+		return ret;
+	}
+	usleep_range(2000, 3000);
+
 	gpiod_set_value_cansleep(ov5670->pwdn_gpio, 0);
 	gpiod_set_value_cansleep(ov5670->reset_gpio, 0);
-
-	/* 8192 * 2 clock pulses before the first SCCB transaction. */
-	delay_us = DIV_ROUND_UP(8192 * 2 * 1000,
-				DIV_ROUND_UP(OV5670_XVCLK_FREQ, 1000));
-	fsleep(delay_us);
+	usleep_range(5000, 7000);
 
 	return 0;
 }
@@ -2704,12 +2719,12 @@ static int ov5670_gpio_probe(struct ov5670 *ov5670)
 	struct i2c_client *client = v4l2_get_subdevdata(&ov5670->sd);
 
 	ov5670->pwdn_gpio = devm_gpiod_get_optional(&client->dev, "powerdown",
-						    GPIOD_OUT_LOW);
+						    GPIOD_OUT_HIGH);
 	if (IS_ERR(ov5670->pwdn_gpio))
 		return PTR_ERR(ov5670->pwdn_gpio);
 
 	ov5670->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
-						     GPIOD_OUT_LOW);
+						     GPIOD_OUT_HIGH);
 	if (IS_ERR(ov5670->reset_gpio))
 		return PTR_ERR(ov5670->reset_gpio);
 
@@ -2728,15 +2743,14 @@ static int ov5670_probe(struct i2c_client *client)
 	if (!ov5670)
 		return -ENOMEM;
 
+	device_property_read_u32(&client->dev, "clock-frequency", &input_clk);
 	ov5670->xvclk = devm_clk_get_optional(&client->dev, NULL);
-	if (!IS_ERR_OR_NULL(ov5670->xvclk))
-		input_clk = clk_get_rate(ov5670->xvclk);
-	else if (!ov5670->xvclk || PTR_ERR(ov5670->xvclk) == -ENOENT)
-		device_property_read_u32(&client->dev, "clock-frequency",
-					 &input_clk);
-	else
+	if (IS_ERR(ov5670->xvclk))
 		return dev_err_probe(&client->dev, PTR_ERR(ov5670->xvclk),
 				     "error getting clock\n");
+	if (!input_clk && ov5670->xvclk)
+		input_clk = clk_get_rate(ov5670->xvclk);
+	ov5670->xvclk_freq = input_clk;
 
 	if (input_clk == OV5670_XVCLK_FREQ) {
 		ov5670->link_freq_configs = link_freq_configs;
@@ -2776,6 +2790,12 @@ static int ov5670_probe(struct i2c_client *client)
 
 	full_power = acpi_dev_state_d0(&client->dev);
 	if (full_power) {
+		/* Discharge any rails left enabled by the bootloader before power-on. */
+		if (regulator_bulk_enable(OV5670_NUM_SUPPLIES, ov5670->supplies) == 0) {
+			regulator_bulk_disable(OV5670_NUM_SUPPLIES, ov5670->supplies);
+			usleep_range(10000, 12000);
+		}
+
 		ret = ov5670_runtime_resume(&client->dev);
 		if (ret) {
 			dev_err_probe(&client->dev, ret, "Power up failed\n");

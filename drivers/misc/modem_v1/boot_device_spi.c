@@ -301,9 +301,16 @@ static const struct of_device_id modem_boot_spi_match[] = {
 MODULE_DEVICE_TABLE(of, modem_boot_spi_match);
 #endif
 
+static const struct spi_device_id modem_boot_spi_ids[] = {
+	{ MODEM_BOOT_DEV_SPI, 0 },
+	{},
+};
+MODULE_DEVICE_TABLE(spi, modem_boot_spi_ids);
+
 static struct spi_driver modem_boot_device_spi_driver = {
 	.probe = modem_spi_boot_probe,
 	.remove = modem_spi_boot_remove,
+	.id_table = modem_boot_spi_ids,
 	.driver = {
 		.name = MODEM_BOOT_DEV_SPI,
 		.owner = THIS_MODULE,

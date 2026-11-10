@@ -2,7 +2,7 @@
 /*
  * Samsung Exynos7420 FIMC-BNS raw Bayer DMA capture driver
  *
- * Each FIMC-BNS block (A at 0x14000000, B at 0x14010000) sits behind one
+ * Each FIMC-BNS block (A at 0x14020000, B at 0x14030000) sits behind one
  * MIPI CSIS receiver and carries the FIMC-LITE capture core: it can either
  * feed the 3AA ISP on-the-fly or write the incoming frame to memory. This
  * driver only uses the memory path, so frames are delivered as raw Bayer
@@ -190,6 +190,62 @@ static void fimc_bns_fill_pix(struct v4l2_pix_format *pix,
 /* -----------------------------------------------------------------------------
  * Hardware
  */
+
+static void fimc_bns_cam0_hw_prepare(void)
+{
+	void __iomem *base;
+
+	/*
+	 * Ensure CMU_CAM0_LOCAL (0x140f0000) local clock gates for BNS A/B and
+	 * CSIS 0/1 are open before touching BNS/CSIS SFRs or starting DMA.
+	 */
+	base = ioremap(0x140f0000, 0x1000);
+	if (base) {
+		writel(readl(base + 0x800) | 0x7f, base + 0x800);
+		writel(readl(base + 0x900) | 0x7f, base + 0x900);
+		iounmap(base);
+	}
+
+	/*
+	 * Ensure CMU_CAM0 (0x144d0000) USERMUX enable and IP clock-gating masks
+	 * are open as in vendor exynos7420_fimc_is_clk_gate().
+	 */
+	base = ioremap(0x144d0000, 0x1000);
+	if (base) {
+		writel(readl(base + 0x300) | 0x11111111, base + 0x300);
+		writel(readl(base + 0x304) | 0x00000011, base + 0x304);
+		writel(readl(base + 0x308) | 0x00011111, base + 0x308);
+		writel(0xffffffff, base + 0xb00);
+		writel(0xffffffff, base + 0xb04);
+		writel(0xffffffff, base + 0xb08);
+		iounmap(base);
+	}
+
+	/*
+	 * Configure SYSREG_CAM0 (0x10050000 + 0x0518..0x0544) root clock gating
+	 * registers as in vendor exynos7420_fimc_is_clk_on().
+	 */
+	base = ioremap(0x10050000, 0x1000);
+	if (base) {
+		writel(0xffffffff, base + 0x518);
+		writel(0xffffffff, base + 0x528);
+		writel(0xffffffff, base + 0x53c);
+		writel(0xffffffff, base + 0x540);
+		writel(0xffffffff, base + 0x544);
+		iounmap(base);
+	}
+
+	/*
+	 * Place sysmmu_cam0 (0x140e0000) in bypass mode (MMU_CTRL = 0x0),
+	 * clearing the reset-default block-when-stop (0x3) bit so FIMC-BNS
+	 * DMA can write directly to contiguous physical memory.
+	 */
+	base = ioremap(0x140e0000, 0x1000);
+	if (base) {
+		writel(0x0, base + 0x000);
+		iounmap(base);
+	}
+}
 
 static void fimc_bns_hw_reset(struct fimc_bns *bns)
 {
@@ -440,6 +496,8 @@ static int fimc_bns_start_streaming(struct vb2_queue *vq, unsigned int count)
 	ret = clk_bulk_prepare_enable(bns->num_clks, bns->clks);
 	if (ret)
 		goto err_pm;
+
+	fimc_bns_cam0_hw_prepare();
 
 	spin_lock_irqsave(&bns->slock, flags);
 	bns->sequence = 0;
@@ -729,7 +787,7 @@ static int fimc_bns_register_video(struct fimc_bns *bns)
 	q->ops = &fimc_bns_vb2_ops;
 	q->mem_ops = &vb2_dma_contig_memops;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-	q->min_buffers_needed = 1;
+	q->min_buffers_needed = 2;
 	q->lock = &bns->lock;
 	q->dev = bns->dev;
 	ret = vb2_queue_init(q);
@@ -807,6 +865,13 @@ static int fimc_bns_probe(struct platform_device *pdev)
 
 	bns->mdev.dev = dev;
 	strscpy(bns->mdev.model, "Exynos7420 FIMC-BNS", sizeof(bns->mdev.model));
+	/*
+	 * Advertise a driver name listed in libcamera's SimplePipelineHandler
+	 * supportedDevices[] table with swIspEnabled=true so libcamera/PipeWire
+	 * and GNOME Snapshot bind to FIMC-BNS out of the box.
+	 */
+	strscpy(bns->mdev.driver_name, "qcom-camss",
+		sizeof(bns->mdev.driver_name));
 	media_device_init(&bns->mdev);
 
 	bns->v4l2_dev.mdev = &bns->mdev;

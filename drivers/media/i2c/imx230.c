@@ -13,8 +13,10 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 
 #include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
@@ -23,6 +25,8 @@
 #include <media/v4l2-subdev.h>
 
 #include "imx230-regs.h"
+
+extern int vl6180_read_range_mm(int *range_mm, int *prox_raw, int *range_err);
 
 #define IMX230_REG_CHIP_ID		CCI_REG16(0x0016)
 #define IMX230_CHIP_ID			0x0230
@@ -39,11 +43,24 @@
 #define IMX230_EXPOSURE_OFFSET		10
 #define IMX230_EXPOSURE_STEP		1
 
-/* Analogue gain = 512 / (512 - code) */
+/*
+ * Expose linear analogue gain (32 = 1.0x .. 512 = 16.0x) to V4L2/libcamera
+ * and convert to IMX230 SMIA hyperbolic code:
+ *   gain = 512 / (512 - code)  =>  code = 512 - (512 * 32) / val
+ */
 #define IMX230_REG_ANALOG_GAIN		CCI_REG16(0x0204)
-#define IMX230_ANA_GAIN_MIN		0
-#define IMX230_ANA_GAIN_MAX		480
-#define IMX230_ANA_GAIN_DEFAULT		0
+#define IMX230_ANA_GAIN_MIN		32
+#define IMX230_ANA_GAIN_MAX		512
+#define IMX230_ANA_GAIN_DEFAULT		32
+
+/* Companion EEPROM (0x50) and LC898212XD closed-loop Hall VCM (0x72) */
+#define IMX230_EEPROM_I2C_ADDR		0x50
+#define IMX230_LC898212_I2C_ADDR	0x72
+#define IMX230_FOCUS_MIN		0
+#define IMX230_FOCUS_MAX		1023
+#define IMX230_FOCUS_INF_DEFAULT	153
+#define IMX230_FOCUS_MID_DEFAULT	236
+#define IMX230_FOCUS_MACRO_DEFAULT	637
 
 #define IMX230_REG_DIGITAL_GAIN		CCI_REG16(0x020e)
 #define IMX230_DGTL_GAIN_MIN		0x0100
@@ -113,12 +130,15 @@ static const char * const imx230_supply_names[] = {
 	"vana",		/* 2.5 V analogue */
 	"vdig",		/* 1.15 V core */
 	"vif",		/* 1.8 V interface */
+	"vcm",		/* 2.0 V VCM digital */
+	"vdrv",		/* 2.8 V VCM/OIS driver */
 };
 
 #define IMX230_NUM_SUPPLIES ARRAY_SIZE(imx230_supply_names)
 
 struct imx230 {
 	struct device *dev;
+	struct i2c_client *client;
 	struct regmap *regmap;
 	struct v4l2_subdev sd;
 	struct media_pad pad;
@@ -133,6 +153,20 @@ struct imx230 {
 	struct v4l2_ctrl *vblank;
 	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *exposure;
+	struct v4l2_ctrl *focus_abs;
+	struct v4l2_ctrl *focus_auto;
+
+	struct mutex vcm_lock;
+	struct delayed_work af_work;
+	bool vcm_ready;
+	bool af_running;
+	u8 hall_bias;
+	u8 hall_off;
+	u16 af_inf_pos;
+	u16 af_mid_pos;
+	u16 af_macro_pos;
+	u16 cur_focus_pos;
+	int smooth_dist_mm;
 
 	const struct imx230_mode *mode;
 	bool streaming;
@@ -145,6 +179,370 @@ static inline struct imx230 *to_imx230(struct v4l2_subdev *sd)
 
 /* Bayer order at 0x0101 = 0 (no mirror/flip). */
 #define IMX230_MBUS_CODE		MEDIA_BUS_FMT_SRGGB10_1X10
+
+/*
+ * LC898212XD closed-loop Hall-sensor VCM driver IC initialization table
+ * (from Meizu PRO 5 TVC-820 actuator configuration).
+ */
+struct lc898212_init_entry {
+	u16 addr;
+	u16 data;
+};
+
+static const struct lc898212_init_entry lc898212_init_table[] = {
+	{ 0x0080, 0x0034 },
+	{ 0x0081, 0x0020 },
+	{ 0x0084, 0x00e0 },
+	{ 0x0087, 0x0005 },
+	{ 0x00a4, 0x0024 },
+	{ 0x003a, 0x0000 },
+	{ 0x0004, 0x0000 },
+	{ 0x0002, 0x0000 },
+	{ 0x0018, 0x0000 },
+	{ 0x0086, 0x0040 },
+	{ 0x0040, 0x4030 },
+	{ 0x0042, 0x7150 },
+	{ 0x0044, 0x8f90 },
+	{ 0x0046, 0x61b0 },
+	{ 0x0048, 0x7ff0 },
+	{ 0x004a, 0x3930 },
+	{ 0x004c, 0x4030 },
+	{ 0x004e, 0x8010 },
+	{ 0x0050, 0x04f0 },
+	{ 0x0052, 0x7610 },
+	{ 0x0054, 0x2030 },
+	{ 0x0056, 0x0000 },
+	{ 0x0058, 0x7ff0 },
+	{ 0x005a, 0x0680 },
+	{ 0x005c, 0x72f0 },
+	{ 0x005e, 0x7f70 },
+	{ 0x0060, 0x7ed0 },
+	{ 0x0062, 0x7ff0 },
+	{ 0x0064, 0x0000 },
+	{ 0x0066, 0x0000 },
+	{ 0x0068, 0x5130 },
+	{ 0x006a, 0x72f0 },
+	{ 0x006c, 0x8010 },
+	{ 0x006e, 0x0000 },
+	{ 0x0070, 0x0000 },
+	{ 0x0072, 0x18e0 },
+	{ 0x0074, 0x4e30 },
+	{ 0x0030, 0x0000 },
+	{ 0x0076, 0x0c50 },
+	{ 0x0078, 0x4000 },
+	{ 0x00ff, 5 },
+	{ 0x0086, 0x0060 },
+	{ 0x0088, 0x0070 },
+	{ 0x004c, 0x4030 },
+	{ 0x0083, 0x002c },
+	{ 0x0085, 0x00c0 },
+	{ 0x00ff, 1 },
+	{ 0x0084, 0x00e3 },
+	{ 0x0097, 0x0000 },
+	{ 0x0098, 0x0042 },
+	{ 0x0099, 0x0000 },
+	{ 0x009a, 0x0000 },
+};
+
+static inline u16 imx230_af_to_10bit(s16 hall_val)
+{
+	return (u16)((((int)hall_val + 32768) >> 6) & 0x3ff);
+}
+
+static inline s16 imx230_af_from_10bit(u16 pos_10bit)
+{
+	return (s16)(((pos_10bit & 0x3ff) << 6) - 32768);
+}
+
+static int imx230_eeprom_read(struct imx230 *imx230, u16 offset, void *buf,
+			      size_t len)
+{
+	u8 addr_buf[2] = { offset >> 8, offset & 0xff };
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = IMX230_EEPROM_I2C_ADDR,
+			.flags = 0,
+			.len = sizeof(addr_buf),
+			.buf = addr_buf,
+		},
+		{
+			.addr = IMX230_EEPROM_I2C_ADDR,
+			.flags = I2C_M_RD,
+			.len = len,
+			.buf = buf,
+		},
+	};
+	int ret;
+
+	ret = i2c_transfer(imx230->client->adapter, msgs, ARRAY_SIZE(msgs));
+	return (ret == ARRAY_SIZE(msgs)) ? 0 : (ret < 0 ? ret : -EIO);
+}
+
+static void imx230_read_af_calibration(struct imx230 *imx230)
+{
+	__le16 val16;
+	u8 val8;
+
+	imx230->af_inf_pos = IMX230_FOCUS_INF_DEFAULT;
+	imx230->af_mid_pos = IMX230_FOCUS_MID_DEFAULT;
+	imx230->af_macro_pos = IMX230_FOCUS_MACRO_DEFAULT;
+	imx230->hall_bias = 0x6c;
+	imx230->hall_off = 0x94;
+
+	if (imx230_eeprom_read(imx230, 0x00a4, &val16, sizeof(val16)) == 0)
+		imx230->af_inf_pos = imx230_af_to_10bit((s16)le16_to_cpu(val16));
+	if (imx230_eeprom_read(imx230, 0x00ac, &val16, sizeof(val16)) == 0)
+		imx230->af_macro_pos = imx230_af_to_10bit((s16)le16_to_cpu(val16));
+	if (imx230_eeprom_read(imx230, 0x00b8, &val16, sizeof(val16)) == 0)
+		imx230->af_mid_pos = imx230_af_to_10bit((s16)le16_to_cpu(val16));
+	if (imx230_eeprom_read(imx230, 0x00d0, &val8, 1) == 0)
+		imx230->hall_bias = val8;
+	if (imx230_eeprom_read(imx230, 0x00d4, &val8, 1) == 0)
+		imx230->hall_off = val8;
+
+	if (imx230->af_inf_pos >= imx230->af_macro_pos ||
+	    imx230->af_mid_pos <= imx230->af_inf_pos ||
+	    imx230->af_mid_pos >= imx230->af_macro_pos) {
+		imx230->af_inf_pos = IMX230_FOCUS_INF_DEFAULT;
+		imx230->af_mid_pos = IMX230_FOCUS_MID_DEFAULT;
+		imx230->af_macro_pos = IMX230_FOCUS_MACRO_DEFAULT;
+	}
+
+	imx230->cur_focus_pos = imx230->af_mid_pos;
+	imx230->smooth_dist_mm = 500;
+
+	dev_info(imx230->dev,
+		 "EEPROM AF calibration: inf=%u mid=%u macro=%u (bias=0x%02x off=0x%02x)\n",
+		 imx230->af_inf_pos, imx230->af_mid_pos, imx230->af_macro_pos,
+		 imx230->hall_bias, imx230->hall_off);
+}
+
+static int lc898212_reg_write(struct imx230 *imx230, u8 addr, u8 val)
+{
+	u8 buf[2] = { addr, val };
+	struct i2c_msg msg = {
+		.addr = IMX230_LC898212_I2C_ADDR,
+		.flags = 0,
+		.len = sizeof(buf),
+		.buf = buf,
+	};
+	int ret = i2c_transfer(imx230->client->adapter, &msg, 1);
+
+	return (ret == 1) ? 0 : (ret < 0 ? ret : -EIO);
+}
+
+static int lc898212_reg_read(struct imx230 *imx230, u8 addr, u8 *val)
+{
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = IMX230_LC898212_I2C_ADDR,
+			.flags = 0,
+			.len = 1,
+			.buf = &addr,
+		},
+		{
+			.addr = IMX230_LC898212_I2C_ADDR,
+			.flags = I2C_M_RD,
+			.len = 1,
+			.buf = val,
+		},
+	};
+	int ret = i2c_transfer(imx230->client->adapter, msgs, ARRAY_SIZE(msgs));
+
+	return (ret == ARRAY_SIZE(msgs)) ? 0 : (ret < 0 ? ret : -EIO);
+}
+
+static int lc898212_ram_write(struct imx230 *imx230, u8 addr, u16 val)
+{
+	u8 buf[3] = { addr, val >> 8, val & 0xff };
+	struct i2c_msg msg = {
+		.addr = IMX230_LC898212_I2C_ADDR,
+		.flags = 0,
+		.len = sizeof(buf),
+		.buf = buf,
+	};
+	int ret = i2c_transfer(imx230->client->adapter, &msg, 1);
+
+	return (ret == 1) ? 0 : (ret < 0 ? ret : -EIO);
+}
+
+static int lc898212_ram_read(struct imx230 *imx230, u8 addr, u16 *val)
+{
+	u8 buf[2];
+	struct i2c_msg msgs[2] = {
+		{
+			.addr = IMX230_LC898212_I2C_ADDR,
+			.flags = 0,
+			.len = 1,
+			.buf = &addr,
+		},
+		{
+			.addr = IMX230_LC898212_I2C_ADDR,
+			.flags = I2C_M_RD,
+			.len = sizeof(buf),
+			.buf = buf,
+		},
+	};
+	int ret = i2c_transfer(imx230->client->adapter, msgs, ARRAY_SIZE(msgs));
+
+	if (ret != ARRAY_SIZE(msgs))
+		return ret < 0 ? ret : -EIO;
+
+	*val = ((u16)buf[0] << 8) | buf[1];
+	return 0;
+}
+
+static int imx230_vcm_move_locked(struct imx230 *imx230, u16 pos_10bit)
+{
+	s16 target_s16 = imx230_af_from_10bit(pos_10bit);
+	u16 start_u16 = 0;
+	s16 start_s16;
+	u16 dpl;
+	s16 step;
+	u8 val8;
+	int i, ret;
+
+	if (!imx230->vcm_ready)
+		return 0;
+
+	ret = lc898212_ram_read(imx230, 0x04, &start_u16);
+	if (ret)
+		return ret;
+
+	start_s16 = (s16)start_u16;
+	dpl = abs((int)start_s16 - (int)target_s16);
+
+	if (dpl <= 0x0180) {
+		lc898212_reg_write(imx230, 0x8f, 0x01);
+		lc898212_ram_write(imx230, 0x18, (u16)target_s16);
+	} else {
+		step = (start_s16 < target_s16) ? 0x0180 : -0x0180;
+		lc898212_ram_write(imx230, 0x16, (u16)step);
+		lc898212_ram_write(imx230, 0xa1, (u16)target_s16);
+		lc898212_reg_write(imx230, 0x8a, 0x0d);
+	}
+
+	for (i = 0; i < 60; i++) {
+		if (lc898212_reg_read(imx230, 0x8a, &val8) || !(val8 & 0x01))
+			break;
+		usleep_range(1000, 1500);
+	}
+
+	imx230->cur_focus_pos = pos_10bit;
+	return 0;
+}
+
+static int imx230_vcm_init(struct imx230 *imx230)
+{
+	unsigned int i;
+	u16 pos = 0;
+	u8 enb = 0, swt = 0;
+	int ret;
+
+	mutex_lock(&imx230->vcm_lock);
+
+	for (i = 0; i < ARRAY_SIZE(lc898212_init_table); i++) {
+		u16 addr = lc898212_init_table[i].addr;
+		u16 data = lc898212_init_table[i].data;
+
+		if (addr == 0x00ff) {
+			usleep_range(data * 1000, data * 1000 + 500);
+			continue;
+		}
+		if (addr >= 0x0080)
+			ret = lc898212_reg_write(imx230, addr & 0xff, data & 0xff);
+		else
+			ret = lc898212_ram_write(imx230, addr & 0xff, data);
+		if (ret) {
+			dev_warn(imx230->dev, "LC898212XD init failed at 0x%02x: %d\n",
+				 addr, ret);
+			mutex_unlock(&imx230->vcm_lock);
+			return ret;
+		}
+	}
+
+	lc898212_reg_write(imx230, 0x28, imx230->hall_off);
+	lc898212_reg_write(imx230, 0x29, imx230->hall_bias);
+
+	lc898212_ram_read(imx230, 0x3c, &pos);
+	lc898212_ram_write(imx230, 0x04, pos);
+	lc898212_ram_write(imx230, 0x18, pos);
+
+	/* StmvSet(STMV_SIZE=0x0180, STMV_INTERVAL=1, STMCHTG_SET | STMSV_SET) */
+	lc898212_reg_write(imx230, 0x8a, 0x00);
+	lc898212_reg_read(imx230, 0x87, &enb);
+	lc898212_reg_write(imx230, 0x87, enb & 0xfd);
+	lc898212_reg_read(imx230, 0x83, &swt);
+	lc898212_reg_write(imx230, 0x83, swt & 0x7f);
+	lc898212_ram_read(imx230, 0x04, &pos);
+	lc898212_ram_write(imx230, 0x5a, 0x0800);
+	lc898212_ram_write(imx230, 0x18, pos);
+	lc898212_ram_write(imx230, 0x16, 0x0180);
+	lc898212_reg_write(imx230, 0xa0, 0x01);
+	lc898212_reg_write(imx230, 0x83, swt | 0x80);
+
+	/* ServoOn */
+	lc898212_reg_write(imx230, 0x85, 0x80);
+	usleep_range(1000, 1500);
+	lc898212_reg_write(imx230, 0x87, 0x85);
+	usleep_range(5000, 7000);
+
+	imx230->vcm_ready = true;
+	imx230_vcm_move_locked(imx230, imx230->cur_focus_pos);
+
+	mutex_unlock(&imx230->vcm_lock);
+	return 0;
+}
+
+static void imx230_af_work_fn(struct work_struct *work)
+{
+	struct imx230 *imx230 = container_of(work, struct imx230, af_work.work);
+	int dist_mm = 765, prox_raw = 0, range_err = 0;
+	u16 target_pos;
+	int span, d;
+
+	if (!READ_ONCE(imx230->af_running))
+		return;
+
+	if (vl6180_read_range_mm(&dist_mm, &prox_raw, &range_err) == 0) {
+		if (range_err != 0 || dist_mm >= 550) {
+			/*
+			 * Subject is beyond ToF range (>= 55 cm): focus at
+			 * hyperfocal / infinity position so 0.8 m .. infinity
+			 * is sharp.
+			 */
+			imx230->smooth_dist_mm = 600;
+			target_pos = (imx230->af_inf_pos + imx230->af_mid_pos) / 2;
+		} else if (dist_mm < 25 && prox_raw > 2500) {
+			/* Phone lying flat on desk with rear cover blocked */
+			target_pos = imx230->af_mid_pos;
+		} else {
+			/*
+			 * Thin-lens mapping from EEPROM calibrated points:
+			 *   af_mid_pos @ 500 mm, af_macro_pos @ 100 mm
+			 *   pos(d) = af_mid_pos + span * 125 / d - span / 4
+			 */
+			d = clamp(dist_mm, 70, 550);
+			imx230->smooth_dist_mm = (imx230->smooth_dist_mm + d) / 2;
+			d = imx230->smooth_dist_mm;
+			span = (int)imx230->af_macro_pos - (int)imx230->af_mid_pos;
+			target_pos = clamp_t(int,
+				(int)imx230->af_mid_pos + (span * 125) / d - span / 4,
+				imx230->af_inf_pos,
+				min(1023, (int)imx230->af_macro_pos + 120));
+		}
+
+		mutex_lock(&imx230->vcm_lock);
+		if (imx230->vcm_ready && READ_ONCE(imx230->af_running) &&
+		    abs((int)target_pos - (int)imx230->cur_focus_pos) >= 8) {
+			imx230_vcm_move_locked(imx230, target_pos);
+		}
+		mutex_unlock(&imx230->vcm_lock);
+	}
+
+	if (READ_ONCE(imx230->af_running))
+		schedule_delayed_work(&imx230->af_work, msecs_to_jiffies(250));
+}
 
 static void imx230_update_pad_format(const struct imx230_mode *mode,
 				     struct v4l2_mbus_framefmt *fmt)
@@ -162,6 +560,7 @@ static void imx230_update_pad_format(const struct imx230_mode *mode,
 static int imx230_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx230 *imx230 = container_of(ctrl->handler, struct imx230, ctrls);
+	u16 ana_gain_code;
 	int ret = 0;
 
 	if (ctrl->id == V4L2_CID_VBLANK) {
@@ -173,12 +572,18 @@ static int imx230_set_ctrl(struct v4l2_ctrl *ctrl)
 					 min(imx230->exposure->default_value, max));
 	}
 
+	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE)
+		imx230->cur_focus_pos = ctrl->val;
+
 	if (!pm_runtime_get_if_in_use(imx230->dev))
 		return 0;
 
 	switch (ctrl->id) {
 	case V4L2_CID_ANALOGUE_GAIN:
-		cci_write(imx230->regmap, IMX230_REG_ANALOG_GAIN, ctrl->val, &ret);
+		ana_gain_code = clamp_t(int,
+			512 - DIV_ROUND_CLOSEST(512 * IMX230_ANA_GAIN_MIN, ctrl->val),
+			0, 480);
+		cci_write(imx230->regmap, IMX230_REG_ANALOG_GAIN, ana_gain_code, &ret);
 		break;
 	case V4L2_CID_DIGITAL_GAIN:
 		cci_write(imx230->regmap, IMX230_REG_DIGITAL_GAIN, ctrl->val, &ret);
@@ -192,6 +597,21 @@ static int imx230_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_TEST_PATTERN:
 		cci_write(imx230->regmap, IMX230_REG_TEST_PATTERN, ctrl->val, &ret);
+		break;
+	case V4L2_CID_FOCUS_ABSOLUTE:
+		if (!imx230->focus_auto || !imx230->focus_auto->val) {
+			mutex_lock(&imx230->vcm_lock);
+			imx230_vcm_move_locked(imx230, ctrl->val);
+			mutex_unlock(&imx230->vcm_lock);
+		}
+		break;
+	case V4L2_CID_FOCUS_AUTO:
+		if (imx230->streaming) {
+			WRITE_ONCE(imx230->af_running, !!ctrl->val);
+			if (ctrl->val)
+				schedule_delayed_work(&imx230->af_work,
+						      msecs_to_jiffies(100));
+		}
 		break;
 	default:
 		ret = -EINVAL;
@@ -234,7 +654,7 @@ static int imx230_init_controls(struct imx230 *imx230)
 	s64 hblank = mode->llp - mode->width;
 	int ret;
 
-	v4l2_ctrl_handler_init(hdl, 11);
+	v4l2_ctrl_handler_init(hdl, 13);
 
 	imx230->link_freq = v4l2_ctrl_new_int_menu(hdl, &imx230_ctrl_ops,
 						   V4L2_CID_LINK_FREQ,
@@ -271,6 +691,14 @@ static int imx230_init_controls(struct imx230 *imx230)
 	v4l2_ctrl_new_std(hdl, &imx230_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
 			  IMX230_DGTL_GAIN_MIN, IMX230_DGTL_GAIN_MAX, 1,
 			  IMX230_DGTL_GAIN_DEFAULT);
+	imx230->focus_abs = v4l2_ctrl_new_std(hdl, &imx230_ctrl_ops,
+					      V4L2_CID_FOCUS_ABSOLUTE,
+					      IMX230_FOCUS_MIN,
+					      IMX230_FOCUS_MAX, 1,
+					      imx230->af_mid_pos);
+	imx230->focus_auto = v4l2_ctrl_new_std(hdl, &imx230_ctrl_ops,
+					       V4L2_CID_FOCUS_AUTO,
+					       0, 1, 1, 1);
 	v4l2_ctrl_new_std_menu_items(hdl, &imx230_ctrl_ops,
 				     V4L2_CID_TEST_PATTERN,
 				     ARRAY_SIZE(imx230_test_pattern_menu) - 1,
@@ -309,6 +737,8 @@ static int imx230_start_streaming(struct imx230 *imx230)
 	if (ret)
 		goto err_pm;
 
+	imx230_vcm_init(imx230);
+
 	ret = __v4l2_ctrl_handler_setup(imx230->sd.ctrl_handler);
 	if (ret)
 		goto err_pm;
@@ -318,15 +748,31 @@ static int imx230_start_streaming(struct imx230 *imx230)
 	if (ret)
 		goto err_pm;
 
+	if (imx230->focus_auto && imx230->focus_auto->val) {
+		WRITE_ONCE(imx230->af_running, true);
+		schedule_delayed_work(&imx230->af_work, msecs_to_jiffies(200));
+	}
+
 	return 0;
 
 err_pm:
+	WRITE_ONCE(imx230->af_running, false);
+	mutex_lock(&imx230->vcm_lock);
+	imx230->vcm_ready = false;
+	mutex_unlock(&imx230->vcm_lock);
 	pm_runtime_put(imx230->dev);
 	return ret;
 }
 
 static void imx230_stop_streaming(struct imx230 *imx230)
 {
+	mutex_lock(&imx230->vcm_lock);
+	if (imx230->vcm_ready) {
+		imx230_vcm_move_locked(imx230, imx230->af_mid_pos);
+		imx230->vcm_ready = false;
+	}
+	mutex_unlock(&imx230->vcm_lock);
+
 	cci_write(imx230->regmap, IMX230_REG_MODE_SELECT, IMX230_MODE_STANDBY,
 		  NULL);
 	pm_runtime_put(imx230->dev);
@@ -337,6 +783,11 @@ static int imx230_s_stream(struct v4l2_subdev *sd, int enable)
 	struct imx230 *imx230 = to_imx230(sd);
 	struct v4l2_subdev_state *state;
 	int ret = 0;
+
+	if (!enable) {
+		WRITE_ONCE(imx230->af_running, false);
+		cancel_delayed_work_sync(&imx230->af_work);
+	}
 
 	state = v4l2_subdev_lock_and_get_active_state(sd);
 
@@ -477,9 +928,19 @@ static int imx230_power_on(struct device *dev)
 	struct imx230 *imx230 = to_imx230(sd);
 	int ret;
 
+	gpiod_set_value_cansleep(imx230->reset_gpio, 1);
+	usleep_range(1000, 1500);
+
 	ret = regulator_bulk_enable(IMX230_NUM_SUPPLIES, imx230->supplies);
 	if (ret)
 		return ret;
+	usleep_range(2000, 3000);
+
+	ret = clk_set_rate(imx230->xclk, IMX230_XCLK_FREQ);
+	if (ret) {
+		regulator_bulk_disable(IMX230_NUM_SUPPLIES, imx230->supplies);
+		return ret;
+	}
 
 	ret = clk_prepare_enable(imx230->xclk);
 	if (ret) {
@@ -487,10 +948,10 @@ static int imx230_power_on(struct device *dev)
 		return ret;
 	}
 
-	/* Vendor sequence: XCLR released 3 ms after the rails and INCK. */
-	usleep_range(1000, 1500);
+	/* Vendor sequence: XCLR released >=2 ms after rails and INCK. */
+	usleep_range(2000, 3000);
 	gpiod_set_value_cansleep(imx230->reset_gpio, 0);
-	usleep_range(3000, 4000);
+	usleep_range(5000, 7000);
 
 	return 0;
 }
@@ -575,6 +1036,9 @@ static int imx230_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	imx230->dev = dev;
+	imx230->client = client;
+	mutex_init(&imx230->vcm_lock);
+	INIT_DELAYED_WORK(&imx230->af_work, imx230_af_work_fn);
 	v4l2_i2c_subdev_init(&imx230->sd, client, &imx230_subdev_ops);
 
 	ret = imx230_check_hwcfg(imx230);
@@ -589,6 +1053,10 @@ static int imx230_probe(struct i2c_client *client)
 	if (IS_ERR(imx230->xclk))
 		return dev_err_probe(dev, PTR_ERR(imx230->xclk),
 				     "failed to get xclk\n");
+
+	ret = clk_set_rate(imx230->xclk, IMX230_XCLK_FREQ);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to set xclk rate\n");
 
 	xclk_freq = clk_get_rate(imx230->xclk);
 	if (xclk_freq != IMX230_XCLK_FREQ)
@@ -607,6 +1075,12 @@ static int imx230_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(imx230->reset_gpio),
 				     "failed to get reset gpio\n");
 
+	/* Discharge any rails left enabled by the bootloader before power-on. */
+	if (regulator_bulk_enable(IMX230_NUM_SUPPLIES, imx230->supplies) == 0) {
+		regulator_bulk_disable(IMX230_NUM_SUPPLIES, imx230->supplies);
+		usleep_range(10000, 12000);
+	}
+
 	ret = imx230_power_on(dev);
 	if (ret)
 		return ret;
@@ -614,6 +1088,8 @@ static int imx230_probe(struct i2c_client *client)
 	ret = imx230_identify(imx230);
 	if (ret)
 		goto err_power_off;
+
+	imx230_read_af_calibration(imx230);
 
 	imx230->mode = &imx230_modes[0];
 
@@ -662,6 +1138,8 @@ static void imx230_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx230 *imx230 = to_imx230(sd);
 
+	WRITE_ONCE(imx230->af_running, false);
+	cancel_delayed_work_sync(&imx230->af_work);
 	v4l2_async_unregister_subdev(sd);
 	v4l2_subdev_cleanup(sd);
 	media_entity_cleanup(&sd->entity);
