@@ -509,6 +509,8 @@ static int fimc_bns_start_streaming(struct vb2_queue *vq, unsigned int count)
 	fimc_bns_hw_set_addr(bns, bns->next->addr);
 	spin_unlock_irqrestore(&bns->slock, flags);
 
+	enable_irq(bns->irq);
+
 	if (!test_pattern) {
 		ret = v4l2_subdev_call(bns->source, video, s_stream, 1);
 		if (ret && ret != -ENOIOCTLCMD)
@@ -520,6 +522,7 @@ static int fimc_bns_start_streaming(struct vb2_queue *vq, unsigned int count)
 err_hw:
 	fimc_bns_hw_stop(bns);
 	fimc_bns_hw_disable_irqs(bns);
+	disable_irq(bns->irq);
 	clk_bulk_disable_unprepare(bns->num_clks, bns->clks);
 err_pm:
 	pm_runtime_put(bns->dev);
@@ -549,7 +552,7 @@ static void fimc_bns_stop_streaming(struct vb2_queue *vq)
 		v4l2_subdev_call(bns->source, video, s_stream, 0);
 
 	fimc_bns_hw_disable_irqs(bns);
-	synchronize_irq(bns->irq);
+	disable_irq(bns->irq);
 	clk_bulk_disable_unprepare(bns->num_clks, bns->clks);
 	pm_runtime_put(bns->dev);
 
@@ -854,8 +857,8 @@ static int fimc_bns_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = devm_request_irq(dev, bns->irq, fimc_bns_irq, 0, dev_name(dev),
-			       bns);
+	ret = devm_request_irq(dev, bns->irq, fimc_bns_irq, IRQF_NO_AUTOEN,
+			       dev_name(dev), bns);
 	if (ret)
 		return ret;
 

@@ -313,6 +313,7 @@ struct mipi_csis_info {
 struct mipi_csis_device {
 	struct device *dev;
 	void __iomem *regs;
+	int irq;
 	struct clk_bulk_data *clks;
 	struct reset_control *mrst;
 	struct regulator *mipi_phy_regulator;
@@ -1343,9 +1344,13 @@ static int __maybe_unused mipi_csis_runtime_suspend(struct device *dev)
 	struct mipi_csis_device *csis = sd_to_mipi_csis_device(sd);
 	int ret;
 
+	disable_irq(csis->irq);
+
 	ret = mipi_csis_phy_disable(csis);
-	if (ret)
+	if (ret) {
+		enable_irq(csis->irq);
 		return -EAGAIN;
+	}
 
 	mipi_csis_clk_disable(csis);
 
@@ -1367,6 +1372,8 @@ static int __maybe_unused mipi_csis_runtime_resume(struct device *dev)
 		mipi_csis_phy_disable(csis);
 		return ret;
 	}
+
+	enable_irq(csis->irq);
 
 	return 0;
 }
@@ -1430,7 +1437,6 @@ static int mipi_csis_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mipi_csis_device *csis;
-	int irq;
 	int ret;
 
 	csis = devm_kzalloc(dev, sizeof(*csis), GFP_KERNEL);
@@ -1456,9 +1462,9 @@ static int mipi_csis_probe(struct platform_device *pdev)
 	if (IS_ERR(csis->regs))
 		return PTR_ERR(csis->regs);
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
+	csis->irq = platform_get_irq(pdev, 0);
+	if (csis->irq < 0)
+		return csis->irq;
 
 	ret = mipi_csis_phy_init(csis);
 	if (ret < 0)
@@ -1478,8 +1484,8 @@ static int mipi_csis_probe(struct platform_device *pdev)
 	}
 
 	/* Now that the hardware is initialized, request the interrupt. */
-	ret = devm_request_irq(dev, irq, mipi_csis_irq_handler, 0,
-			       dev_name(dev), csis);
+	ret = devm_request_irq(dev, csis->irq, mipi_csis_irq_handler,
+			       IRQF_NO_AUTOEN, dev_name(dev), csis);
 	if (ret) {
 		dev_err(dev, "Interrupt request failed\n");
 		goto err_disable_clock;
@@ -1546,8 +1552,10 @@ static void mipi_csis_remove(struct platform_device *pdev)
 	v4l2_async_unregister_subdev(&csis->sd);
 
 	pm_runtime_disable(&pdev->dev);
-	mipi_csis_runtime_suspend(&pdev->dev);
-	mipi_csis_clk_disable(csis);
+	if (!pm_runtime_status_suspended(&pdev->dev))
+		mipi_csis_runtime_suspend(&pdev->dev);
+	if (csis->info->version != MIPI_CSIS_V3_4)
+		mipi_csis_clk_disable(csis);
 	v4l2_subdev_cleanup(&csis->sd);
 	media_entity_cleanup(&csis->sd.entity);
 	pm_runtime_set_suspended(&pdev->dev);
