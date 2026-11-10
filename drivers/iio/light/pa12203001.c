@@ -75,7 +75,9 @@ struct pa12203001_data {
 	bool px_enabled;
 	bool als_needs_enable;
 	bool px_needs_enable;
+	bool vdd_led_enabled;
 
+	struct regulator *vdd_led;
 	struct regmap *map;
 };
 
@@ -167,17 +169,52 @@ static inline int pa12203001_als_enable(struct pa12203001_data *data, u8 enable)
 	return 0;
 }
 
+static int pa12203001_set_vdd_led(struct pa12203001_data *data, bool enable)
+{
+	int ret;
+
+	if (!data->vdd_led || data->vdd_led_enabled == enable)
+		return 0;
+
+	if (enable) {
+		ret = regulator_enable(data->vdd_led);
+		if (ret)
+			return ret;
+		usleep_range(1000, 2000);
+		data->vdd_led_enabled = true;
+	} else {
+		ret = regulator_disable(data->vdd_led);
+		if (ret)
+			return ret;
+		data->vdd_led_enabled = false;
+	}
+
+	return 0;
+}
+
 static inline int pa12203001_px_enable(struct pa12203001_data *data, u8 enable)
 {
 	bool was_enabled = data->px_enabled;
 	int ret;
 
+	if (enable) {
+		ret = pa12203001_set_vdd_led(data, true);
+		if (ret < 0)
+			return ret;
+	}
+
 	ret = regmap_update_bits(data->map, PA12203001_REG_CFG0,
 				 PA12203001_PX_EN_MASK, enable);
-	if (ret < 0)
+	if (ret < 0) {
+		if (enable && !was_enabled)
+			pa12203001_set_vdd_led(data, false);
 		return ret;
+	}
 
 	data->px_enabled = !!enable;
+	if (!enable)
+		return pa12203001_set_vdd_led(data, false);
+
 	if (!was_enabled && data->px_enabled &&
 	    device_is_compatible(&data->client->dev, "txc,pa224"))
 		msleep(50);
@@ -364,11 +401,17 @@ static int pa12203001_init(struct iio_dev *indio_dev)
 		}
 		dev_info(&client->dev, "TXC PA224 chip ID: 0x%02x\n", chip_id);
 
+		ret = pa12203001_set_vdd_led(data, true);
+		if (ret < 0)
+			return ret;
+
 		for (i = 0; i < ARRAY_SIZE(pa224_regvals); i++) {
 			ret = regmap_write(data->map, pa224_regvals[i].reg,
 					   pa224_regvals[i].val);
-			if (ret < 0)
+			if (ret < 0) {
+				pa12203001_set_vdd_led(data, false);
 				return ret;
+			}
 		}
 		msleep(50);
 		{
@@ -381,6 +424,7 @@ static int pa12203001_init(struct iio_dev *indio_dev)
 		}
 		/* Turn off proximity sensor after crosstalk calibration */
 		ret = regmap_write(data->map, PA12203001_REG_CFG0, 0x00);
+		pa12203001_set_vdd_led(data, false);
 		if (ret < 0)
 			return ret;
 		data->px_enabled = false;
@@ -438,9 +482,13 @@ static int pa12203001_probe(struct i2c_client *client)
 	if (ret && ret != -ENODEV)
 		return ret;
 
-	ret = devm_regulator_get_enable_optional(&client->dev, "vdd-led");
-	if (ret && ret != -ENODEV)
-		return ret;
+	data->vdd_led = devm_regulator_get_optional(&client->dev, "vdd-led");
+	if (IS_ERR(data->vdd_led)) {
+		ret = PTR_ERR(data->vdd_led);
+		if (ret != -ENODEV)
+			return ret;
+		data->vdd_led = NULL;
+	}
 
 	mutex_init(&data->lock);
 
@@ -529,21 +577,27 @@ static int pa12203001_resume(struct device *dev)
 static int pa12203001_runtime_resume(struct device *dev)
 {
 	struct pa12203001_data *data;
+	int ret = 0;
 
 	data = iio_priv(i2c_get_clientdata(to_i2c_client(dev)));
 
 	mutex_lock(&data->lock);
 	if (data->als_needs_enable) {
-		pa12203001_als_enable(data, PA12203001_ALS_EN_MASK);
+		ret = pa12203001_als_enable(data, PA12203001_ALS_EN_MASK);
+		if (ret < 0)
+			goto out;
 		data->als_needs_enable = false;
 	}
 	if (data->px_needs_enable) {
-		pa12203001_px_enable(data, PA12203001_PX_EN_MASK);
+		ret = pa12203001_px_enable(data, PA12203001_PX_EN_MASK);
+		if (ret < 0)
+			goto out;
 		data->px_needs_enable = false;
 	}
+out:
 	mutex_unlock(&data->lock);
 
-	return 0;
+	return ret;
 }
 #endif
 
