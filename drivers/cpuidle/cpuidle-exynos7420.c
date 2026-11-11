@@ -17,6 +17,7 @@
 #include <linux/cpumask.h>
 #include <linux/cpu_pm.h>
 #include <linux/io.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -431,11 +432,11 @@ static __cpuidle int exynos7420_enter_atlas_c2(struct cpuidle_device *dev,
 					       int index)
 {
 	bool allow_cpd = false;
-	ktime_t delta_next;
 
 	if (!dev->states_usage[2].disable &&
 	    !(drv->states[2].flags & CPUIDLE_FLAG_OFF) &&
-	    tick_nohz_get_sleep_length(&delta_next) >= EXYNOS7420_CPD_RESIDENCY_NS)
+	    ktime_sub(tick_nohz_get_next_hrtimer(), ktime_get()) >=
+	    EXYNOS7420_CPD_RESIDENCY_NS)
 		allow_cpd = true;
 
 	return exynos7420_enter_atlas_idle(dev, drv, allow_cpd);
