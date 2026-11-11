@@ -349,6 +349,11 @@ static int bcm_request_irq(struct bcm_data *bcm)
 		goto unlock;
 	}
 
+	if (bdev->irq_acquired) {
+		err = 0;
+		goto unlock;
+	}
+
 	err = devm_request_irq(bdev->dev, bdev->irq, bcm_host_wake,
 			       bdev->irq_active_low ? IRQF_TRIGGER_FALLING :
 						      IRQF_TRIGGER_RISING,
@@ -548,10 +553,12 @@ static int bcm_close(struct hci_uart *hu)
 	if (bdev) {
 		if (IS_ENABLED(CONFIG_PM) && bdev->irq_acquired) {
 			devm_free_irq(bdev->dev, bdev->irq, bdev);
+			bdev->irq_acquired = false;
 			device_init_wakeup(bdev->dev, false);
 			pm_runtime_disable(bdev->dev);
 		}
 
+		bdev->is_suspended = false;
 		err = bcm_gpio_set_power(bdev, false);
 		if (err)
 			bt_dev_err(hu->hdev, "Failed to power down");
@@ -566,6 +573,39 @@ static int bcm_close(struct hci_uart *hu)
 
 	hu->priv = NULL;
 	return 0;
+}
+
+static int bcm_shutdown(struct hci_dev *hdev)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct bcm_device *bdev;
+	int err = 0;
+
+	if (!hu || !hu->serdev)
+		return 0;
+
+	mutex_lock(&bcm_device_lock);
+	bdev = serdev_device_get_drvdata(hu->serdev);
+	if (bdev) {
+		if (IS_ENABLED(CONFIG_PM) && bdev->irq_acquired) {
+			devm_free_irq(bdev->dev, bdev->irq, bdev);
+			bdev->irq_acquired = false;
+			device_init_wakeup(bdev->dev, false);
+			pm_runtime_disable(bdev->dev);
+		}
+
+		bdev->is_suspended = false;
+		hu->oper_speed = 0;
+
+		err = bcm_gpio_set_power(bdev, false);
+		if (err)
+			bt_dev_err(hdev, "Failed to power down (%d)", err);
+		else
+			pm_runtime_set_suspended(bdev->dev);
+	}
+	mutex_unlock(&bcm_device_lock);
+
+	return err;
 }
 
 static int bcm_flush(struct hci_uart *hu)
@@ -592,9 +632,33 @@ static int bcm_setup(struct hci_uart *hu)
 	hu->hdev->set_diag = bcm_set_diag;
 	hu->hdev->set_bdaddr = btbcm_set_bdaddr;
 
+	if (bcm->dev && bcm->dev->shutdown && hu->serdev) {
+		set_bit(HCI_QUIRK_NON_PERSISTENT_SETUP, &hu->hdev->quirks);
+		hu->hdev->shutdown = bcm_shutdown;
+	}
+
+	mutex_lock(&bcm_device_lock);
+	if (bcm->dev && !bcm->dev->res_enabled) {
+		if (bcm->dev->use_autobaud_mode)
+			hci_uart_set_flow_control(hu, false);
+		else if (bcm->dev->drive_rts_on_open)
+			hci_uart_set_flow_control(hu, true);
+
+		err = bcm_gpio_set_power(bcm->dev, true);
+
+		if (bcm->dev->drive_rts_on_open)
+			hci_uart_set_flow_control(hu, false);
+
+		if (err) {
+			mutex_unlock(&bcm_device_lock);
+			return err;
+		}
+	}
+	mutex_unlock(&bcm_device_lock);
+
 	err = btbcm_initialize(hu->hdev, &fw_load_done, use_autobaud_mode);
 	if (err)
-		return err;
+		goto err_power_off;
 
 	if (!fw_load_done)
 		return 0;
@@ -638,7 +702,7 @@ static int bcm_setup(struct hci_uart *hu)
 
 	err = btbcm_finalize(hu->hdev, &fw_load_done, use_autobaud_mode);
 	if (err)
-		return err;
+		goto err_power_off;
 
 	/* Some devices ship with the controller default address.
 	 * Allow the bootloader to set a valid address through the
@@ -649,7 +713,14 @@ static int bcm_setup(struct hci_uart *hu)
 
 	if (!bcm_request_irq(bcm))
 		err = bcm_setup_sleep(hu);
+	if (err)
+		goto err_power_off;
 
+	return 0;
+
+err_power_off:
+	if (bcm->dev && bcm->dev->shutdown && hu->serdev)
+		bcm_shutdown(hu->hdev);
 	return err;
 }
 
@@ -834,7 +905,7 @@ static int bcm_suspend(struct device *dev)
 	 */
 	mutex_lock(&bcm_device_lock);
 
-	if (!bdev->hu)
+	if (!bdev->hu || !bdev->res_enabled)
 		goto unlock;
 
 	if (pm_runtime_active(dev))
@@ -876,8 +947,10 @@ static int bcm_resume(struct device *dev)
 	 */
 	mutex_lock(&bcm_device_lock);
 
-	if (!bdev->hu)
-		goto unlock;
+	if (!bdev->hu || !bdev->res_enabled) {
+		mutex_unlock(&bcm_device_lock);
+		return 0;
+	}
 
 	if (bdev->irq_wake_enabled) {
 		disable_irq_wake(bdev->irq);
@@ -887,10 +960,9 @@ static int bcm_resume(struct device *dev)
 
 	err = bcm_resume_device(dev);
 
-unlock:
 	mutex_unlock(&bcm_device_lock);
 
-	if (!err) {
+	if (!err && bdev->irq_acquired) {
 		pm_runtime_disable(dev);
 		pm_runtime_set_active(dev);
 		pm_runtime_enable(dev);
@@ -1578,7 +1650,17 @@ static int bcm_serdev_probe(struct serdev_device *serdev)
 			bcmdev->oper_speed = data->max_speed;
 	}
 
-	return hci_uart_register_device(&bcmdev->serdev_hu, &bcm_proto);
+	err = hci_uart_register_device(&bcmdev->serdev_hu, &bcm_proto);
+	if (err)
+		return err;
+
+	if (bcmdev->shutdown && bcmdev->serdev_hu.hdev) {
+		set_bit(HCI_QUIRK_NON_PERSISTENT_SETUP,
+			&bcmdev->serdev_hu.hdev->quirks);
+		bcmdev->serdev_hu.hdev->shutdown = bcm_shutdown;
+	}
+
+	return 0;
 }
 
 static void bcm_serdev_remove(struct serdev_device *serdev)
