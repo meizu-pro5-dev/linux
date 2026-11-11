@@ -3009,7 +3009,8 @@ static int __maybe_unused pl330_suspend(struct device *dev)
 	struct amba_device *pcdev = to_amba_device(dev);
 
 	pm_runtime_force_suspend(dev);
-	clk_unprepare(pcdev->pclk);
+	if (pm_runtime_is_irq_safe(dev))
+		clk_unprepare(pcdev->pclk);
 
 	return 0;
 }
@@ -3017,11 +3018,13 @@ static int __maybe_unused pl330_suspend(struct device *dev)
 static int __maybe_unused pl330_resume(struct device *dev)
 {
 	struct amba_device *pcdev = to_amba_device(dev);
-	int ret;
+	int ret = 0;
 
-	ret = clk_prepare(pcdev->pclk);
-	if (ret)
-		return ret;
+	if (pm_runtime_is_irq_safe(dev)) {
+		ret = clk_prepare(pcdev->pclk);
+		if (ret)
+			return ret;
+	}
 
 	pl330_exynos7420_unlock(amba_get_drvdata(pcdev));
 
@@ -3211,7 +3214,8 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
 		pcfg->data_buf_dep, pcfg->data_bus_width / 8, pcfg->num_chan,
 		pcfg->num_peri, pcfg->num_events);
 
-	pm_runtime_irq_safe(&adev->dev);
+	if (!adev->dev.pm_domain)
+		pm_runtime_irq_safe(&adev->dev);
 	pm_runtime_use_autosuspend(&adev->dev);
 	pm_runtime_set_autosuspend_delay(&adev->dev, PL330_AUTOSUSPEND_DELAY);
 	pm_runtime_mark_last_busy(&adev->dev);

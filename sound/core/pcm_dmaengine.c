@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/dmaengine.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -320,6 +321,14 @@ int snd_dmaengine_pcm_open(struct snd_pcm_substream *substream,
 	if (!prtd)
 		return -ENOMEM;
 
+	if (chan->device && chan->device->dev) {
+		ret = pm_runtime_resume_and_get(chan->device->dev);
+		if (ret < 0) {
+			kfree(prtd);
+			return ret;
+		}
+	}
+
 	prtd->dma_chan = chan;
 
 	substream->runtime->private_data = prtd;
@@ -358,8 +367,14 @@ EXPORT_SYMBOL_GPL(snd_dmaengine_pcm_open_request_chan);
 int snd_dmaengine_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct dmaengine_pcm_runtime_data *prtd = substream_to_prtd(substream);
+	struct device *dma_dev = prtd->dma_chan->device ?
+				 prtd->dma_chan->device->dev : NULL;
 
 	dmaengine_synchronize(prtd->dma_chan);
+	if (dma_dev) {
+		pm_runtime_mark_last_busy(dma_dev);
+		pm_runtime_put_autosuspend(dma_dev);
+	}
 	kfree(prtd);
 
 	return 0;
