@@ -22,6 +22,8 @@
 #include <linux/irqdomain.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+#include <linux/preempt.h>
 #include <linux/property.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -415,7 +417,20 @@ static int samsung_pinmux_set_mux(struct pinctrl_dev *pctldev,
 				  unsigned selector,
 				  unsigned group)
 {
+	struct samsung_pinctrl_drv_data *drvdata = pinctrl_dev_get_drvdata(pctldev);
+	int ret;
+
+	if (drvdata->dev->pm_domain) {
+		ret = pm_runtime_resume_and_get(drvdata->dev);
+		if (ret < 0)
+			return ret;
+	}
+
 	samsung_pinmux_setup(pctldev, selector, group);
+
+	if (drvdata->dev->pm_domain)
+		pm_runtime_put(drvdata->dev);
+
 	return 0;
 }
 
@@ -448,6 +463,13 @@ static int samsung_pinconf_rw(struct pinctrl_dev *pctldev, unsigned int pin,
 	if (cfg_type >= PINCFG_TYPE_NUM || !type->fld_width[cfg_type])
 		return -EINVAL;
 
+	if (drvdata->dev->pm_domain) {
+		int ret = pm_runtime_resume_and_get(drvdata->dev);
+
+		if (ret < 0)
+			return ret;
+	}
+
 	width = type->fld_width[cfg_type];
 	cfg_reg = type->reg_offset[cfg_type];
 
@@ -469,6 +491,9 @@ static int samsung_pinconf_rw(struct pinctrl_dev *pctldev, unsigned int pin,
 	}
 
 	raw_spin_unlock_irqrestore(&bank->slock, flags);
+
+	if (drvdata->dev->pm_domain)
+		pm_runtime_put(drvdata->dev);
 
 	return 0;
 }
@@ -555,15 +580,42 @@ static void samsung_gpio_set_value(struct gpio_chip *gc,
 	writel(data, reg + type->reg_offset[PINCFG_TYPE_DAT]);
 }
 
+static int samsung_gpio_pm_get(struct samsung_pin_bank *bank, bool *put)
+{
+	struct device *dev = bank->drvdata->dev;
+
+	*put = false;
+	if (!dev->pm_domain)
+		return 0;
+	if (in_atomic() || irqs_disabled())
+		return pm_runtime_status_suspended(dev) ? -EAGAIN : 0;
+	if (pm_runtime_resume_and_get(dev) < 0)
+		return -EIO;
+	*put = true;
+	return 0;
+}
+
+static void samsung_gpio_pm_put(struct samsung_pin_bank *bank, bool put)
+{
+	if (put)
+		pm_runtime_put(bank->drvdata->dev);
+}
+
 /* gpiolib gpio_set callback function */
 static void samsung_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
 {
 	struct samsung_pin_bank *bank = gpiochip_get_data(gc);
 	unsigned long flags;
+	bool put;
+
+	if (samsung_gpio_pm_get(bank, &put) < 0)
+		return;
 
 	raw_spin_lock_irqsave(&bank->slock, flags);
 	samsung_gpio_set_value(gc, offset, value);
 	raw_spin_unlock_irqrestore(&bank->slock, flags);
+
+	samsung_gpio_pm_put(bank, put);
 }
 
 /* gpiolib gpio_get callback function */
@@ -573,12 +625,18 @@ static int samsung_gpio_get(struct gpio_chip *gc, unsigned offset)
 	u32 data;
 	struct samsung_pin_bank *bank = gpiochip_get_data(gc);
 	const struct samsung_pin_bank_type *type = bank->type;
+	bool put;
+
+	if (samsung_gpio_pm_get(bank, &put) < 0)
+		return 0;
 
 	reg = bank->pctl_base + bank->pctl_offset;
 
 	data = readl(reg + type->reg_offset[PINCFG_TYPE_DAT]);
 	data >>= offset;
 	data &= 1;
+
+	samsung_gpio_pm_put(bank, put);
 	return data;
 }
 
@@ -624,11 +682,18 @@ static int samsung_gpio_direction_input(struct gpio_chip *gc, unsigned offset)
 {
 	struct samsung_pin_bank *bank = gpiochip_get_data(gc);
 	unsigned long flags;
+	bool put;
 	int ret;
+
+	ret = samsung_gpio_pm_get(bank, &put);
+	if (ret < 0)
+		return ret;
 
 	raw_spin_lock_irqsave(&bank->slock, flags);
 	ret = samsung_gpio_set_direction(gc, offset, true);
 	raw_spin_unlock_irqrestore(&bank->slock, flags);
+
+	samsung_gpio_pm_put(bank, put);
 	return ret;
 }
 
@@ -638,12 +703,19 @@ static int samsung_gpio_direction_output(struct gpio_chip *gc, unsigned offset,
 {
 	struct samsung_pin_bank *bank = gpiochip_get_data(gc);
 	unsigned long flags;
+	bool put;
 	int ret;
+
+	ret = samsung_gpio_pm_get(bank, &put);
+	if (ret < 0)
+		return ret;
 
 	raw_spin_lock_irqsave(&bank->slock, flags);
 	samsung_gpio_set_value(gc, offset, value);
 	ret = samsung_gpio_set_direction(gc, offset, false);
 	raw_spin_unlock_irqrestore(&bank->slock, flags);
+
+	samsung_gpio_pm_put(bank, put);
 
 	return ret;
 }
@@ -1163,9 +1235,15 @@ static int samsung_pinctrl_probe(struct platform_device *pdev)
 		}
 	}
 
+	if (dev->pm_domain) {
+		pm_runtime_set_active(dev);
+		pm_runtime_enable(dev);
+		pm_runtime_get_noresume(dev);
+	}
+
 	ret = samsung_pinctrl_register(pdev, drvdata);
 	if (ret)
-		goto err_put_banks;
+		goto err_pm_disable;
 
 	if (ctrl->eint_gpio_init)
 		ctrl->eint_gpio_init(drvdata);
@@ -1178,10 +1256,18 @@ static int samsung_pinctrl_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, drvdata);
 
+	if (dev->pm_domain)
+		pm_runtime_put(dev);
+
 	return 0;
 
 err_unregister:
 	samsung_pinctrl_unregister(pdev, drvdata);
+err_pm_disable:
+	if (dev->pm_domain) {
+		pm_runtime_put_noidle(dev);
+		pm_runtime_disable(dev);
+	}
 err_put_banks:
 	samsung_banks_node_put(drvdata);
 	return ret;
@@ -1196,6 +1282,9 @@ static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
 {
 	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
 	int i;
+
+	if (dev->pm_domain)
+		return 0;
 
 	for (i = 0; i < drvdata->nr_banks; i++) {
 		struct samsung_pin_bank *bank = &drvdata->pin_banks[i];
@@ -1246,6 +1335,9 @@ static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
 {
 	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
 	int i;
+
+	if (dev->pm_domain)
+		return 0;
 
 	if (drvdata->resume)
 		drvdata->resume(drvdata);

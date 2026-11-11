@@ -271,7 +271,54 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_disp[] = {
 };
 static const u32 exynos7420_cfw_disp[] = { EXYNOS7420_CFW_DISP_RW };
 
+/*
+ * BLK_AUD (vendor pm_domains-exynos7420-cal.h:424-449, lpass.c:586-654,
+ * lpass-exynos7420.c:234-267): local clocks cover LPASS bridges/SRAM/DMAC/
+ * SMMU/GPIO/UART/I2S; save_aud preserves CMU_AUD[0..5] and gpz0/gpz1 pads +
+ * EINT configuration[6..23] across BLK_AUD power collapses.
+ */
+static const struct exynos7420_reg_bits exynos7420_local_clks_aud[] = {
+	{ 0x114c0800, BIT(31) | BIT(30) | BIT(28) | BIT(27) | BIT(23) },
+	{ 0x114c0900, BIT(31) | BIT(28) | BIT(27) | BIT(25) | BIT(20) },
+	{ 0x114c0a00, BIT(29) | BIT(28) },
+};
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_aud[] = {
+	{ 0x105c1204, BIT(0) },
+	{ 0x105c1340, BIT(0) },
+	{ 0x105c1440, BIT(0) },
+	{ 0x105c1480, BIT(0) },
+	{ 0x105c14c0, BIT(0) },
+	{ 0x105c1500, BIT(0) },
+	{ 0x105c1540, BIT(1) | BIT(0) },
+	{ 0x105c1580, BIT(0) },
+};
+static struct exynos7420_sfr exynos7420_save_aud[] = {
+	/* [0..5] CMU_AUD */
+	{ 0x114c0600 }, { 0x114c0604 }, { 0x114c0200 },
+	{ 0x114c0800 }, { 0x114c0900 }, { 0x114c0a00 },
+	/* [6..17] pinctrl_aud gpz0 & gpz1 CON/DAT/PUD/DRV/CON_PDN/PUD_PDN */
+	{ 0x114b0000 }, { 0x114b0004 }, { 0x114b0008 },
+	{ 0x114b000c }, { 0x114b0010 }, { 0x114b0014 },
+	{ 0x114b0020 }, { 0x114b0024 }, { 0x114b0028 },
+	{ 0x114b002c }, { 0x114b0030 }, { 0x114b0034 },
+	/* [18..23] pinctrl_aud EINT CON/FLTCON/MASK */
+	{ 0x114b0700 }, { 0x114b0704 },
+	{ 0x114b0800 }, { 0x114b0804 },
+	{ 0x114b0900 }, { 0x114b0904 },
+};
+
 static const struct exynos7420_pd_cfg exynos7420_pds[] = {
+	{
+		.name = "pd-aud",
+		.pmu_off = 0x4000,
+		.is_aud = true,
+		.local_clks = exynos7420_local_clks_aud,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_aud),
+		.sys_pwr_regs = exynos7420_sys_pwr_aud,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_aud),
+		.save_regs = exynos7420_save_aud,
+		.num_save_regs = ARRAY_SIZE(exynos7420_save_aud),
+	},
 	{
 		.name = "pd-mfc",
 		.pmu_off = 0x41a0,
@@ -401,8 +448,13 @@ static void exynos7420_save_regs(const struct exynos7420_pd_cfg *pd)
 
 	for (i = 0; i < pd->num_save_regs; i++) {
 		struct exynos7420_sfr *sfr = &pd->save_regs[i];
-		void __iomem *base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
+		void __iomem *base;
 
+		/* Ensure pclk_gpio_aud (BIT 20) is gated on before reading gpz */
+		if (pd->is_aud && i == 6)
+			exynos7420_rmw_phys(0x114c0900, BIT(20), 0);
+
+		base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
 		if (!base)
 			continue;
 		sfr->val = readl_relaxed(base + (sfr->pa & ~PAGE_MASK));
@@ -457,6 +509,7 @@ static const struct {
 	phys_addr_t base;
 	u32 pmu_off;
 } exynos7420_cmu_owners[] = {
+	{ 0x114c0000, 0x4000 },	/* CMU_AUD */
 	{ 0x140f0000, 0x4040 },	/* CMU_CAM0_LOCAL */
 	{ 0x144d0000, 0x4040 },	/* CMU_CAM0 */
 	{ 0x141f0000, 0x4060 },	/* CMU_CAM1_LOCAL */
@@ -559,6 +612,88 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 	return 0;
 }
 
+static void exynos7420_aud_post_power_on(void __iomem *pmu_base,
+					 const struct exynos7420_pd_cfg *cfg)
+{
+	void __iomem *cmu, *gpz, *lpass, *smmu;
+	size_t i;
+
+	cmu = ioremap(0x114c0000, 0x1000);
+	gpz = ioremap(0x114b0000, 0x1000);
+	lpass = ioremap(0x11400000, 0x100);
+	smmu = ioremap(0x114e0000, 0x100);
+
+	if (cmu) {
+		if (cfg && cfg->save_regs[0].valid) {
+			writel_relaxed(cfg->save_regs[0].val, cmu + 0x0600);
+			writel_relaxed(cfg->save_regs[1].val, cmu + 0x0604);
+			writel_relaxed(cfg->save_regs[2].val, cmu + 0x0200);
+		} else {
+			writel_relaxed(readl_relaxed(cmu + 0x0200) &
+				       ~(BIT(20) | BIT(16) | BIT(12)),
+				       cmu + 0x0200);
+			writel_relaxed(0x0, cmu + 0x0600);
+			writel_relaxed(0x0, cmu + 0x0604);
+		}
+
+		writel_relaxed(readl_relaxed(cmu + 0x0800) |
+			       BIT(31) | BIT(30) | BIT(28) | BIT(27) | BIT(23),
+			       cmu + 0x0800);
+		writel_relaxed(readl_relaxed(cmu + 0x0900) |
+			       BIT(31) | BIT(28) | BIT(27) | BIT(25) | BIT(20),
+			       cmu + 0x0900);
+		writel_relaxed(readl_relaxed(cmu + 0x0a00) | BIT(29) | BIT(28),
+			       cmu + 0x0a00);
+		readl_relaxed(cmu + 0x0a00);
+	}
+
+	if (gpz && cfg) {
+		for (i = 6; i < cfg->num_save_regs; i++) {
+			if (cfg->save_regs[i].valid)
+				writel_relaxed(cfg->save_regs[i].val,
+					       gpz + (cfg->save_regs[i].pa & 0xfff));
+		}
+		readl_relaxed(gpz + 0x0904);
+	}
+
+	if (lpass) {
+		writel_relaxed(0x0, lpass + 0x0008);
+		udelay(100);
+		/* LPASS_SW_RESET_UART(10) | I2S(8) | MEM(1) | DMA(0) */
+		writel_relaxed(0x00000503, lpass + 0x0008);
+	}
+
+	if (smmu)
+		writel_relaxed(0x0, smmu + 0x0000);
+
+	/* Release gpz0/gpz1 pad retention after pad/EINT registers are restored */
+	writel_relaxed(0x1, pmu_base + 0x1340);
+	writel_relaxed(BIT(28), pmu_base + 0x3028);
+
+	if (lpass) {
+		writel_relaxed(0x00000000, lpass + 0x0048);
+		/* LPASS_INTR_DMA(6) | GPIO(5) | I2S(4) | UART(1) | SFR(0) */
+		writel_relaxed(0x00000073, lpass + 0x0058);
+		readl_relaxed(lpass + 0x0058);
+	}
+
+	if (cmu && cfg && cfg->save_regs[3].valid) {
+		writel_relaxed(cfg->save_regs[3].val | BIT(30), cmu + 0x0800);
+		writel_relaxed(cfg->save_regs[4].val, cmu + 0x0900);
+		writel_relaxed(cfg->save_regs[5].val, cmu + 0x0a00);
+		readl_relaxed(cmu + 0x0a00);
+	}
+
+	if (smmu)
+		iounmap(smmu);
+	if (lpass)
+		iounmap(lpass);
+	if (gpz)
+		iounmap(gpz);
+	if (cmu)
+		iounmap(cmu);
+}
+
 static int exynos7420_power_on_one(void __iomem *pmu_base,
 				   const struct exynos7420_pd_cfg *cfg)
 {
@@ -592,8 +727,13 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 	}
 
 	/* 5. Restore saved CMU registers, enable local and async clocks. */
-	exynos7420_restore_regs(cfg);
-	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
+	if (cfg->is_aud) {
+		exynos7420_aud_post_power_on(pmu_base, cfg);
+	} else {
+		exynos7420_restore_regs(cfg);
+		exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks,
+					  true);
+	}
 	if (!cfg->async_before_on)
 		exynos7420_apply_async_clks(pmu_base, cfg);
 
@@ -716,14 +856,13 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 };
 
 /*
- * Domains genpd must never power off. Every other Exynos7420 domain (CAM0,
- * CAM1, ISP0, ISP1, MFC, MSCL) is powered on by genpd for its consumers and
- * off when unused, including by genpd_power_off_unused() at late_initcall.
- *  AUD  - LPASS, I2S0, ADMA and the BT UART; LPASS is set up once by
- *         exynos7420_init_aud_lpass() and the gpz pads lose state when off.
+ * Domains genpd must never power off. Every other Exynos7420 domain (AUD,
+ * CAM0, CAM1, DISP, ISP0, ISP1, MFC, MSCL, VPP) is powered on by genpd for its
+ * consumers and off when unused, including by genpd_power_off_unused() at
+ * late_initcall.
  *  G3D  - GPU power is owned by m86-gpu-dvfs.
  */
-static const char * const exynos_pd_always_on[] = { "AUD", "G3D" };
+static const char * const exynos_pd_always_on[] = { "G3D" };
 
 static const char *exynos_get_domain_name(struct device *dev,
 					  struct device_node *node)
@@ -840,7 +979,7 @@ core_initcall(exynos4_pm_init_power_domain);
  */
 static int __init exynos7420_init_aud_lpass(void)
 {
-	void __iomem *pmu_base, *lpass_base, *smmu_base, *ccore_base, *rtc_base;
+	void __iomem *pmu_base, *lpass_base, *ccore_base, *rtc_base;
 	u32 sw_reset, intr_mask, aud_status;
 
 	if (!of_machine_is_compatible("meizu,m86") &&
@@ -862,12 +1001,8 @@ static int __init exynos7420_init_aud_lpass(void)
 	}
 	aud_status = readl_relaxed(pmu_base + 0x4004);
 
-	writel_relaxed(0x1, pmu_base + 0x1340);
-	writel_relaxed(BIT(28), pmu_base + 0x3028);
-
 	/* Route 32.768 kHz RTC clock to XCLKOUT2 (PMU_RTC_CLKO_SEL = 0x0) */
 	writel_relaxed(0x0, pmu_base + 0x001c);
-	iounmap(pmu_base);
 
 	/* Ensure PCLK_RTC (0x105b0900 BIT(2)) is enabled before touching RTCCON */
 	ccore_base = ioremap(0x105b0000, 0x1000);
@@ -887,32 +1022,23 @@ static int __init exynos7420_init_aud_lpass(void)
 
 	/* LPASS and sysmmu_aud live in BLK_AUD: never touch them powered off */
 	if ((aud_status & 0xf) != 0xf) {
+		iounmap(pmu_base);
 		pr_err("exynos-pd: BLK_AUD power-on timed out (status %#x), skipping LPASS init\n",
 		       aud_status);
 		return -ETIMEDOUT;
 	}
 
+	exynos7420_aud_post_power_on(pmu_base, NULL);
+	iounmap(pmu_base);
+
 	lpass_base = ioremap(0x11400000, 0x100);
 	if (lpass_base) {
-		writel_relaxed(0x0, lpass_base + 0x0008);
-		udelay(100);
-		/* LPASS_SW_RESET_UART(10) | I2S(8) | MEM(1) | DMA(0) */
-		writel_relaxed(0x00000503, lpass_base + 0x0008);
-		writel_relaxed(0x00000000, lpass_base + 0x0048);
-		/* LPASS_INTR_DMA(6) | GPIO(5) | I2S(4) | UART(1) | SFR(0) */
-		writel_relaxed(0x00000073, lpass_base + 0x0058);
 		sw_reset = readl_relaxed(lpass_base + 0x0008);
 		intr_mask = readl_relaxed(lpass_base + 0x0058);
 		iounmap(lpass_base);
 
 		pr_info("exynos-pd: initialized BLK_AUD LPASS (sw_reset=%#x intr_mask=%#x)\n",
 			sw_reset, intr_mask);
-	}
-
-	smmu_base = ioremap(0x114e0000, 0x100);
-	if (smmu_base) {
-		writel_relaxed(0x0, smmu_base + 0x0000);
-		iounmap(smmu_base);
 	}
 
 	return 0;

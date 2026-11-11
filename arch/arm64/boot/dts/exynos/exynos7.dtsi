@@ -425,6 +425,7 @@
 			compatible = "samsung,exynos7-pinctrl";
 			reg = <0x114b0000 0x1000>;
 			interrupts = <GIC_SPI 92 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&pd_aud>;
 		};
 
 		hsi2c_0: i2c@13640000 {
@@ -757,6 +758,9 @@
 			compatible = "samsung,exynos7-clock-aud";
 			reg = <0x114c0000 0x1000>;
 			#clock-cells = <1>;
+			clocks = <&fin_pll>;
+			clock-names = "fin_pll";
+			power-domains = <&pd_aud>;
 		};
 
 		clock_mfc: clock-controller@15280000 {

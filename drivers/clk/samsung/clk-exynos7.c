@@ -1865,7 +1865,7 @@ static const struct samsung_cmu_info cam0_cmu_info = {
 PNAME(mout_aud_pll_user_p) = { "fin_pll", "fout_aud_pll" };
 PNAME(mout_aud_group_p) = { "dout_aud_cdclk", "ioclk_audiocdclk0" };
 
-static const unsigned long aud_clk_regs[] __initconst = {
+static const unsigned long aud_clk_regs[] = {
 	MUX_SEL_AUD,
 	DIV_AUD0,
 	DIV_AUD1,
@@ -1874,13 +1874,13 @@ static const unsigned long aud_clk_regs[] __initconst = {
 	ENABLE_SCLK_AUD,
 };
 
-static const struct samsung_mux_clock aud_mux_clks[] __initconst = {
+static const struct samsung_mux_clock aud_mux_clks[] = {
 	MUX(0, "mout_sclk_i2s", mout_aud_group_p, MUX_SEL_AUD, 12, 1),
 	MUX(0, "mout_sclk_pcm", mout_aud_group_p, MUX_SEL_AUD, 16, 1),
 	MUX(0, "mout_aud_pll_user", mout_aud_pll_user_p, MUX_SEL_AUD, 20, 1),
 };
 
-static const struct samsung_div_clock aud_div_clks[] __initconst = {
+static const struct samsung_div_clock aud_div_clks[] = {
 	DIV(0, "dout_aud_ca5", "mout_aud_pll_user", DIV_AUD0, 0, 4),
 	DIV(0, "dout_aclk_aud", "dout_aud_ca5", DIV_AUD0, 4, 4),
 	DIV(0, "dout_aud_pclk_dbg", "dout_aud_ca5", DIV_AUD0, 8, 4),
@@ -1893,7 +1893,7 @@ static const struct samsung_div_clock aud_div_clks[] __initconst = {
 	DIV(0, "dout_aud_cdclk", "mout_aud_pll_user", DIV_AUD1, 24, 4),
 };
 
-static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
+static const struct samsung_gate_clock aud_gate_clks[] = {
 	GATE(SCLK_PCM, "sclk_pcm", "dout_sclk_pcm",
 			ENABLE_SCLK_AUD, 27, CLK_SET_RATE_PARENT, 0),
 	GATE(SCLK_I2S, "sclk_i2s", "dout_sclk_i2s",
@@ -1933,7 +1933,7 @@ static const struct samsung_gate_clock aud_gate_clks[] __initconst = {
 			ENABLE_ACLK_AUD, 31, CLK_IGNORE_UNUSED, 0),
 };
 
-static const struct samsung_cmu_info aud_cmu_info __initconst = {
+static const struct samsung_cmu_info aud_cmu_info = {
 	.mux_clks		= aud_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(aud_mux_clks),
 	.div_clks		= aud_div_clks,
@@ -1943,9 +1943,11 @@ static const struct samsung_cmu_info aud_cmu_info __initconst = {
 	.nr_clk_ids		= AUD_NR_CLK,
 	.clk_regs		= aud_clk_regs,
 	.nr_clk_regs		= ARRAY_SIZE(aud_clk_regs),
+	.clk_name		= "fin_pll",
+	.no_pm_smc		= true,
 };
 
-static void __init exynos7_clk_aud_init(struct device_node *np)
+static void __init exynos7_clk_aud_hw_init(struct device_node *np)
 {
 	void __iomem *reg_base = of_iomap(np, 0);
 
@@ -1964,7 +1966,7 @@ static void __init exynos7_clk_aud_init(struct device_node *np)
 		writel_relaxed(0x0, reg_base + DIV_AUD1);
 
 		val = readl_relaxed(reg_base + ENABLE_ACLK_AUD);
-		val |= BIT(31) | BIT(28) | BIT(27) | BIT(23);
+		val |= BIT(31) | BIT(30) | BIT(28) | BIT(27) | BIT(23);
 		writel_relaxed(val, reg_base + ENABLE_ACLK_AUD);
 
 		val = readl_relaxed(reg_base + ENABLE_PCLK_AUD);
@@ -1977,12 +1979,7 @@ static void __init exynos7_clk_aud_init(struct device_node *np)
 
 		iounmap(reg_base);
 	}
-
-	samsung_cmu_register_one(np, &aud_cmu_info);
 }
-
-CLK_OF_DECLARE(exynos7_clk_aud, "samsung,exynos7-clock-aud",
-		exynos7_clk_aud_init);
 
 /* Register Offset definitions for CMU_G3D (0x14AA0000) */
 #define G3D_PLL_LOCK			0x0000
@@ -2405,11 +2402,18 @@ static const struct samsung_cmu_info vpp_cmu_info = {
 
 static int __init exynos7_cmu_probe(struct platform_device *pdev)
 {
+	if (of_device_is_compatible(pdev->dev.of_node,
+				    "samsung,exynos7-clock-aud"))
+		exynos7_clk_aud_hw_init(pdev->dev.of_node);
+
 	return exynos_arm64_register_cmu_pm(pdev, false);
 }
 
 static const struct of_device_id exynos7_cmu_of_match[] = {
 	{
+		.compatible = "samsung,exynos7-clock-aud",
+		.data = &aud_cmu_info,
+	}, {
 		.compatible = "samsung,exynos7-clock-mfc",
 		.data = &mfc_cmu_info,
 	}, {
