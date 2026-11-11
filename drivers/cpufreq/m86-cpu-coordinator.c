@@ -498,7 +498,6 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 	 */
 	{
 		unsigned int j;
-		u32 a, b;
 		int t = 0, r;
 		unsigned long hz = clk_get_rate(c->clk);
 		int uv = regulator_get_voltage(c->supply);
@@ -523,25 +522,9 @@ static int m86_policy_init(struct cpufreq_policy *policy)
 		} else {
 			c->thermal_cap = cap_for_temp(c, t);
 		}
-		if (i) {
-			r = regmap_read(coordinator->ema, 0x38, &a);
-			if (r)
-				return r;
-			if (a != 0x210211)
-				return -EIO;
-		} else {
-			unsigned int l1 = uv >= 900000 ? 6 : uv >= 800000 ? 8 : 7;
-			unsigned int l2 = uv >= 900000 ? 5 : uv >= 800000 ? 11 : 9;
-
-			r = regmap_read(coordinator->ema, 0x138, &a);
-			if (r)
-				return r;
-			r = regmap_read(coordinator->ema, 0x2908, &b);
-			if (r)
-				return r;
-			if (a != (2U | (l1 << 4)) || b != (0x72U | (l2 << 8)))
-				return -EIO;
-		}
+		r = verify_ema(coordinator, i, uv);
+		if (r)
+			return r;
 	}
 	c->cur_khz = clk_get_rate(c->clk) / 1000;
 	c->cur_uv = regulator_get_voltage(c->supply);
