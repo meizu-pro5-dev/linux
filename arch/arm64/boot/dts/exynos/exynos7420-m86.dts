@@ -1914,9 +1914,13 @@
 			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSA_690>,
 			  <&clock_top0 CLK_MOUT_ACLK_CAM0_BNSB_690>,
 			  <&clock_top0 CLK_MOUT_ACLK_CAM0_CSIS1_174>,
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_3AA0_690>,
+			  <&clock_top0 CLK_MOUT_ACLK_CAM0_3AA1_468>,
 			  <&clock_top0 CLK_MOUT_SCLK_ISP_SENSOR0>,
 			  <&clock_top0 CLK_MOUT_SCLK_ISP_SENSOR1>;
 	assigned-clock-parents = <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
+				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
 				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
 				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
 				 <&clock_top0 CLK_MOUT_TOP0_CC_PLL_HALF>,
