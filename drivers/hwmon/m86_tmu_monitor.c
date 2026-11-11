@@ -2,6 +2,7 @@
 /* Exynos7420 P0 telemetry, hardware threshold interrupt-driven thermal zones, and critical shutdown. */
 #include <linux/hwmon.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/thermal.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -48,6 +49,8 @@ struct m86_tmu {
 	struct device *hwmon;
 	struct thermal_zone_device *tzd;
 	struct thermal_trip trips[3];
+	u32 gpu_saved_control;
+	bool gpu_off;
 	int last_temp;
 	bool temp_valid;
 };
@@ -93,7 +96,7 @@ static u32 m86_tmu_temp_to_code(u32 trim, int temp_c)
 	return clamp_val(code, 0, 0x1ff);
 }
 
-static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
+static void m86_tmu_program_thresholds(struct m86_tmu *t, int bank, bool enable_irq)
 {
 	void __iomem *b = t->base[bank];
 	u32 trim = t->trim[bank];
@@ -132,10 +135,17 @@ static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
 	 * remote probe INTEN registers masked; otherwise their INTPEND bits are
 	 * never cleared and the shared IRQ storms.
 	 */
-	writel(EXYNOS7420_TMU_TRIP_INT_EN, b + EXYNOS7420_TMU_INTEN);
+	writel(enable_irq ? EXYNOS7420_TMU_TRIP_INT_EN : 0,
+	       b + EXYNOS7420_TMU_INTEN);
 	for (j = 1; j < 5; j++)
 		writel(0, b + EXYNOS7420_TMU_INTEN + j * 0x10);
+}
 
+static void m86_tmu_set_thresholds(struct m86_tmu *t, int bank)
+{
+	void __iomem *b = t->base[bank];
+
+	m86_tmu_program_thresholds(t, bank, true);
 	dev_info(t->dev, "TMU%d thresholds rise7_6=%08x fall7_6=%08x inten=%08x\n",
 		 bank, readl(b + EXYNOS7420_TMU_THD_TEMP_RISE7_6),
 		 readl(b + EXYNOS7420_TMU_THD_TEMP_FALL7_6),
@@ -157,6 +167,8 @@ static int m86_read_locked(struct device *dev, enum hwmon_sensor_types type,
 	int e1, e2, ret, attempt;
 
 	trim = t->trim[channel];
+	if (channel == 2 && t->gpu_off)
+		return -ENODATA;
 	if (!(readl(b + EXYNOS7420_TMU_REG_CONTROL) & BIT(0))) {
 		dev_err_ratelimited(dev, "TMU%d sensing disabled control=%08x\n",
 				    channel, readl(b + EXYNOS7420_TMU_REG_CONTROL));
@@ -227,7 +239,8 @@ static int m86_read_max_temp_locked(struct m86_tmu *t, int *temp)
 
 	for (i = 0; i < 4; i++) {
 		/* Skip GPU TMU2 while sensing is disabled during BLK_G3D power-off. */
-		if (i == 2 && !(readl(t->base[2] + EXYNOS7420_TMU_REG_CONTROL) & BIT(0)))
+		if (i == 2 && (t->gpu_off ||
+			       !(readl(t->base[2] + EXYNOS7420_TMU_REG_CONTROL) & BIT(0))))
 			continue;
 		ret = m86_read_locked(t->hwmon, hwmon_temp, hwmon_temp_input, i, &value);
 		if (ret)
@@ -289,6 +302,117 @@ int m86_tmu_unregister_notifier(struct notifier_block *nb)
 	return blocking_notifier_chain_unregister(&m86_tmu_chain, nb);
 }
 EXPORT_SYMBOL_GPL(m86_tmu_unregister_notifier);
+
+/*
+ * Disable GPU TMU2 (bank 2, 0x10068000) sensing and 115 C hardware THERM_TRIP
+ * before cutting power to BLK_G3D / BUCK6 so remote diode power-down glitches
+ * cannot trigger a spurious IRQ or PS_HOLD emergency power-off.
+ */
+int m86_tmu_gpu_power_off(void)
+{
+	struct m86_tmu *t;
+	void __iomem *b;
+	u32 control, status;
+	int j, ret = 0;
+
+	mutex_lock(&m86_tmu_access);
+	t = m86_tmu_instance;
+	if (!t) {
+		ret = -EPROBE_DEFER;
+		goto unlock;
+	}
+	if (t->gpu_off)
+		goto unlock;
+
+	b = t->base[2];
+	control = readl(b + EXYNOS7420_TMU_REG_CONTROL);
+	if (control & BIT(0))
+		t->gpu_saved_control = control;
+
+	for (j = 0; j < 5; j++)
+		writel(0, b + EXYNOS7420_TMU_INTEN + j * 0x10);
+	writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
+
+	writel(control & ~(BIT(12) | BIT(0)), b + EXYNOS7420_TMU_REG_CONTROL);
+	ret = readl_poll_timeout(b + EXYNOS7420_TMU_REG_STATUS, status,
+				 status & BIT(0), 10, 20000);
+	if (ret) {
+		writel(t->gpu_saved_control, b + EXYNOS7420_TMU_REG_CONTROL);
+		writel(EXYNOS7420_TMU_TRIP_INT_EN, b + EXYNOS7420_TMU_INTEN);
+		dev_err(t->dev, "TMU2 power-off idle timeout: status=%#x\n", status);
+		goto unlock;
+	}
+
+	writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
+	t->gpu_off = true;
+unlock:
+	mutex_unlock(&m86_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_gpu_power_off);
+
+/*
+ * Re-enable GPU TMU2 sensing after BLK_G3D is powered on and clocks/rails are
+ * stable. Keep THERM_TRIP_EN (CONTROL[12]) and INTEN masked until a valid
+ * settled temperature sample in [5 C, 105 C] is observed, then silently restore
+ * hardware trip and interrupt masks without serial log spam.
+ */
+int m86_tmu_gpu_power_on(void)
+{
+	struct m86_tmu *t;
+	void __iomem *b;
+	long temp = 0;
+	int attempt, j, ret = 0;
+
+	mutex_lock(&m86_tmu_access);
+	t = m86_tmu_instance;
+	if (!t) {
+		ret = -EPROBE_DEFER;
+		goto unlock;
+	}
+	b = t->base[2];
+	if (!t->gpu_off) {
+		if (!(readl(b + EXYNOS7420_TMU_REG_CONTROL) & BIT(0)))
+			ret = -EIO;
+		goto unlock;
+	}
+
+	for (j = 0; j < 5; j++)
+		writel(0, b + EXYNOS7420_TMU_INTEN + j * 0x10);
+	writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
+
+	writel((t->gpu_saved_control & ~BIT(12)) | BIT(0),
+	       b + EXYNOS7420_TMU_REG_CONTROL);
+	t->gpu_off = false;
+
+	for (attempt = 0; attempt < 20; attempt++) {
+		ret = m86_read_locked(t->hwmon, hwmon_temp, hwmon_temp_input, 2, &temp);
+		if (!ret && temp >= 5000 && temp <= 105000)
+			break;
+		if (ret && ret != -EAGAIN)
+			break;
+		usleep_range(150, 250);
+	}
+
+	if (ret || temp < 5000 || temp > 105000) {
+		writel(t->gpu_saved_control & ~(BIT(12) | BIT(0)),
+		       b + EXYNOS7420_TMU_REG_CONTROL);
+		writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
+		t->gpu_off = true;
+		dev_err(t->dev, "TMU2 power-on settle failed: ret=%d temp=%ld status=%#x\n",
+			ret, temp, readl(b + EXYNOS7420_TMU_REG_STATUS));
+		ret = ret ?: -ERANGE;
+		goto unlock;
+	}
+
+	writel(EXYNOS7420_TMU_CLEAR_ALL_INT, b + EXYNOS7420_TMU_INTPEND);
+	writel(t->gpu_saved_control | BIT(0), b + EXYNOS7420_TMU_REG_CONTROL);
+	writel(EXYNOS7420_TMU_TRIP_INT_EN, b + EXYNOS7420_TMU_INTEN);
+unlock:
+	mutex_unlock(&m86_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_gpu_power_on);
 
 static struct thermal_zone_device_ops m86_thermal_ops = {
 	.get_temp = m86_thermal_temp,
@@ -432,6 +556,8 @@ static int m86_probe(struct platform_device *pdev)
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "TMU%d hw init failed\n", i);
 
+		if (i == 2)
+			t->gpu_saved_control = readl(t->base[2] + EXYNOS7420_TMU_REG_CONTROL);
 		m86_tmu_set_thresholds(t, i);
 	}
 
@@ -512,10 +638,20 @@ static int m86_tmu_resume(struct device *dev)
 
 	mutex_lock(&m86_tmu_access);
 	for (i = 0; i < 4; i++) {
-		if (t->base[i]) {
-			m86_tmu_hw_init_bank(t, i);
-			m86_tmu_set_thresholds(t, i);
+		if (!t->base[i])
+			continue;
+		if (i == 2 && t->gpu_off) {
+			/* Keep TMU2 sensing and 115 C trip disabled while BLK_G3D is off. */
+			writel(t->gpu_saved_control & ~(BIT(12) | BIT(0)),
+			       t->base[2] + EXYNOS7420_TMU_REG_CONTROL);
+			writel(0xe10, t->base[2] + EXYNOS7420_TMU_REG_SAMPLING_INTERVAL);
+			m86_tmu_program_thresholds(t, 2, false);
+			continue;
 		}
+		m86_tmu_hw_init_bank(t, i);
+		if (i == 2)
+			t->gpu_saved_control = readl(t->base[2] + EXYNOS7420_TMU_REG_CONTROL);
+		m86_tmu_set_thresholds(t, i);
 	}
 	mutex_unlock(&m86_tmu_access);
 	return 0;

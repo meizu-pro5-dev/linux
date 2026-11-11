@@ -7,4 +7,6 @@
 int m86_tmu_get_cached_temp(int *temp);
 int m86_tmu_register_notifier(struct notifier_block *nb);
 int m86_tmu_unregister_notifier(struct notifier_block *nb);
+int m86_tmu_gpu_power_off(void);
+int m86_tmu_gpu_power_on(void);
 #endif
