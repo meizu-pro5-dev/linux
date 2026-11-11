@@ -27,6 +27,7 @@
 #include <linux/spinlock.h>
 #include <linux/tick.h>
 #include <linux/arm-smccc.h>
+#include <linux/soc/samsung/exynos7420-cpuidle.h>
 #include <asm/cpuidle.h>
 #include <asm/cputype.h>
 #include <asm/smp_plat.h>
@@ -116,6 +117,7 @@ static struct cpumask exynos7420_atlas_cpd_mask;
 static DEFINE_PER_CPU(ktime_t, exynos7420_atlas_next_event);
 static DEFINE_RAW_SPINLOCK(exynos7420_cpd_lock);
 static u64 exynos7420_atlas_cpd_gen;
+static unsigned int exynos7420_cpd_inhibit_depth;
 
 static bool exynos7420_any_atlas_online(void)
 {
@@ -345,10 +347,50 @@ static __cpuidle int exynos7420_enter_c2(struct cpuidle_device *dev,
 	return index;
 }
 
+/*
+ * Pure passive reference count preventing new Atlas Cluster Power Down (CPD)
+ * entries while an active Atlas core executes a multi-step DVFS transaction
+ * (which sleeps across regulator ramp and I2C transfers).
+ *
+ * Never modify PMU_ATLAS_CPUSEQUENCER_OPTION from outside the Atlas wakeup
+ * path: USE_AUTOMATIC_PWRCTRL governs both automatic cluster power-down and
+ * automatic cluster power-up in ATLAS_CPUSEQUENCER, and clearing it from an
+ * Apollo core while Atlas is in CPD deadlocks cluster wakeup.
+ */
+void exynos7420_atlas_cpd_inhibit(void)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&exynos7420_cpd_lock, flags);
+	exynos7420_cpd_inhibit_depth++;
+	raw_spin_unlock_irqrestore(&exynos7420_cpd_lock, flags);
+}
+EXPORT_SYMBOL_GPL(exynos7420_atlas_cpd_inhibit);
+
+void exynos7420_atlas_cpd_allow(void)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&exynos7420_cpd_lock, flags);
+	if (!WARN_ON_ONCE(!exynos7420_cpd_inhibit_depth))
+		exynos7420_cpd_inhibit_depth--;
+	raw_spin_unlock_irqrestore(&exynos7420_cpd_lock, flags);
+}
+EXPORT_SYMBOL_GPL(exynos7420_atlas_cpd_allow);
+
+bool exynos7420_atlas_cpd_inhibited(void)
+{
+	return READ_ONCE(exynos7420_cpd_inhibit_depth) != 0;
+}
+EXPORT_SYMBOL_GPL(exynos7420_atlas_cpd_inhibited);
+
 static bool exynos7420_can_enter_cpd_locked(ktime_t now, bool is_s2idle)
 {
 	unsigned int c;
 	bool any = false;
+
+	if (exynos7420_cpd_inhibit_depth)
+		return false;
 
 	/*
 	 * Match vendor is_cpus_busy(cpd_residency=3000, cpu_coregroup_mask(cpu)):

@@ -20,11 +20,13 @@
 #include <linux/pm_qos.h>
 #include <linux/reboot.h>
 #include <linux/regulator/consumer.h>
+#include <linux/smp.h>
 #include <linux/thermal.h>
 #include <linux/workqueue.h>
 #include <linux/m86-bus-qos.h>
 #include <linux/m86-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
+#include <linux/soc/samsung/exynos7420-cpuidle.h>
 #include <linux/m86-tmu-transition.h>
 
 struct m86_opp { unsigned int khz, uv, bus_qos; };
@@ -190,6 +192,54 @@ static int set_rate_checked(struct m86_cluster *c, unsigned int khz)
 	return clk_get_rate(c->clk) == (unsigned long)khz * 1000 ? 0 : -EIO;
 }
 
+struct m86_rate_on_cpu_arg {
+	struct m86_cluster *c;
+	unsigned int khz;
+};
+
+static int set_rate_on_atlas_cb(void *data)
+{
+	struct m86_rate_on_cpu_arg *arg = data;
+	int ret;
+
+	exynos7420_atlas_cpd_inhibit();
+	mutex_lock(&arg->c->lock);
+	ret = set_rate_checked(arg->c, arg->khz);
+	mutex_unlock(&arg->c->lock);
+	exynos7420_atlas_cpd_allow();
+	return ret;
+}
+
+static int throttle_cluster_safe(struct m86_cluster *c, unsigned int ci,
+				 unsigned int khz)
+{
+	int r;
+
+	if (!ci && !cpumask_test_cpu(raw_smp_processor_id(), &c->cpus)) {
+		struct m86_rate_on_cpu_arg arg = { .c = c, .khz = khz };
+		unsigned int cpu;
+
+		r = -EHOSTDOWN;
+		for_each_cpu_and(cpu, &c->cpus, cpu_online_mask) {
+			r = smp_call_on_cpu(cpu, set_rate_on_atlas_cb,
+					    &arg, false);
+			if (r != -ENXIO)
+				break;
+			r = -EHOSTDOWN;
+		}
+		return r;
+	}
+
+	if (!ci)
+		exynos7420_atlas_cpd_inhibit();
+	mutex_lock(&c->lock);
+	r = set_rate_checked(c, khz);
+	mutex_unlock(&c->lock);
+	if (!ci)
+		exynos7420_atlas_cpd_allow();
+	return r;
+}
+
 /*
  * Vendor exynos7420_bus.c:3291-3304 and 4762: logical MIF kHz is
  * mif_pll_hz / (2 * 1000). PHY LP4 cell div8/4 is a separate branch.
@@ -271,11 +321,9 @@ static void fail_closed(struct m86_coord *d, int error)
 	WRITE_ONCE(d->required_bus_qos, 1552000);
 	mutex_unlock(&d->bus_lock);
 	for (i = 0; i < 2; i++) {
-		int r;
+		int r = throttle_cluster_safe(&d->cluster[i], i,
+					      d->cluster[i].opp[0].khz);
 
-		mutex_lock(&d->cluster[i].lock);
-		r = set_rate_checked(&d->cluster[i], d->cluster[i].opp[0].khz);
-		mutex_unlock(&d->cluster[i].lock);
 		if (r && r != -EHOSTDOWN)
 			dev_err(d->dev, "cluster%u emergency clock throttle failed\n", i);
 	}
@@ -316,7 +364,7 @@ static void trace_target(struct m86_coord *d, struct m86_cluster *c,
 		c->thermal_cap, d->faulted, (long long)ktime_us_delta(ktime_get(), started));
 }
 
-static int m86_target(struct cpufreq_policy *policy, unsigned int index)
+static int m86_target_local(struct cpufreq_policy *policy, unsigned int index)
 {
 	struct m86_coord *d = coordinator;
 	struct m86_cluster *c = policy->driver_data;
@@ -335,6 +383,13 @@ static int m86_target(struct cpufreq_policy *policy, unsigned int index)
 		mutex_unlock(&c->lock);
 		return 0;
 	}
+	/*
+	 * Hold Atlas out of Cluster Power Down (CPD) across the entire clock +
+	 * voltage + EMA transaction while running on an online Atlas core so
+	 * ATLAS_PLL and CMU_ATLAS remain active across regulator settle sleeps.
+	 */
+	if (!ci)
+		exynos7420_atlas_cpd_inhibit();
 	old_hz = c->cur_khz ? (unsigned long)c->cur_khz * 1000UL : clk_get_rate(c->clk);
 	old_uv = c->cur_uv ? c->cur_uv : regulator_get_voltage(c->supply);
 	if (READ_ONCE(d->faulted)) {
@@ -472,8 +527,62 @@ fault:
 	      ci ? "apollo" : "atlas", phase, ret);
 out:
 	trace_target(d, c, ci, old_hz, old_uv, target, c->opp[index].uv, ret, started);
+	if (!ci)
+		exynos7420_atlas_cpd_allow();
 	mutex_unlock(&c->lock);
 	return ret;
+}
+
+struct m86_target_on_cpu_arg {
+	struct cpufreq_policy *policy;
+	unsigned int index;
+};
+
+static int m86_target_on_cpu_cb(void *data)
+{
+	struct m86_target_on_cpu_arg *arg = data;
+
+	return m86_target_local(arg->policy, arg->index);
+}
+
+static int m86_target(struct cpufreq_policy *policy, unsigned int index)
+{
+	struct m86_coord *d = coordinator;
+	struct m86_cluster *c = policy->driver_data;
+	unsigned int ci = c == &d->cluster[1];
+
+	if (index >= c->nr)
+		return -EINVAL;
+	if (!ci && !cpumask_test_cpu(raw_smp_processor_id(), &c->cpus)) {
+		struct m86_target_on_cpu_arg arg = {
+			.policy = policy,
+			.index = index,
+		};
+		unsigned int cpu, target = c->opp[index].khz;
+		int ret = -EAGAIN;
+
+		mutex_lock(&c->lock);
+		if (c->cur_khz == target) {
+			mutex_unlock(&c->lock);
+			return 0;
+		}
+		mutex_unlock(&c->lock);
+
+		/*
+		 * Dispatch cross-cluster Atlas DVFS transitions (sysfs limits,
+		 * thermal QoS, cross-cluster sugov) onto an online Atlas core
+		 * via normal scheduler wakeup so CMU_ATLAS and ATLAS_PLL are
+		 * never accessed from Apollo while Atlas is in CPD.
+		 */
+		for_each_cpu_and(cpu, policy->cpus, cpu_online_mask) {
+			ret = smp_call_on_cpu(cpu, m86_target_on_cpu_cb,
+					      &arg, false);
+			if (ret != -ENXIO)
+				return ret;
+		}
+		return -EAGAIN;
+	}
+	return m86_target_local(policy, index);
 }
 
 static unsigned int m86_get(unsigned int cpu)
@@ -1118,8 +1227,10 @@ static int m86_remove(struct platform_device *pdev)
 	m86_tmu_notifier_release(d);
 	mutex_lock(&d->lock);
 	d->faulted = true;
-	atlas_ret = set_rate_checked(&d->cluster[0], d->cluster[0].opp[0].khz);
-	apollo_ret = set_rate_checked(&d->cluster[1], d->cluster[1].opp[0].khz);
+	atlas_ret = throttle_cluster_safe(&d->cluster[0], 0,
+					  d->cluster[0].opp[0].khz);
+	apollo_ret = throttle_cluster_safe(&d->cluster[1], 1,
+					   d->cluster[1].opp[0].khz);
 	if ((atlas_ret && atlas_ret != -EHOSTDOWN) ||
 	    (apollo_ret && apollo_ret != -EHOSTDOWN))
 		orderly_poweroff(true);

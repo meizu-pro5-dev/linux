@@ -13,6 +13,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
+#include <linux/soc/samsung/exynos7420-cpuidle.h>
 
 #define PLL_MASK ((0x3ff << 16) | (0x3f << 8) | 7)
 #define POLL_US 10000
@@ -32,6 +34,7 @@ struct m86_cpuclk {
 	unsigned int nr_rates, shift;
 	bool atlas, failed;
 	unsigned long ceiling;
+	unsigned long cached_rate;
 	cpumask_t cpus;
 	struct mutex lock;
 	struct hlist_node hotplug_node;
@@ -97,13 +100,96 @@ static unsigned long current_rate(struct m86_cpuclk *c)
 	return rate / ((div & 0xf) + 1) / (((div >> 4) & 0xf) + 1);
 }
 
+static unsigned long current_rate_raw(struct m86_cpuclk *c, unsigned long fin,
+				      unsigned long safe)
+{
+	u32 div, root;
+	unsigned long rate;
+
+	if (!accessible(c) || !fin)
+		return 0;
+	if (readl(c->base + 0x700) || readl(c->base + 0x704))
+		return 0;
+	root = readl(c->base + 0x408) & 7;
+	if (root != (readl(c->base + 0x208) & 1))
+		return 0;
+	if (!root) {
+		if (!(readl(c->base + 0x200) & 1) ||
+		    (readl(c->base + 0x400) & 7) != 1)
+			return 0;
+		rate = pll_rate(readl(c->base + 0x100), fin);
+	} else if (root == 1 && (readl(c->base + 0x204) & 1) &&
+		   (readl(c->base + 0x404) & 7) == 1) {
+		u32 sel = (readl(c->topc + 0x204) >> c->shift) & 3;
+		u32 stat = (readl(c->topc + 0x404) >> c->shift) & 0xf;
+
+		if (sel > 1 || stat != sel || !(readl(c->topc + 0x200) & 1) ||
+		    (readl(c->topc + 0x400) & 7) != 1)
+			return 0;
+		rate = pll_rate(readl(c->topc + 0x110), fin) >> sel;
+		if (rate != safe)
+			return 0;
+	} else {
+		return 0;
+	}
+	div = readl(c->base + 0x600);
+	return rate / ((div & 0xf) + 1) / (((div >> 4) & 0xf) + 1);
+}
+
+struct m86_recalc_arg {
+	struct m86_cpuclk *c;
+	unsigned long fin;
+	unsigned long safe;
+};
+
+static int m86_recalc_on_cpu_cb(void *data)
+{
+	struct m86_recalc_arg *arg = data;
+
+	arg->c->cached_rate = current_rate_raw(arg->c, arg->fin, arg->safe);
+	return 0;
+}
+
 static unsigned long m86_recalc(struct clk_hw *hw, unsigned long parent_rate)
 {
 	struct m86_cpuclk *c = to_m86(hw);
-	unsigned long rate;
+	unsigned long rate = 0;
 
 	mutex_lock(&c->lock);
-	rate = c->failed ? 0 : current_rate(c);
+	if (c->failed || !accessible(c)) {
+		mutex_unlock(&c->lock);
+		return 0;
+	}
+	if (!c->atlas ||
+	    cpumask_test_cpu(raw_smp_processor_id(), &c->cpus) ||
+	    exynos7420_atlas_cpd_inhibited()) {
+		rate = current_rate(c);
+		if (rate)
+			c->cached_rate = rate;
+	} else if (c->cached_rate) {
+		/*
+		 * Cross-cluster read-only queries (clk_summary, cpuinfo_cur_freq,
+		 * thermal monitor) from an Apollo core must not touch CMU_ATLAS
+		 * MMIO while all Atlas cores may be in Cluster Power Down (CPD),
+		 * nor wake the big cluster out of CPD for passive telemetry.
+		 */
+		rate = c->cached_rate;
+	} else {
+		struct m86_recalc_arg arg = {
+			.c = c,
+			.fin = clk_get_rate(c->fin),
+			.safe = clk_get_rate(c->safe),
+		};
+		unsigned int cpu;
+
+		for_each_cpu_and(cpu, &c->cpus, cpu_online_mask) {
+			if (smp_call_on_cpu(cpu, m86_recalc_on_cpu_cb,
+					    &arg, false) == 0) {
+				rate = c->cached_rate;
+				break;
+			}
+		}
+	}
 	mutex_unlock(&c->lock);
 	return rate;
 }
@@ -208,6 +294,10 @@ static int m86_set(struct clk_hw *hw, unsigned long hz, unsigned long parent)
 			target = &c->rates[i];
 	if (!target || hz > c->ceiling || c->failed)
 		return c->failed ? -EIO : -EINVAL;
+	if (c->atlas &&
+	    WARN_ON_ONCE(!cpumask_test_cpu(raw_smp_processor_id(), &c->cpus) &&
+			 !exynos7420_atlas_cpd_inhibited()))
+		return -EAGAIN;
 	mutex_lock(&c->lock);
 	/* A fully offline cluster is inaccessible, not a poisoned PLL. */
 	if (!accessible(c)) {
@@ -221,6 +311,7 @@ static int m86_set(struct clk_hw *hw, unsigned long hz, unsigned long parent)
 	    (readl(c->base + 0x404) & 7) != 1)
 		goto out;
 	if (hz == old) {
+		c->cached_rate = hz;
 		ret = 0;
 		goto out;
 	}
@@ -275,10 +366,12 @@ static int m86_set(struct clk_hw *hw, unsigned long hz, unsigned long parent)
 		ret = -EIO;
 		goto failed;
 	}
+	c->cached_rate = hz;
 	goto out;
 failed:
 	/* Never guess a rollback rate. Preserve observed state and prohibit retries. */
 	c->failed = true;
+	c->cached_rate = 0;
 	dev_err(c->dev, "transition failed=%d; observed_hz=%lu; later changes locked\n",
 		ret, current_rate(c));
 out:
