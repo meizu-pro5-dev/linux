@@ -44,8 +44,6 @@ struct exynos7420_sfr {
 struct exynos7420_pd_cfg {
 	const char *name;
 	u32 pmu_off;
-	phys_addr_t lpi_busmaster_pa;
-	bool clear_a7is_option;
 	bool is_aud;
 	const struct exynos7420_reg_bits *top_clks;
 	size_t num_top_clks;
@@ -297,7 +295,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-isp0",
 		.pmu_off = 0x4140,
-		.lpi_busmaster_pa = 0x146e0000,
 		.top_clks = exynos7420_top_clks_isp0,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
 		.local_clks = exynos7420_local_clks_isp0,
@@ -310,7 +307,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-isp1",
 		.pmu_off = 0x4180,
-		.lpi_busmaster_pa = 0x147e0000,
 		.top_clks = exynos7420_top_clks_isp1,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
 		.local_clks = exynos7420_local_clks_isp1,
@@ -323,7 +319,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-cam0",
 		.pmu_off = 0x4040,
-		.lpi_busmaster_pa = 0x120e0000,
 		.top_clks = exynos7420_top_clks_cam0,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam0),
 		.local_clks = exynos7420_local_clks_cam0,
@@ -339,8 +334,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-cam1",
 		.pmu_off = 0x4060,
-		.lpi_busmaster_pa = 0x145e0000,
-		.clear_a7is_option = true,
 		.top_clks = exynos7420_top_clks_cam1,
 		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam1),
 		.local_clks = exynos7420_local_clks_cam1,
@@ -538,23 +531,15 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 		usleep_range(10, 20);
 	}
 
-	if ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0 &&
-	    pd->lpi_busmaster_pa) {
-		exynos7420_rmw_phys(pd->lpi_busmaster_pa, 0xffffffff, 0);
-		if (pd->clear_a7is_option) {
-			u32 a7is = readl_relaxed(pmu_base + 0x2588);
-
-			writel_relaxed(a7is & ~(0x7 << 15), pmu_base + 0x2588);
-		}
-		writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
-		timeout = 200;
-		while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
-			if (--timeout <= 0)
-				break;
-			usleep_range(10, 20);
-		}
-	}
-
+	/*
+	 * Do not attempt the vendor exynos_pd_power_forced_off_pre() LPI
+	 * busmaster mask fallback on timeout: in the vendor tree pd-cam0's
+	 * 0x120e0000 was left over from Exynos 5433 (mach/map.h:89) and raises
+	 * a fatal synchronous external abort / SError (ESR 0x96000010 /
+	 * 0xbf000000), while the 0x144e0000/0x145e0000 LPI windows are blocked
+	 * by TrustZone (SError ESR 0xbf000002) in non-secure Linux. Report
+	 * -EBUSY cleanly instead.
+	 */
 	stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
 	if (stat != 0) {
 		pr_err("exynos-pd: failed to power off %s: conf %#x stat %#x option %#x\n",
@@ -606,11 +591,7 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 		return -ETIMEDOUT;
 	}
 
-	/*
-	 * 5. Enable local clocks and the async clocks of powered owners. The
-	 * LPI busmaster masks and the A7IS option are only written on the
-	 * forced power-off path, as in the vendor exynos_pd_power_forced_off_pre().
-	 */
+	/* 5. Restore saved CMU registers, enable local and async clocks. */
 	exynos7420_restore_regs(cfg);
 	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
 	if (!cfg->async_before_on)
