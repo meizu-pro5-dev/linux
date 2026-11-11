@@ -685,8 +685,6 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4080 0x20>;
 			#power-domain-cells = <0>;
-			/* DISP reaches memory through the BLK_VPP async bridges. */
-			power-domains = <&pd_vpp>;
 			label = "DISP";
 			status = "okay";
 		};
