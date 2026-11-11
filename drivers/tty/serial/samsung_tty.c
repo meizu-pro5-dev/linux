@@ -41,6 +41,7 @@
 #include <linux/clk.h>
 #include <linux/cpufreq.h>
 #include <linux/of.h>
+#include <linux/pm_runtime.h>
 #include <asm/irq.h>
 
 /* UART name and device definitions */
@@ -153,9 +154,12 @@ struct s3c24xx_uart_port {
 	const struct s3c2410_uartcfg	*cfg;
 
 	struct s3c24xx_uart_dma		*dma;
+	bool				rpm_active;
 };
 
 static void s3c24xx_serial_tx_chars(struct s3c24xx_uart_port *ourport);
+static void s3c24xx_serial_resetport(struct uart_port *port,
+				     const struct s3c2410_uartcfg *cfg);
 
 /* conversion functions */
 
@@ -1379,13 +1383,33 @@ static void s3c24xx_serial_pm(struct uart_port *port, unsigned int level,
 			clk_disable_unprepare(ourport->baudclk);
 
 		clk_disable_unprepare(ourport->clk);
+
+		if (port->dev && port->dev->pm_domain && ourport->rpm_active) {
+			ourport->rpm_active = false;
+			pm_runtime_put_sync(port->dev);
+		}
 		break;
 
 	case 0:
+		if (port->dev && port->dev->pm_domain && !ourport->rpm_active) {
+			pm_runtime_get_sync(port->dev);
+			ourport->rpm_active = true;
+		}
+
 		clk_prepare_enable(ourport->clk);
 
 		if (!IS_ERR(ourport->baudclk))
 			clk_prepare_enable(ourport->baudclk);
+
+		if (port->dev && port->dev->pm_domain) {
+			if (ourport->info->type == TYPE_S3C6400) {
+				wr_regl(port, S3C64XX_UINTM, 0xf);
+				wr_regl(port, S3C64XX_UINTP, 0xf);
+				wr_regl(port, S3C64XX_UINTSP, 0xf);
+			}
+			s3c24xx_serial_resetport(port,
+						 s3c24xx_port_to_cfg(port));
+		}
 		break;
 	default:
 		dev_err(port->dev, "s3c24xx_serial: unknown pm %d\n", level);
@@ -2129,15 +2153,21 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "%s: initialising port %p...\n", __func__, ourport);
 
+	if (pdev->dev.pm_domain) {
+		pm_runtime_set_active(&pdev->dev);
+		pm_runtime_enable(&pdev->dev);
+		pm_runtime_get_noresume(&pdev->dev);
+	}
+
 	ret = s3c24xx_serial_init_port(ourport, pdev);
 	if (ret < 0)
-		return ret;
+		goto err_pm_disable;
 
 	if (!s3c24xx_uart_drv.state) {
 		ret = uart_register_driver(&s3c24xx_uart_drv);
 		if (ret < 0) {
 			pr_err("Failed to register Samsung UART driver\n");
-			return ret;
+			goto err_init_clks;
 		}
 	}
 
@@ -2154,9 +2184,23 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 	if (!IS_ERR(ourport->baudclk))
 		clk_disable_unprepare(ourport->baudclk);
 
+	if (pdev->dev.pm_domain)
+		pm_runtime_put_sync(&pdev->dev);
+
 	probe_index++;
 
 	return 0;
+
+err_init_clks:
+	clk_disable_unprepare(ourport->clk);
+	if (!IS_ERR(ourport->baudclk))
+		clk_disable_unprepare(ourport->baudclk);
+err_pm_disable:
+	if (pdev->dev.pm_domain) {
+		pm_runtime_put_noidle(&pdev->dev);
+		pm_runtime_disable(&pdev->dev);
+	}
+	return ret;
 }
 
 static int s3c24xx_serial_remove(struct platform_device *dev)
@@ -2166,6 +2210,9 @@ static int s3c24xx_serial_remove(struct platform_device *dev)
 	if (port) {
 		uart_remove_one_port(&s3c24xx_uart_drv, port);
 	}
+
+	if (dev->dev.pm_domain)
+		pm_runtime_disable(&dev->dev);
 
 	uart_unregister_driver(&s3c24xx_uart_drv);
 
@@ -2190,13 +2237,16 @@ static int s3c24xx_serial_resume(struct device *dev)
 	struct s3c24xx_uart_port *ourport = to_ourport(port);
 
 	if (port) {
-		clk_prepare_enable(ourport->clk);
-		if (!IS_ERR(ourport->baudclk))
-			clk_prepare_enable(ourport->baudclk);
-		s3c24xx_serial_resetport(port, s3c24xx_port_to_cfg(port));
-		if (!IS_ERR(ourport->baudclk))
-			clk_disable_unprepare(ourport->baudclk);
-		clk_disable_unprepare(ourport->clk);
+		if (!dev->pm_domain) {
+			clk_prepare_enable(ourport->clk);
+			if (!IS_ERR(ourport->baudclk))
+				clk_prepare_enable(ourport->baudclk);
+			s3c24xx_serial_resetport(port,
+						 s3c24xx_port_to_cfg(port));
+			if (!IS_ERR(ourport->baudclk))
+				clk_disable_unprepare(ourport->baudclk);
+			clk_disable_unprepare(ourport->clk);
+		}
 
 		uart_resume_port(&s3c24xx_uart_drv, port);
 	}
@@ -2208,6 +2258,9 @@ static int s3c24xx_serial_resume_noirq(struct device *dev)
 {
 	struct uart_port *port = s3c24xx_dev_to_port(dev);
 	struct s3c24xx_uart_port *ourport = to_ourport(port);
+
+	if (dev->pm_domain)
+		return 0;
 
 	if (port) {
 		/* restore IRQ mask */
