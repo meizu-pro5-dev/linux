@@ -429,15 +429,44 @@ static int panfrost_device_resume(struct device *dev)
 	return 0;
 }
 
+static bool panfrost_gpu_hw_is_idle(struct panfrost_device *pfdev)
+{
+	static const u32 regs[] = {
+		SHADER_READY_LO, SHADER_READY_HI,
+		TILER_READY_LO, TILER_READY_HI,
+		L2_READY_LO, L2_READY_HI,
+		SHADER_PWRTRANS_LO, SHADER_PWRTRANS_HI,
+		TILER_PWRTRANS_LO, TILER_PWRTRANS_HI,
+		L2_PWRTRANS_LO, L2_PWRTRANS_HI,
+	};
+	unsigned int i;
+
+	if (!test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended) ||
+	    !test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended) ||
+	    !test_bit(PANFROST_COMP_BIT_GPU, pfdev->is_suspended) ||
+	    atomic_read(&pfdev->reset.pending) ||
+	    !panfrost_job_is_idle(pfdev))
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		if (readl(pfdev->iomem + regs[i]))
+			return false;
+	}
+
+	return !atomic_read(&pfdev->reset.pending) &&
+	       panfrost_job_is_idle(pfdev);
+}
+
 static int panfrost_device_suspend(struct device *dev)
 {
 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
+	bool coord = of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator");
 
 	if (!panfrost_job_is_idle(pfdev))
 		return -EBUSY;
 
 	panfrost_devfreq_suspend(pfdev);
-	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
+	if (coord) {
 #if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
 		m86_gpu_suspend_notify(dev);
 #endif
@@ -446,6 +475,11 @@ static int panfrost_device_suspend(struct device *dev)
 	panfrost_mmu_suspend_irq(pfdev);
 	panfrost_gpu_suspend_irq(pfdev);
 	panfrost_gpu_power_off(pfdev);
+	if (coord) {
+#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
+		m86_gpu_domain_suspend(dev, panfrost_gpu_hw_is_idle(pfdev));
+#endif
+	}
 
 	return 0;
 }

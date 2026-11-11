@@ -272,13 +272,15 @@ void panfrost_perfcnt_close(struct drm_file *file_priv)
 	struct panfrost_device *pfdev = pfile->pfdev;
 	struct panfrost_perfcnt *perfcnt = pfdev->perfcnt;
 
-	pm_runtime_get_sync(pfdev->dev);
 	mutex_lock(&perfcnt->lock);
-	if (perfcnt->user == pfile)
-		panfrost_perfcnt_disable_locked(pfdev, file_priv);
+	if (perfcnt->user == pfile) {
+		if (pm_runtime_resume_and_get(pfdev->dev) >= 0) {
+			panfrost_perfcnt_disable_locked(pfdev, file_priv);
+			pm_runtime_mark_last_busy(pfdev->dev);
+			pm_runtime_put_autosuspend(pfdev->dev);
+		}
+	}
 	mutex_unlock(&perfcnt->lock);
-	pm_runtime_mark_last_busy(pfdev->dev);
-	pm_runtime_put_autosuspend(pfdev->dev);
 }
 
 int panfrost_perfcnt_init(struct panfrost_device *pfdev)

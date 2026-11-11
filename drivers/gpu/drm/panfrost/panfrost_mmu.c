@@ -279,13 +279,14 @@ static void panfrost_mmu_flush_range(struct panfrost_device *pfdev,
 	if (mmu->as < 0)
 		return;
 
-	pm_runtime_get_noresume(pfdev->dev);
-
-	/* Flush the PTs only if we're already awake */
-	if (pm_runtime_active(pfdev->dev))
+	/*
+	 * Pin runtime PM under dev->power.lock only when RPM_ACTIVE so
+	 * rpm_suspend() cannot cut external BLK_G3D power mid-MMU flush.
+	 */
+	if (pm_runtime_get_if_active(pfdev->dev, true) > 0) {
 		mmu_hw_do_operation(pfdev, mmu, iova, size, AS_COMMAND_FLUSH_PT);
-
-	pm_runtime_put_autosuspend(pfdev->dev);
+		pm_runtime_put_autosuspend(pfdev->dev);
+	}
 }
 
 static int mmu_map_sg(struct panfrost_device *pfdev, struct panfrost_mmu *mmu,
@@ -556,19 +557,23 @@ static void panfrost_mmu_release_ctx(struct kref *kref)
 	struct panfrost_mmu *mmu = container_of(kref, struct panfrost_mmu,
 						refcount);
 	struct panfrost_device *pfdev = mmu->pfdev;
+	bool put_rpm = false;
 
 	spin_lock(&pfdev->as_lock);
 	if (mmu->as >= 0) {
-		pm_runtime_get_noresume(pfdev->dev);
-		if (pm_runtime_active(pfdev->dev))
+		if (pm_runtime_get_if_active(pfdev->dev, true) > 0) {
 			panfrost_mmu_disable(pfdev, mmu->as);
-		pm_runtime_put_autosuspend(pfdev->dev);
+			put_rpm = true;
+		}
 
 		clear_bit(mmu->as, &pfdev->as_alloc_mask);
 		clear_bit(mmu->as, &pfdev->as_in_use_mask);
 		list_del(&mmu->list);
 	}
 	spin_unlock(&pfdev->as_lock);
+
+	if (put_rpm)
+		pm_runtime_put_autosuspend(pfdev->dev);
 
 	free_io_pgtable_ops(mmu->pgtbl_ops);
 	drm_mm_takedown(&mmu->mm);

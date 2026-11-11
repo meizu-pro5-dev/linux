@@ -35,11 +35,20 @@ static const struct gpu_rate rates[] = {
  {700000000,787500,1552000,400000,175,6,0,3,2},
  {772000000,825000,1552000,400000,193,6,0,3,1},
 };
+static bool g3d_power_gating = true;
+module_param(g3d_power_gating, bool, 0644);
+MODULE_PARM_DESC(g3d_power_gating, "Gate external G3D power domain during Panfrost runtime suspend");
+
+struct g3d_cmu_ctx {
+ u32 div, lock, con0, con1, con2, mux, aclk, pclk, sclk, ema;
+ bool valid;
+};
+
 struct gpu_dvfs {
  struct device *dev, *pmic;
  struct device_node *gpu_node;
  struct clk_hw hw;
- struct clk *clock;
+ struct clk *clock, *top_g3d_clk;
  struct regmap *pmu, *sysreg;
  struct thermal_zone_device *zone;
  void __iomem *cmu, *dvs, *gpio, *topc;
@@ -50,6 +59,9 @@ struct gpu_dvfs {
  u32 asv_sel[ARRAY_SIZE(rates)];
  u32 cur_sel, cur_ramp;
  bool active_voltage, normal_on_voltage, failed, normal_on_bit0_observed;
+ bool top_g3d_enabled, domain_powered_off, system_suspended;
+ struct g3d_cmu_ctx saved_cmu;
+ u64 domain_off_count, domain_on_count;
  struct task_struct *caller;
  struct device *bus_dev;
  struct dev_pm_qos_request bus_qos_req;
@@ -71,7 +83,7 @@ static unsigned long actual_rate(struct gpu_dvfs *d)
  u32 con, mux, stat, p, m, s;
  unsigned long rate;
  /* hardware serializes ordinary rate reads against domain-off preflight. */
- if (!domain_on(d)) return d->current_rate ? d->current_rate : 266000000;
+ if (d->domain_powered_off || !domain_on(d)) return d->current_rate ? d->current_rate : 266000000;
  mux = readl(d->cmu+0x200); stat = readl(d->cmu+0x400);
  if ((stat & BIT(10)) || (readl(d->cmu+0x600)&7)) return d->current_rate ? d->current_rate : 266000000;
  if (mux & BIT(8)) return 24000000;
@@ -120,7 +132,7 @@ static int set_rate(struct clk_hw *hw,unsigned long hz,unsigned long parent)
  unsigned int i, settle;
  int ret=0;
  mutex_lock(&d->hardware);
- if(d->failed || d->caller!=current || hz>d->cap || parent!=24000000 || !domain_on(d)) {
+ if(d->failed || d->caller!=current || hz>d->cap || parent!=24000000 || d->domain_powered_off || !domain_on(d)) {
   ret=-EPERM; goto out;
  }
  for(i=0;i<ARRAY_SIZE(rates);i++) if(rates[i].hz==hz) r=&rates[i];
@@ -378,61 +390,6 @@ static void mif_vote(struct gpu_dvfs *d,u32 khz)
  queue_work(system_highpri_wq,&d->mif_work);
 }
 
-/* Runtime resume has not marked the GPU ACTIVE yet. No PM get or devfreq
- * calls here: validate retained hardware before Panfrost reset/first job
- * without issuing 6 redundant GPIO-I2C reads, and restore the MIF QoS vote
- * for the active OPP.
- */
-int m86_gpu_resume_validate(struct device *gpu)
-{
- struct gpu_dvfs *d;
- unsigned long hz;
- unsigned int i;
- u32 mif_khz = rates[0].mif;
- int ret=0;
- mutex_lock(&instance_lock);d=instance;
- if(!d || gpu->of_node!=d->gpu_node){ret=-ENODEV;goto unlock;}
- if(!d->normal_on_voltage)goto unlock;
- mutex_lock(&d->transaction);
- if(d->failed){ret=-EIO;goto done;}
- hz=clk_get_rate(d->clock);
- if(!hz || hz>d->cap) {
-  ret=-ERANGE;
-  mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
-  dev_err(d->dev,"GPU retained resume state rejected: rate=%lu error=%d\n",hz,ret);
-  goto done;
- }
- for(i=0;i<ARRAY_SIZE(rates);i++) {
-  if(rates[i].hz==hz){mif_khz=rates[i].mif;break;}
- }
- if(d->bus_qos_active && d->cur_mif_qos!=mif_khz)
-  mif_vote(d,mif_khz);
-done:
- mutex_unlock(&d->transaction);
-unlock:
- mutex_unlock(&instance_lock);
- return ret;
-}
-EXPORT_SYMBOL_GPL(m86_gpu_resume_validate);
-
-/* Release the GPU MIF QoS floor while Panfrost is runtime-suspended so
- * an idle or pre-suspend high-OPP vote does not pin MIF/INT while G3D
- * shaders/tiler/L2 are powered down.
- */
-void m86_gpu_suspend_notify(struct device *gpu)
-{
- struct gpu_dvfs *d;
- mutex_lock(&instance_lock);d=instance;
- if(!d || gpu->of_node!=d->gpu_node)goto unlock;
- mutex_lock(&d->transaction);
- if(d->bus_qos_active && d->cur_mif_qos!=0)
-  mif_vote(d,0);
- mutex_unlock(&d->transaction);
-unlock:
- mutex_unlock(&instance_lock);
-}
-EXPORT_SYMBOL_GPL(m86_gpu_suspend_notify);
-
 static u32 calibrated_mcs(struct gpu_dvfs *d,u32 uv)
 {
  unsigned int band=uv>=900000?0:uv>=800000?1:uv>=700000?2:3;
@@ -487,6 +444,393 @@ static int set_clock(struct gpu_dvfs *d,unsigned long rate)
  if(!ret && clk_get_rate(d->clock)!=rate)ret=-EIO;
  return ret;
 }
+
+static int g3d_prepare_sys_pwr(struct gpu_dvfs *d)
+{
+ static const u32 offsets[] = { 0x1460, 0x14a0, 0x14e0, 0x1520, 0x1560, 0x15a0 };
+ unsigned int i;
+ int ret;
+
+ for (i = 0; i < ARRAY_SIZE(offsets); i++) {
+  ret = regmap_update_bits(d->pmu, offsets[i], offsets[i] == 0x1560 ? 3U : 1U, 0);
+  if (ret)
+   return ret;
+ }
+ return 0;
+}
+
+static int g3d_switch_pmu(struct gpu_dvfs *d, bool on, unsigned int *out_stat)
+{
+ unsigned int val = ~0U;
+ int ret;
+
+ ret = regmap_write(d->pmu, 0x4108, 0x0102);
+ if (ret)
+  return ret;
+ ret = regmap_write(d->pmu, 0x4110, 0xffff00c0);
+ if (ret)
+  return ret;
+ ret = regmap_write(d->pmu, 0x4100, on ? 0xfU : 0x0U);
+ if (ret)
+  return ret;
+ ret = regmap_read_poll_timeout(d->pmu, 0x4104, val,
+                                (val & 0xfU) == (on ? 0xfU : 0x0U), 8, 10000);
+ if (out_stat)
+  *out_stat = val;
+ return ret;
+}
+
+static int g3d_write_mux(struct gpu_dvfs *d, u32 val)
+{
+ u32 stat;
+
+ writel(val, d->cmu + 0x0200);
+ if (readl(d->cmu + 0x0200) != val)
+  return -EIO;
+ return readl_poll_timeout(d->cmu + 0x0400, stat,
+  !(stat & (BIT(2) | BIT(10))) && (stat & 7U) == !!(val & BIT(0)), 1, 10000);
+}
+
+static int g3d_throttle_to_min_locked(struct gpu_dvfs *d)
+{
+ unsigned long old = clk_get_rate(d->clock);
+ u32 selector = d->cur_sel, ramp = d->cur_ramp;
+ int ret;
+
+ if (!old)
+  return -EIO;
+ if (old > rates[0].hz) {
+  ret = set_clock(d, rates[0].hz);
+  if (ret)
+   return ret;
+ }
+ if (!d->normal_on_voltage && d->active_voltage) {
+  ret = set_mcs(d, d->asv_uv[0]);
+  if (ret)
+   return ret;
+ }
+ if ((d->normal_on_voltage || d->active_voltage) && d->cur_sel != d->asv_sel[0]) {
+  if (d->system_suspended)
+   return -EBUSY;
+  if (!d->normal_on_voltage) {
+   device_lock(d->pmic);
+   ret = check_rail(d, &selector, &ramp);
+   device_unlock(d->pmic);
+   if (ret)
+    return ret;
+  }
+  ret = set_voltage(d, d->asv_uv[0], selector, ramp);
+  if (ret)
+   return ret;
+ }
+ return 0;
+}
+
+static int g3d_cmu_save_and_lpi_locked(struct gpu_dvfs *d)
+{
+ struct g3d_cmu_ctx *c = &d->saved_cmu;
+ u32 expected_con0 = BIT(31) | BIT(29) | (133U << 16) | (6U << 8) | 1U;
+ int ret;
+
+ c->valid = false;
+ if (!domain_on(d))
+  return -EHOSTDOWN;
+ if ((readl(d->cmu + 0x0400) & (BIT(2) | BIT(10))) ||
+     (readl(d->cmu + 0x0700) & (BIT(0) | BIT(4) | BIT(8))))
+  return -EBUSY;
+
+ c->div  = readl(d->cmu + 0x0600);
+ c->lock = readl(d->cmu + 0x0000);
+ c->con0 = readl(d->cmu + 0x0100);
+ c->con1 = readl(d->cmu + 0x0104);
+ c->con2 = readl(d->cmu + 0x0108);
+ c->mux  = readl(d->cmu + 0x0200);
+ c->aclk = readl(d->cmu + 0x0800);
+ c->pclk = readl(d->cmu + 0x0900);
+ c->sclk = readl(d->cmu + 0x0a00);
+ ret = regmap_read(d->sysreg, 0x1224, &c->ema);
+ if (ret)
+  return ret;
+
+ if (c->ema != 0x31 || !c->lock || c->lock > 24000 ||
+     (c->con0 & (BIT(31) | BIT(29) | PMS_MASK)) != expected_con0 ||
+     !(c->mux & BIT(0)) || (c->mux & BIT(8)) ||
+     (c->div & 7U) || ((c->div >> 8) & 3U) != 1U)
+  return -EOPNOTSUPP;
+
+ c->aclk |= BIT(0);
+ c->pclk |= BIT(0) | BIT(1);
+
+ /* Vendor local_clks_g3d: enable aclk_xiu_g3d (bit 1) before LPI power-down. */
+ writel(c->aclk | BIT(1), d->cmu + 0x0800);
+ (void)readl(d->cmu + 0x0800);
+ if (!domain_on(d))
+  return -EHOSTDOWN;
+
+ c->valid = true;
+ d->domain_powered_off = true;
+ return 0;
+}
+
+static int g3d_cmu_restore_locked(struct gpu_dvfs *d)
+{
+ struct g3d_cmu_ctx c = d->saved_cmu;
+ u32 val, p, delay, ema;
+ int ret;
+
+ if (!c.valid)
+  return -EINVAL;
+ d->saved_cmu.valid = false;
+ if (!domain_on(d))
+  return -EHOSTDOWN;
+
+ ret = g3d_write_mux(d, readl(d->cmu + 0x0200) | BIT(8));
+ if (ret)
+  return ret;
+
+ writel(c.con0 & ~(BIT(31) | BIT(29)), d->cmu + 0x0100);
+ if ((readl(d->cmu + 0x0100) & ~BIT(29)) != (c.con0 & ~(BIT(31) | BIT(29))))
+  return -EIO;
+ writel(c.con1, d->cmu + 0x0104);
+ if (readl(d->cmu + 0x0104) != c.con1)
+  return -EIO;
+ writel(c.con2, d->cmu + 0x0108);
+ if (readl(d->cmu + 0x0108) != c.con2)
+  return -EIO;
+ writel(c.lock, d->cmu + 0x0000);
+ if (readl(d->cmu + 0x0000) != c.lock)
+  return -EIO;
+
+ writel(c.con0 & ~BIT(29), d->cmu + 0x0100);
+ p = (c.con0 >> 8) & 63U;
+ delay = DIV_ROUND_UP(max(c.lock, p * 150U), 24U) + 10U;
+ usleep_range(delay, delay + 10U);
+ ret = readl_poll_timeout(d->cmu + 0x0100, val,
+  (val & BIT(29)) && (val & ~BIT(29)) == (c.con0 & ~BIT(29)), 1, 10000);
+ if (ret)
+  return ret;
+
+ writel(c.div, d->cmu + 0x0600);
+ if (readl(d->cmu + 0x0600) != c.div)
+  return -EIO;
+ ret = readl_poll_timeout(d->cmu + 0x0700, val,
+  !(val & (BIT(0) | BIT(4) | BIT(8))), 1, 10000);
+ if (ret)
+  return ret;
+
+ ret = g3d_write_mux(d, c.mux | BIT(8));
+ if (ret)
+  return ret;
+ ret = g3d_write_mux(d, c.mux);
+ if (ret)
+  return ret;
+
+ writel(c.aclk, d->cmu + 0x0800);
+ if (readl(d->cmu + 0x0800) != c.aclk)
+  return -EIO;
+ writel(c.pclk, d->cmu + 0x0900);
+ if (readl(d->cmu + 0x0900) != c.pclk)
+  return -EIO;
+ writel(c.sclk, d->cmu + 0x0a00);
+ if (readl(d->cmu + 0x0a00) != c.sclk)
+  return -EIO;
+
+ ret = regmap_write(d->sysreg, 0x1224, c.ema);
+ if (ret)
+  return ret;
+ ret = regmap_read(d->sysreg, 0x1224, &ema);
+ if (ret || ema != 0x31)
+  return ret ?: -EIO;
+
+ d->domain_powered_off = false;
+ if (actual_rate(d) != rates[0].hz) {
+  d->domain_powered_off = true;
+  return -EIO;
+ }
+ d->current_rate = rates[0].hz;
+ return 0;
+}
+
+static int g3d_domain_resume_locked(struct gpu_dvfs *d)
+{
+ unsigned int cfg = ~0U, stat = ~0U;
+ int ret;
+
+ if (d->failed)
+  return -EIO;
+ ret = regmap_read(d->pmu, 0x4100, &cfg);
+ if (!ret)
+  ret = regmap_read(d->pmu, 0x4104, &stat);
+ if (ret || (cfg & 0xfU) != 0 || (stat & 0xfU) != 0) {
+  ret = ret ?: -EIO;
+  goto quarantine;
+ }
+ if (d->top_g3d_clk && !d->top_g3d_enabled) {
+  ret = clk_prepare_enable(d->top_g3d_clk);
+  if (ret)
+   goto quarantine;
+  d->top_g3d_enabled = true;
+ }
+ ret = g3d_prepare_sys_pwr(d);
+ if (ret)
+  goto quarantine;
+ ret = g3d_switch_pmu(d, true, &stat);
+ if (ret)
+  goto quarantine;
+
+ mutex_lock(&d->hardware);
+ ret = g3d_cmu_restore_locked(d);
+ mutex_unlock(&d->hardware);
+ if (ret)
+  goto quarantine;
+
+ ret = m86_tmu_gpu_power_on();
+ if (ret)
+  goto quarantine;
+
+ d->domain_on_count++;
+ dev_info_once(d->dev, "G3D external power-on complete: PMU STATUS=%#x, CMU/EMA/TMU2 restored\n", stat);
+ return 0;
+
+quarantine:
+ mutex_lock(&d->hardware);
+ d->failed = true;
+ mutex_unlock(&d->hardware);
+ dev_err(d->dev, "G3D domain resume failed ret=%d cfg=%#x stat=%#x; GPU quarantined\n",
+         ret, cfg, stat);
+ return ret;
+}
+
+/* Runtime resume has not marked the GPU ACTIVE yet. No PM get or devfreq
+ * calls here: restore external G3D domain if gated, validate hardware before
+ * Panfrost reset/first job, and restore the MIF QoS vote for the active OPP.
+ */
+int m86_gpu_resume_validate(struct device *gpu)
+{
+ struct gpu_dvfs *d;
+ unsigned long hz;
+ unsigned int i;
+ u32 mif_khz = rates[0].mif;
+ int ret=0;
+ mutex_lock(&instance_lock);d=instance;
+ if(!d || gpu->of_node!=d->gpu_node){ret=-ENODEV;goto unlock;}
+ if(!d->normal_on_voltage && !d->active_voltage)goto unlock;
+ mutex_lock(&d->transaction);
+ if(d->failed){ret=-EIO;goto done;}
+ if(d->domain_powered_off) {
+  ret=g3d_domain_resume_locked(d);
+  if(ret)goto done;
+ }
+ hz=clk_get_rate(d->clock);
+ if(!hz || hz>d->cap) {
+  ret=-ERANGE;
+  mutex_lock(&d->hardware);d->failed=true;mutex_unlock(&d->hardware);
+  dev_err(d->dev,"GPU retained resume state rejected: rate=%lu error=%d\n",hz,ret);
+  goto done;
+ }
+ for(i=0;i<ARRAY_SIZE(rates);i++) {
+  if(rates[i].hz==hz){mif_khz=rates[i].mif;break;}
+ }
+ if(d->bus_qos_active && d->cur_mif_qos!=mif_khz)
+  mif_vote(d,mif_khz);
+done:
+ mutex_unlock(&d->transaction);
+unlock:
+ mutex_unlock(&instance_lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(m86_gpu_resume_validate);
+
+/* Release the GPU MIF QoS floor while Panfrost is runtime-suspended so
+ * an idle or pre-suspend high-OPP vote does not pin MIF/INT while G3D
+ * shaders/tiler/L2 are powered down.
+ */
+void m86_gpu_suspend_notify(struct device *gpu)
+{
+ struct gpu_dvfs *d;
+ mutex_lock(&instance_lock);d=instance;
+ if(!d || gpu->of_node!=d->gpu_node)goto unlock;
+ mutex_lock(&d->transaction);
+ if(d->bus_qos_active && d->cur_mif_qos!=0)
+  mif_vote(d,0);
+ mutex_unlock(&d->transaction);
+unlock:
+ mutex_unlock(&instance_lock);
+}
+EXPORT_SYMBOL_GPL(m86_gpu_suspend_notify);
+
+void m86_gpu_domain_suspend(struct device *gpu, bool gpu_hw_idle)
+{
+ struct gpu_dvfs *d;
+ unsigned int stat = ~0U;
+ int ret;
+
+ mutex_lock(&instance_lock);
+ d = instance;
+ if (!d || gpu->of_node != d->gpu_node)
+  goto unlock;
+
+ mutex_lock(&d->transaction);
+ if (!READ_ONCE(g3d_power_gating) || d->failed || !gpu_hw_idle ||
+     d->domain_powered_off || !d->top_g3d_clk)
+  goto done;
+
+ ret = g3d_throttle_to_min_locked(d);
+ if (ret == -EBUSY)
+  goto done;
+ if (ret) {
+  mutex_lock(&d->hardware);
+  d->failed = true;
+  mutex_unlock(&d->hardware);
+  dev_err(d->dev, "G3D pre-suspend 266MHz throttle failed: %d\n", ret);
+  goto done;
+ }
+
+ ret = m86_tmu_gpu_power_off();
+ if (ret) {
+  dev_warn_ratelimited(d->dev, "G3D suspend skipped: TMU2 off returned %d\n", ret);
+  goto done;
+ }
+
+ mutex_lock(&d->hardware);
+ ret = g3d_cmu_save_and_lpi_locked(d);
+ mutex_unlock(&d->hardware);
+ if (ret) {
+  (void)m86_tmu_gpu_power_on();
+  if (ret != -EBUSY) {
+   mutex_lock(&d->hardware);
+   d->failed = true;
+   mutex_unlock(&d->hardware);
+   dev_err(d->dev, "G3D CMU context save failed: %d\n", ret);
+  }
+  goto done;
+ }
+
+ ret = g3d_prepare_sys_pwr(d);
+ if (!ret)
+  ret = g3d_switch_pmu(d, false, &stat);
+ if (ret) {
+  mutex_lock(&d->hardware);
+  d->failed = true;
+  mutex_unlock(&d->hardware);
+  dev_err(d->dev, "G3D PMU power-off failed ret=%d stat=%#x; GPU quarantined\n",
+          ret, stat);
+  goto done;
+ }
+
+ if (d->top_g3d_enabled) {
+  clk_disable_unprepare(d->top_g3d_clk);
+  d->top_g3d_enabled = false;
+ }
+ d->domain_off_count++;
+ dev_info_once(d->dev, "G3D external power-off active: PMU STATUS=%#x, TOPC gate released\n", stat);
+
+done:
+ mutex_unlock(&d->transaction);
+unlock:
+ mutex_unlock(&instance_lock);
+}
+EXPORT_SYMBOL_GPL(m86_gpu_domain_suspend);
 static int bus_floor(struct gpu_dvfs *d,u32 floor)
 {
  u32 con,sel,con2,sel2,p,m,s;
@@ -699,11 +1043,13 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  
   val=readl(d->cmu+0x800);
   writel(val|1,d->cmu+0x800);
- 
+  val=readl(d->cmu+0x900);
+  writel(val|3,d->cmu+0x900);
+
   /* 4. SYSREG MCS 0x31 */
   ret=regmap_write(d->sysreg,0x1224,0x31);
   if(ret)return ret;
- 
+
   return 0;
  }
  static void put_zone(void *data){put_device(&((struct thermal_zone_device *)data)->device);}
@@ -711,6 +1057,41 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
  static void put_node(void *data){of_node_put(data);}
  static void put_clock(void *data){clk_put(data);}
  static void put_exclusive(void *data){clk_rate_exclusive_put(data);}
+ static void put_top_g3d_clk(void *data)
+ {
+  struct gpu_dvfs *d = data;
+  if (d->top_g3d_clk && d->top_g3d_enabled) {
+   clk_disable_unprepare(d->top_g3d_clk);
+   d->top_g3d_enabled = false;
+  }
+ }
+ static ssize_t domain_stats_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+  struct gpu_dvfs *d = dev_get_drvdata(dev);
+  bool off, failed, top_en;
+  u64 off_cnt, on_cnt;
+  unsigned long rate;
+  u32 sel;
+
+  if (!d)
+   return -ENODEV;
+  mutex_lock(&d->hardware);
+  off = d->domain_powered_off;
+  failed = d->failed;
+  rate = d->current_rate;
+  mutex_unlock(&d->hardware);
+  top_en = READ_ONCE(d->top_g3d_enabled);
+  off_cnt = READ_ONCE(d->domain_off_count);
+  on_cnt = READ_ONCE(d->domain_on_count);
+  sel = READ_ONCE(d->cur_sel);
+  return sysfs_emit(buf, "gating=%u powered_off=%u top_clk=%u off_count=%llu on_count=%llu failed=%u rate=%lu sel=%#x\n",
+                    READ_ONCE(g3d_power_gating), off, top_en, off_cnt, on_cnt, failed, rate, sel);
+ }
+ static DEVICE_ATTR_RO(domain_stats);
+ static void remove_domain_stats(void *data)
+ {
+  device_remove_file(data, &dev_attr_domain_stats);
+ }
  static void put_bus_qos(void *data)
  {
   struct gpu_dvfs *d = data;
@@ -749,6 +1130,13 @@ static int gpu_probe(struct platform_device *pdev)
  fin=devm_clk_get(&pdev->dev,"fin");if(IS_ERR(fin))return PTR_ERR(fin);
  if(clk_get_rate(fin)!=24000000)
   return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"fin clock is %lu Hz, expected 24000000\n",clk_get_rate(fin));
+ d->top_g3d_clk=devm_clk_get_optional(&pdev->dev,"top_g3d");
+ if(IS_ERR(d->top_g3d_clk))return PTR_ERR(d->top_g3d_clk);
+ if(d->top_g3d_clk) {
+  ret=clk_prepare_enable(d->top_g3d_clk);if(ret)return ret;
+  d->top_g3d_enabled=true;
+  ret=devm_add_action_or_reset(&pdev->dev,put_top_g3d_clk,d);if(ret)return ret;
+ }
  d->pmu=syscon_regmap_lookup_by_compatible("samsung,exynos7-pmu");if(IS_ERR(d->pmu))return PTR_ERR(d->pmu);
  d->sysreg=syscon_regmap_lookup_by_phandle(pdev->dev.of_node,"meizu,sysreg");if(IS_ERR(d->sysreg))return PTR_ERR(d->sysreg);
  d->cmu=devm_ioremap(&pdev->dev,0x14aa0000,0x1000);
@@ -775,6 +1163,7 @@ static int gpu_probe(struct platform_device *pdev)
  if(initial_rate!=266000000 || !(readl(d->cmu+0x800)&1))
   return dev_err_probe(&pdev->dev,-EOPNOTSUPP,"retained GPU clock mismatch: rate=%lu coregate=%#x\n",
                        initial_rate,readl(d->cmu+0x800));
+ writel(readl(d->cmu+0x900)|3U,d->cmu+0x900);
  d->current_rate=initial_rate;
  if(d->active_voltage || d->normal_on_voltage) {
   struct device_node *node;
@@ -865,11 +1254,39 @@ static int gpu_probe(struct platform_device *pdev)
  mutex_lock(&instance_lock);
  if(instance){mutex_unlock(&instance_lock);return -EBUSY;}
  instance=d;platform_set_drvdata(pdev,d);mutex_unlock(&instance_lock);
+ ret=device_create_file(&pdev->dev,&dev_attr_domain_stats);
+ if(!ret) {
+  ret=devm_add_action_or_reset(&pdev->dev,remove_domain_stats,&pdev->dev);
+  if(ret)return ret;
+ }
  dev_info(&pdev->dev,"retained GPU handoff: rate=%lu cap=%lu raw_selector=%#x voltage_writes=%u MCS=%#x\n",
   clk_get_rate(d->clock),d->cap,selector,d->active_voltage || d->normal_on_voltage,mcs);
  if(d->normal_on_voltage)dev_info(d->dev,"explicit Normal ON fixed-LDO protocol, cap %luMHz\n",d->cap/1000000);
  return 0;
 }
+static int gpu_dvfs_suspend(struct device *dev)
+{
+ struct gpu_dvfs *d = dev_get_drvdata(dev);
+ if (!d)
+  return 0;
+ mutex_lock(&d->transaction);
+ if (!d->failed && !d->domain_powered_off)
+  (void)g3d_throttle_to_min_locked(d);
+ d->system_suspended = true;
+ mutex_unlock(&d->transaction);
+ return 0;
+}
+static int gpu_dvfs_resume(struct device *dev)
+{
+ struct gpu_dvfs *d = dev_get_drvdata(dev);
+ if (!d)
+  return 0;
+ mutex_lock(&d->transaction);
+ d->system_suspended = false;
+ mutex_unlock(&d->transaction);
+ return 0;
+}
+static DEFINE_SIMPLE_DEV_PM_OPS(gpu_dvfs_pm_ops, gpu_dvfs_suspend, gpu_dvfs_resume);
 static int gpu_remove(struct platform_device *pdev)
 {
  struct gpu_dvfs *d = platform_get_drvdata(pdev);
@@ -884,7 +1301,7 @@ static int gpu_remove(struct platform_device *pdev)
 static const struct of_device_id matches[]={{.compatible="meizu,m86-gpu-dvfs-retained"},{}};
 MODULE_DEVICE_TABLE(of,matches);
 static struct platform_driver gpu_driver={.probe=gpu_probe,.remove=gpu_remove,
- .driver={.name="m86-gpu-dvfs-retained",.of_match_table=matches,.suppress_bind_attrs=true}};
+ .driver={.name="m86-gpu-dvfs-retained",.of_match_table=matches,.pm=pm_sleep_ptr(&gpu_dvfs_pm_ops),.suppress_bind_attrs=true}};
 module_platform_driver(gpu_driver);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Review-only retained-domain PRO5 GPU PLL/MCS/voltage transactions");

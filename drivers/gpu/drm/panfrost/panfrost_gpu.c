@@ -511,9 +511,9 @@ u32 panfrost_gpu_get_latest_flush_id(struct panfrost_device *pfdev)
 
 	if (panfrost_has_hw_feature(pfdev, HW_FEATURE_FLUSH_REDUCTION)) {
 		/* Flush reduction only makes sense when the GPU is kept powered on between jobs */
-		if (pm_runtime_get_if_in_use(pfdev->dev)) {
+		if (pm_runtime_get_if_in_use(pfdev->dev) > 0) {
 			flush_id = gpu_read(pfdev, GPU_LATEST_FLUSH_ID);
-			pm_runtime_put(pfdev->dev);
+			pm_runtime_put_autosuspend(pfdev->dev);
 			return flush_id;
 		}
 	}

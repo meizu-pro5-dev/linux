@@ -465,12 +465,13 @@
 		regulator-name = "m86-gpu-buck6-encoded-readonly";
 	};
 
-	/* GPU DVFS on the retained G3D domain and BUCK6. */
+	/* GPU DVFS on the G3D domain and BUCK6. */
 	m86_gpu_dvfs: gpu-dvfs-retained {
 		compatible = "meizu,m86-gpu-dvfs-retained";
 		#clock-cells = <0>;
-		clocks = <&fin_pll>, <&m86_apollo_clk>;
-		clock-names = "fin", "apollo";
+		clocks = <&fin_pll>, <&m86_apollo_clk>,
+			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>;
+		clock-names = "fin", "apollo", "top_g3d";
 		samsung,bus = <&bus_mif>;
 		meizu,gpu = <&gpu>;
 		meizu,sysreg = <&m86_disp_sysreg>;
@@ -690,7 +691,7 @@
 };
 
 &cmu_g3d {
-	status = "okay";
+	status = "disabled";
 };
 
 /*
@@ -789,13 +790,13 @@
 	clock-frequency = <24000000>;
 };
 
-/* G3D power is owned by m86-gpu-dvfs, not by Panfrost through pd_g3d. */
+/* G3D power and CMU_G3D are owned exclusively by m86-gpu-dvfs. */
 &gpu {
 	/delete-property/ power-domains;
 	status = "okay";
 	mali-supply = <&m86_gpu_buck6_observed>;
-	clocks = <&m86_gpu_dvfs>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
-	clock-names = "core", "bus";
+	clocks = <&m86_gpu_dvfs>;
+	clock-names = "core";
 	operating-points-v2 = <&m86_gpu_opps>;
 	meizu,gpu-dvfs-coordinator = <&m86_gpu_dvfs>;
 };
@@ -1267,7 +1268,7 @@
 };
 
 &pd_g3d {
-	status = "okay";
+	status = "disabled";
 };
 
 &pdma0 {

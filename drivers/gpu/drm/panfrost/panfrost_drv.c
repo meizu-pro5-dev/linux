@@ -651,12 +651,9 @@ static int panfrost_probe(struct platform_device *pdev)
 
 	pm_runtime_set_active(pfdev->dev);
 	pm_runtime_mark_last_busy(pfdev->dev);
-	/* Establish the manual hold while runtime PM is still disabled.
-	 * set_autosuspend_delay calls synchronous rpm_idle even before
-	 * use_autosuspend; a hold installed later cannot protect probe. */
-	pm_runtime_enable(pfdev->dev);
 	pm_runtime_set_autosuspend_delay(pfdev->dev, 50); /* ~3 frames */
 	pm_runtime_use_autosuspend(pfdev->dev);
+	pm_runtime_enable(pfdev->dev);
 
 
 	/*
