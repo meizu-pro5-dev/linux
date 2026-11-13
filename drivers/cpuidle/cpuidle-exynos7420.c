@@ -24,7 +24,9 @@
 #include <linux/of_address.h>
 #include <linux/percpu.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 #include <linux/tick.h>
 #include <linux/arm-smccc.h>
 #include <linux/soc/samsung/exynos7420-cpuidle.h>
@@ -118,6 +120,7 @@ static DEFINE_PER_CPU(ktime_t, exynos7420_atlas_next_event);
 static DEFINE_RAW_SPINLOCK(exynos7420_cpd_lock);
 static u64 exynos7420_atlas_cpd_gen;
 static unsigned int exynos7420_cpd_inhibit_depth;
+static bool exynos7420_atlas_suspend_wfi;
 
 static bool exynos7420_any_atlas_online(void)
 {
@@ -316,6 +319,12 @@ static __cpuidle int exynos7420_enter_c2(struct cpuidle_device *dev,
 	u32 val;
 	int ret;
 
+	if (READ_ONCE(exynos7420_atlas_suspend_wfi) &&
+	    cpumask_test_cpu(cpu, &exynos7420_atlas_cpumask)) {
+		cpu_do_idle();
+		return drv->safe_state_index;
+	}
+
 	/* 1. Save local CPU peripheral state (GIC Interface and local timers) */
 	ret = cpu_pm_enter();
 	if (ret) {
@@ -384,7 +393,7 @@ bool exynos7420_atlas_cpd_inhibited(void)
 }
 EXPORT_SYMBOL_GPL(exynos7420_atlas_cpd_inhibited);
 
-static bool exynos7420_can_enter_cpd_locked(ktime_t now, bool is_s2idle)
+static bool exynos7420_can_enter_cpd_locked(ktime_t now)
 {
 	unsigned int c;
 	bool any = false;
@@ -407,14 +416,9 @@ static bool exynos7420_can_enter_cpd_locked(ktime_t now, bool is_s2idle)
 			return false;
 
 		next_evt = per_cpu(exynos7420_atlas_next_event, c);
-		if (is_s2idle) {
-			if (next_evt != KTIME_MAX)
-				return false;
-		} else {
-			if (ktime_to_ns(ktime_sub(next_evt, now)) <
-			    EXYNOS7420_CPD_RESIDENCY_NS)
-				return false;
-		}
+		if (ktime_to_ns(ktime_sub(next_evt, now)) <
+		    EXYNOS7420_CPD_RESIDENCY_NS)
+			return false;
 	}
 	return any;
 }
@@ -432,9 +436,8 @@ static bool exynos7420_can_enter_cpd_locked(ktime_t now, bool is_s2idle)
  * triggered only when all online Atlas cores are in CPD-ready C2 and each still
  * has >= 3 ms remaining before its next scheduled timer event.
  */
-static __cpuidle int exynos7420_enter_cpd_common(struct cpuidle_device *dev,
-						 struct cpuidle_driver *drv,
-						 bool is_s2idle)
+static __cpuidle int exynos7420_enter_cpd(struct cpuidle_device *dev,
+					  struct cpuidle_driver *drv, int index)
 {
 	unsigned int cpu = dev->cpu;
 	u32 cfg_off = exynos7420_pmu_cpu_config_offset(cpu);
@@ -444,6 +447,11 @@ static __cpuidle int exynos7420_enter_cpd_common(struct cpuidle_device *dev,
 	u64 gen_before;
 	u32 val, seq_opt;
 	int ret, entered_idx;
+
+	if (READ_ONCE(exynos7420_atlas_suspend_wfi)) {
+		cpu_do_idle();
+		return drv->safe_state_index;
+	}
 
 	ret = cpu_pm_enter();
 	if (ret) {
@@ -456,24 +464,17 @@ static __cpuidle int exynos7420_enter_cpd_common(struct cpuidle_device *dev,
 
 	raw_spin_lock(&exynos7420_cpd_lock);
 	gen_before = exynos7420_atlas_cpd_gen;
-	if (is_s2idle) {
-		now = 0;
-		next_evt = KTIME_MAX;
+	now = ktime_get();
+	next_evt = tick_nohz_get_next_hrtimer();
+	if (ktime_to_ns(ktime_sub(next_evt, now)) >=
+	    EXYNOS7420_CPD_RESIDENCY_NS) {
 		per_cpu(exynos7420_atlas_next_event, cpu) = next_evt;
 		cpumask_set_cpu(cpu, &exynos7420_atlas_cpd_mask);
 	} else {
-		now = ktime_get();
-		next_evt = tick_nohz_get_next_hrtimer();
-		if (ktime_to_ns(ktime_sub(next_evt, now)) >=
-		    EXYNOS7420_CPD_RESIDENCY_NS) {
-			per_cpu(exynos7420_atlas_next_event, cpu) = next_evt;
-			cpumask_set_cpu(cpu, &exynos7420_atlas_cpd_mask);
-		} else {
-			per_cpu(exynos7420_atlas_next_event, cpu) = 0;
-			cpumask_clear_cpu(cpu, &exynos7420_atlas_cpd_mask);
-		}
+		per_cpu(exynos7420_atlas_next_event, cpu) = 0;
+		cpumask_clear_cpu(cpu, &exynos7420_atlas_cpd_mask);
 	}
-	if (exynos7420_can_enter_cpd_locked(now, is_s2idle)) {
+	if (exynos7420_can_enter_cpd_locked(now)) {
 		seq_opt = readl_relaxed(pmu_base + EXYNOS_PMU_ATLAS_CPUSEQUENCER_OPTION);
 		writel(seq_opt | EXYNOS_PMU_USE_AUTOMATIC_PWRCTRL,
 		       pmu_base + EXYNOS_PMU_ATLAS_CPUSEQUENCER_OPTION);
@@ -514,19 +515,6 @@ static __cpuidle int exynos7420_enter_cpd_common(struct cpuidle_device *dev,
 	}
 
 	return entered_idx;
-}
-
-static __cpuidle int exynos7420_enter_cpd(struct cpuidle_device *dev,
-					  struct cpuidle_driver *drv, int index)
-{
-	return exynos7420_enter_cpd_common(dev, drv, false);
-}
-
-static __cpuidle int exynos7420_enter_cpd_s2idle(struct cpuidle_device *dev,
-						 struct cpuidle_driver *drv,
-						 int index)
-{
-	return exynos7420_enter_cpd_common(dev, drv, true);
 }
 
 static struct cpuidle_driver exynos7420_apollo_idle_driver = {
@@ -572,9 +560,13 @@ static struct cpuidle_driver exynos7420_atlas_idle_driver = {
 			.name			= "WFI",
 			.desc			= "ARM64 Core Clock Gating (WFI)",
 		},
+		/*
+		 * Keep Atlas in WFI during s2idle (tick_freeze): entering C2 or
+		 * CPD on cpu4..7 inside s2idle resets the SoC on consecutive
+		 * wakeups, while Apollo C2 and runtime Atlas C2/CPD remain active.
+		 */
 		[1] = {
 			.enter			= exynos7420_enter_c2,
-			.enter_s2idle		= exynos7420_enter_c2,
 			.exit_latency		= 100,
 			.target_residency	= 1000,
 			.power_usage		= UINT_MAX,
@@ -584,7 +576,6 @@ static struct cpuidle_driver exynos7420_atlas_idle_driver = {
 		},
 		[2] = {
 			.enter			= exynos7420_enter_cpd,
-			.enter_s2idle		= exynos7420_enter_cpd_s2idle,
 			.exit_latency		= 300,
 			.target_residency	= 3000,
 			.power_usage		= UINT_MAX,
@@ -651,6 +642,36 @@ static void __init exynos7420_cpuidle_cleanup_iomem(void)
 		pmu_base = NULL;
 	}
 }
+
+static int exynos7420_pm_notify(struct notifier_block *nb,
+			      unsigned long event, void *data)
+{
+	switch (event) {
+	case PM_SUSPEND_PREPARE:
+		cpuidle_driver_state_disabled(&exynos7420_atlas_idle_driver, 1,
+					      true);
+		cpuidle_driver_state_disabled(&exynos7420_atlas_idle_driver, 2,
+					      true);
+		WRITE_ONCE(exynos7420_atlas_suspend_wfi, true);
+		smp_mb();
+		kick_all_cpus_sync();
+		return NOTIFY_OK;
+	case PM_POST_RESTORE:
+	case PM_POST_SUSPEND:
+		WRITE_ONCE(exynos7420_atlas_suspend_wfi, false);
+		smp_mb();
+		cpuidle_driver_state_disabled(&exynos7420_atlas_idle_driver, 2,
+					      false);
+		cpuidle_driver_state_disabled(&exynos7420_atlas_idle_driver, 1,
+					      false);
+		return NOTIFY_OK;
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block exynos7420_pm_nb = {
+	.notifier_call = exynos7420_pm_notify,
+};
 
 static int __init exynos7420_cpuidle_init(void)
 {
@@ -729,6 +750,10 @@ static int __init exynos7420_cpuidle_init(void)
 		return ret;
 	}
 	exynos7420_hp_state = ret;
+
+	ret = register_pm_notifier(&exynos7420_pm_nb);
+	if (ret)
+		pr_warn("Failed to register PM notifier (%d)\n", ret);
 
 	pr_info("Drivers registered (Apollo: %d states/%u CPUs, Atlas: %d states/%u CPUs, L2 QACTIVE enabled)\n",
 		exynos7420_apollo_idle_driver.state_count,
