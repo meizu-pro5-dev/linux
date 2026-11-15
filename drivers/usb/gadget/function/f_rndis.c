@@ -688,13 +688,17 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 	 * with list_for_each_entry, so we assume no race condition
 	 * with regard to rndis_opts->bound access
 	 */
+	mutex_lock(&rndis_opts->lock);
+	gether_set_gadget(rndis_opts->net, cdev->gadget);
 	if (!rndis_opts->bound) {
-		gether_set_gadget(rndis_opts->net, cdev->gadget);
 		status = gether_register_netdev(rndis_opts->net);
-		if (status)
+		if (status) {
+			mutex_unlock(&rndis_opts->lock);
 			goto fail;
+		}
 		rndis_opts->bound = true;
 	}
+	mutex_unlock(&rndis_opts->lock);
 
 	us = usb_gstrings_attach(cdev, rndis_strings,
 				 ARRAY_SIZE(rndis_string_defs));
@@ -955,6 +959,12 @@ static void rndis_free(struct usb_function *f)
 static void rndis_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct f_rndis		*rndis = func_to_rndis(f);
+	struct f_rndis_opts	*rndis_opts;
+
+	rndis_opts = container_of(f->fi, struct f_rndis_opts, func_inst);
+	mutex_lock(&rndis_opts->lock);
+	gether_clear_gadget(rndis_opts->net, c->cdev->gadget);
+	mutex_unlock(&rndis_opts->lock);
 
 	kfree(f->os_desc_table);
 	f->os_desc_n = 0;

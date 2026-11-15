@@ -260,15 +260,17 @@ static int eem_bind(struct usb_configuration *c, struct usb_function *f)
 	 * with list_for_each_entry, so we assume no race condition
 	 * with regard to eem_opts->bound access
 	 */
+	mutex_lock(&eem_opts->lock);
+	gether_set_gadget(eem_opts->net, cdev->gadget);
 	if (!eem_opts->bound) {
-		mutex_lock(&eem_opts->lock);
-		gether_set_gadget(eem_opts->net, cdev->gadget);
 		status = gether_register_netdev(eem_opts->net);
-		mutex_unlock(&eem_opts->lock);
-		if (status)
+		if (status) {
+			mutex_unlock(&eem_opts->lock);
 			return status;
+		}
 		eem_opts->bound = true;
 	}
+	mutex_unlock(&eem_opts->lock);
 
 	us = usb_gstrings_attach(cdev, eem_strings,
 				 ARRAY_SIZE(eem_string_defs));
@@ -635,7 +637,14 @@ static void eem_free(struct usb_function *f)
 
 static void eem_unbind(struct usb_configuration *c, struct usb_function *f)
 {
+	struct f_eem_opts *eem_opts;
+
 	DBG(c->cdev, "eem unbind\n");
+
+	eem_opts = container_of(f->fi, struct f_eem_opts, func_inst);
+	mutex_lock(&eem_opts->lock);
+	gether_clear_gadget(eem_opts->net, c->cdev->gadget);
+	mutex_unlock(&eem_opts->lock);
 
 	usb_free_all_descriptors(f);
 }

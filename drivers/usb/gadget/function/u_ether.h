@@ -151,6 +151,16 @@ static inline struct net_device *gether_setup_default(void)
 void gether_set_gadget(struct net_device *net, struct usb_gadget *g);
 
 /**
+ * gether_clear_gadget - detach an ethernet-over-usb link from its gadget
+ * @net: device representing this link
+ * @g: the gadget being unbound
+ *
+ * Clears the gadget association if it still matches @g and moves registered
+ * netdevs off the gadget device before the gadget is deleted.
+ */
+void gether_clear_gadget(struct net_device *net, struct usb_gadget *g);
+
+/**
  * gether_set_dev_addr - initialize an ethernet-over-usb link with eth address
  * @net: device representing this link
  * @dev_addr: eth address of this device

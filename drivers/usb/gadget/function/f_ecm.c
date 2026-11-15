@@ -908,8 +908,14 @@ static void ecm_free(struct usb_function *f)
 static void ecm_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct f_ecm		*ecm = func_to_ecm(f);
+	struct f_ecm_opts	*ecm_opts;
 
 	DBG(c->cdev, "ecm unbind\n");
+
+	ecm_opts = container_of(f->fi, struct f_ecm_opts, func_inst);
+	mutex_lock(&ecm_opts->lock);
+	gether_clear_gadget(ecm_opts->net, c->cdev->gadget);
+	mutex_unlock(&ecm_opts->lock);
 
 	usb_free_all_descriptors(f);
 

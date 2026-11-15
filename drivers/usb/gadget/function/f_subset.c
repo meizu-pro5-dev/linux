@@ -308,15 +308,17 @@ geth_bind(struct usb_configuration *c, struct usb_function *f)
 	 * with list_for_each_entry, so we assume no race condition
 	 * with regard to gether_opts->bound access
 	 */
+	mutex_lock(&gether_opts->lock);
+	gether_set_gadget(gether_opts->net, cdev->gadget);
 	if (!gether_opts->bound) {
-		mutex_lock(&gether_opts->lock);
-		gether_set_gadget(gether_opts->net, cdev->gadget);
 		status = gether_register_netdev(gether_opts->net);
-		mutex_unlock(&gether_opts->lock);
-		if (status)
+		if (status) {
+			mutex_unlock(&gether_opts->lock);
 			return status;
+		}
 		gether_opts->bound = true;
 	}
+	mutex_unlock(&gether_opts->lock);
 
 	us = usb_gstrings_attach(cdev, geth_strings,
 				 ARRAY_SIZE(geth_string_defs));
@@ -456,6 +458,13 @@ static void geth_free(struct usb_function *f)
 
 static void geth_unbind(struct usb_configuration *c, struct usb_function *f)
 {
+	struct f_gether_opts *gether_opts;
+
+	gether_opts = container_of(f->fi, struct f_gether_opts, func_inst);
+	mutex_lock(&gether_opts->lock);
+	gether_clear_gadget(gether_opts->net, c->cdev->gadget);
+	mutex_unlock(&gether_opts->lock);
+
 	geth_string_defs[0].id = 0;
 	usb_free_all_descriptors(f);
 }

@@ -1435,15 +1435,17 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 	 * with list_for_each_entry, so we assume no race condition
 	 * with regard to ncm_opts->bound access
 	 */
+	mutex_lock(&ncm_opts->lock);
+	gether_set_gadget(ncm_opts->net, cdev->gadget);
 	if (!ncm_opts->bound) {
-		mutex_lock(&ncm_opts->lock);
-		gether_set_gadget(ncm_opts->net, cdev->gadget);
 		status = gether_register_netdev(ncm_opts->net);
-		mutex_unlock(&ncm_opts->lock);
-		if (status)
+		if (status) {
+			mutex_unlock(&ncm_opts->lock);
 			goto fail;
+		}
 		ncm_opts->bound = true;
 	}
+	mutex_unlock(&ncm_opts->lock);
 	us = usb_gstrings_attach(cdev, ncm_strings,
 				 ARRAY_SIZE(ncm_string_defs));
 	if (IS_ERR(us)) {
@@ -1662,8 +1664,14 @@ static void ncm_free(struct usb_function *f)
 static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct f_ncm *ncm = func_to_ncm(f);
+	struct f_ncm_opts *ncm_opts;
 
 	DBG(c->cdev, "ncm unbind\n");
+
+	ncm_opts = container_of(f->fi, struct f_ncm_opts, func_inst);
+	mutex_lock(&ncm_opts->lock);
+	gether_clear_gadget(ncm_opts->net, c->cdev->gadget);
+	mutex_unlock(&ncm_opts->lock);
 
 	hrtimer_cancel(&ncm->task_timer);
 

@@ -17,6 +17,7 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/if_vlan.h>
+#include <linux/rtnetlink.h>
 #include <linux/string_helpers.h>
 #include <linux/usb/composite.h>
 
@@ -112,8 +113,12 @@ static void eth_get_drvinfo(struct net_device *net, struct ethtool_drvinfo *p)
 
 	strscpy(p->driver, "g_ether", sizeof(p->driver));
 	strscpy(p->version, UETH__VERSION, sizeof(p->version));
-	strscpy(p->fw_version, dev->gadget->name, sizeof(p->fw_version));
-	strscpy(p->bus_info, dev_name(&dev->gadget->dev), sizeof(p->bus_info));
+	if (dev->gadget) {
+		strscpy(p->fw_version, dev->gadget->name,
+			sizeof(p->fw_version));
+		strscpy(p->bus_info, dev_name(&dev->gadget->dev),
+			sizeof(p->bus_info));
+	}
 }
 
 /* REVISIT can also support:
@@ -886,15 +891,50 @@ int gether_register_netdev(struct net_device *net)
 }
 EXPORT_SYMBOL_GPL(gether_register_netdev);
 
+static void gether_update_gadget_locked(struct net_device *net,
+					struct usb_gadget *g,
+					enum dpm_order dpm_order)
+{
+	struct eth_dev *dev = netdev_priv(net);
+	struct device *new_parent = g ? &g->dev : NULL;
+
+	dev->gadget = g;
+	if (net->reg_state == NETREG_REGISTERED) {
+		if (net->dev.parent != new_parent) {
+			int ret = device_move(&net->dev, new_parent, dpm_order);
+
+			if (ret)
+				netdev_warn(net,
+					    "failed to move parent device: %d\n",
+					    ret);
+		}
+	} else {
+		SET_NETDEV_DEV(net, new_parent);
+	}
+}
+
 void gether_set_gadget(struct net_device *net, struct usb_gadget *g)
 {
-	struct eth_dev *dev;
-
-	dev = netdev_priv(net);
-	dev->gadget = g;
-	SET_NETDEV_DEV(net, &g->dev);
+	rtnl_lock();
+	gether_update_gadget_locked(net, g, g ? DPM_ORDER_DEV_AFTER_PARENT :
+						DPM_ORDER_NONE);
+	rtnl_unlock();
 }
 EXPORT_SYMBOL_GPL(gether_set_gadget);
+
+void gether_clear_gadget(struct net_device *net, struct usb_gadget *g)
+{
+	struct eth_dev *dev = netdev_priv(net);
+
+	if (!g)
+		return;
+
+	rtnl_lock();
+	if (dev->gadget == g)
+		gether_update_gadget_locked(net, NULL, DPM_ORDER_NONE);
+	rtnl_unlock();
+}
+EXPORT_SYMBOL_GPL(gether_clear_gadget);
 
 int gether_set_dev_addr(struct net_device *net, const char *dev_addr)
 {
