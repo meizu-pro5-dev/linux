@@ -407,6 +407,14 @@ static u64 notrace sun50i_a64_read_cntvct_el0(void)
 }
 #endif
 
+#ifdef CONFIG_EXYNOS7420_ERRATUM_CNTVOFF
+/* Exynos7420 firmware leaves per-CPU CNTVOFF inconsistent; use CNTPCT_EL0. */
+static u64 notrace exynos7420_read_cntvct_el0(void)
+{
+	return arch_timer_read_cntpct_el0();
+}
+#endif
+
 #ifdef CONFIG_ARM_ARCH_TIMER_OOL_WORKAROUND
 DEFINE_PER_CPU(const struct arch_timer_erratum_workaround *, timer_unstable_counter_workaround);
 EXPORT_SYMBOL_GPL(timer_unstable_counter_workaround);
@@ -504,6 +512,15 @@ static const struct arch_timer_erratum_workaround ool_workarounds[] = {
 		.read_cntpct_el0 = sun50i_a64_read_cntpct_el0,
 		.read_cntvct_el0 = sun50i_a64_read_cntvct_el0,
 		.set_next_event_phys = erratum_set_next_event_phys,
+		.set_next_event_virt = erratum_set_next_event_virt,
+	},
+#endif
+#ifdef CONFIG_EXYNOS7420_ERRATUM_CNTVOFF
+	{
+		.match_type = ate_match_dt,
+		.id = "samsung,exynos7420-erratum-cntvoff",
+		.desc = "Exynos7420 CNTVOFF erratum",
+		.read_cntvct_el0 = exynos7420_read_cntvct_el0,
 		.set_next_event_virt = erratum_set_next_event_virt,
 	},
 #endif
@@ -1099,9 +1116,6 @@ struct arch_timer_kvm_info *arch_timer_get_kvm_info(void)
 
 static void __init arch_counter_register(unsigned type)
 {
-	/* Exynos7420 firmware leaves per-CPU CNTVOFF values inconsistent. */
-	bool m86_phys_counter = of_machine_is_compatible("meizu,m86") &&
-		arch_timer_uses_ppi == ARCH_TIMER_PHYS_NONSECURE_PPI;
 	u64 (*scr)(void);
 	u64 start_count;
 	int width;
@@ -1110,8 +1124,7 @@ static void __init arch_counter_register(unsigned type)
 	if (type & ARCH_TIMER_TYPE_CP15) {
 		u64 (*rd)(void);
 
-		if ((!m86_phys_counter && IS_ENABLED(CONFIG_ARM64) &&
-		     !is_hyp_mode_available()) ||
+		if ((IS_ENABLED(CONFIG_ARM64) && !is_hyp_mode_available()) ||
 		    arch_timer_uses_ppi == ARCH_TIMER_VIRT_PPI) {
 			if (arch_timer_counter_has_wa()) {
 				rd = arch_counter_get_cntvct_stable;
@@ -1131,12 +1144,7 @@ static void __init arch_counter_register(unsigned type)
 		}
 
 		arch_timer_read_counter = rd;
-		/* EL0 vDSO reads CNTVCT, so it cannot serve the physical clock. */
-		if (m86_phys_counter)
-			vdso_default = VDSO_CLOCKMODE_NONE;
 		clocksource_counter.vdso_clock_mode = vdso_default;
-		if (m86_phys_counter)
-			pr_info("m86: physical counter for clocksource and sched_clock; vDSO disabled\n");
 	} else {
 		arch_timer_read_counter = arch_counter_get_cntvct_mem;
 		scr = arch_counter_get_cntvct_mem;

@@ -368,6 +368,18 @@ config SUN50I_ERRATUM_UNKNOWN1
 	  the Allwinner A64 SoC. The workaround will only be active if the
 	  allwinner,erratum-unknown1 property is found in the timer node.
 
+config EXYNOS7420_ERRATUM_CNTVOFF
+	bool "Workaround for Exynos7420 inconsistent CNTVOFF erratum"
+	default y if ARCH_EXYNOS
+	depends on ARM_ARCH_TIMER && ARM64
+	select ARM_ARCH_TIMER_OOL_WORKAROUND
+	help
+	  This option enables a workaround for Exynos7420 firmware that
+	  leaves per-CPU CNTVOFF values inconsistent. When enabled and the
+	  samsung,exynos7420-erratum-cntvoff property is present in the timer
+	  node, CNTVCT_EL0 reads are redirected to CNTPCT_EL0 and vDSO
+	  archtimer support is disabled.
+
 config ARM_GLOBAL_TIMER
 	bool "Support for the ARM global timer" if COMPILE_TEST
 	select TIMER_OF if OF
