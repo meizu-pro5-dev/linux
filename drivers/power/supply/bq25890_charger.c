@@ -31,6 +31,9 @@
 #define PUMP_EXPRESS_MAX_TRIES		6
 #define PUMP_EXPRESS_VBUS_MARGIN_uV	1000000
 
+#define BQ25890_WD_DISABLE		0
+#define BQ25890_WD_40S			1
+
 enum bq25890_chip_version {
 	BQ25890,
 	BQ25892,
@@ -124,7 +127,7 @@ struct bq25890_device {
 
 	/* PRO 5 OEM ordinary-5V parallel charging policy. */
 	bool m86, m86_secondary, m86_charge_enabled, otg_vbus_enabled, m86_temp_tripped;
-	bool m86_terminate, m86_conv_rate, m86_applied;
+	bool m86_terminate, m86_conv_rate, m86_applied, m86_wd_enabled, m86_suspended;
 	int m86_input_limit, m86_charge_current, m86_source_type, m86_source_max, m86_source_voltage;
 	struct power_supply *m86_source_psy;
 	int m86_ico_stage, m86_budget;
@@ -803,6 +806,7 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 				  struct bq25890_state *state)
 {
 	int i, ret;
+	unsigned int fault;
 
 	struct {
 		enum bq25890_fields id;
@@ -812,10 +816,6 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		{F_PG_STAT,	&state->online},
 		{F_EN_HIZ,	&state->hiz},
 		{F_VSYS_STAT,	&state->vsys_status},
-		{F_BOOST_FAULT, &state->boost_fault},
-		{F_BAT_FAULT,	&state->bat_fault},
-		{F_CHG_FAULT,	&state->chrg_fault},
-		{F_NTC_FAULT,	&state->ntc_fault}
 	};
 
 	for (i = 0; i < ARRAY_SIZE(state_fields); i++) {
@@ -825,6 +825,20 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 
 		*state_fields[i].data = ret;
 	}
+
+	/* REG0C is clear-on-read; sample all fault bits in one transaction. */
+	ret = regmap_read(bq->rmap, 0x0c, &fault);
+	if (ret < 0)
+		return ret;
+	if (bq->m86 && (fault & BIT(7))) {
+		dev_warn_ratelimited(bq->dev, "charger watchdog expired; resetting cached policy\n");
+		bq->m86_applied = false;
+		bq->m86_wd_enabled = false;
+	}
+	state->boost_fault = (fault >> 6) & 0x1;
+	state->chrg_fault = (fault >> 4) & 0x3;
+	state->bat_fault = (fault >> 3) & 0x1;
+	state->ntc_fault = fault & 0x7;
 
 	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d\n",
 		state->chrg_status, state->online,
@@ -885,10 +899,16 @@ static irqreturn_t bq25890_irq_handler_thread(int irq, void *private)
 {
 	struct bq25890_device *bq = private;
 	irqreturn_t ret;
+	bool kick_work = false;
 
 	mutex_lock(&bq->lock);
 	ret = __bq25890_handle_irq(bq);
+	if (bq->m86 && !bq->m86_secondary && !bq->m86_applied && !bq->m86_suspended)
+		kick_work = true;
 	mutex_unlock(&bq->lock);
+
+	if (kick_work)
+		mod_delayed_work(system_power_efficient_wq, &bq->m86_work, 0);
 
 	return ret;
 }
@@ -930,11 +950,37 @@ static int bq25890_m86_charge_current(const char *cell, int temp, int voltage)
 	return temp < 150 ? 1500000 : 2250000;
 }
 
+/* Caller must hold bq->lock. */
+static int bq25890_m86_sync_watchdog(struct bq25890_device *bq, bool enable)
+{
+	int ret;
+
+	if (!enable) {
+		if (!bq->m86_wd_enabled)
+			return 0;
+		ret = bq25890_field_write(bq, F_WD, BQ25890_WD_DISABLE);
+		if (!ret)
+			bq->m86_wd_enabled = false;
+		return ret;
+	}
+
+	if (!bq->m86_wd_enabled) {
+		ret = bq25890_field_write(bq, F_WD, BQ25890_WD_40S);
+		if (ret)
+			return ret;
+	}
+
+	ret = bq25890_field_write(bq, F_WD_RST, 1);
+	if (!ret)
+		bq->m86_wd_enabled = true;
+	return ret;
+}
+
 static int bq25890_m86_apply(struct bq25890_device *bq, bool enable,
 			   int input, int charge, bool terminate)
 {
 	bool conv_rate = enable && !bq->m86_secondary && bq->m86_ico_stage < 2;
-	int ret;
+	int ret = 0;
 
 	/*
 	 * Avoid redundant GPIO-I2C register read-modify-writes and status reads
@@ -950,7 +996,13 @@ static int bq25890_m86_apply(struct bq25890_device *bq, bool enable,
 
 	/* CE is independent of silicon HiZ/CHG_CFG, including failed writes. */
 	if (!enable) gpiod_set_value_cansleep(bq->m86_ce, 0);
-	ret = bq25890_field_write(bq, F_IINLIM,
+	if (!bq->m86_applied) {
+		ret = bq25890_field_write(bq, F_EN_ILIM, 0);
+		if (!ret) ret = bq25890_field_write(bq, F_FORCE_VINDPM, 1);
+		if (!ret) ret = bq25890_field_write(bq, F_VINDPM, 18);
+		if (!ret) ret = bq25890_field_write(bq, F_VREG, bq->init_data.vreg);
+	}
+	if (!ret) ret = bq25890_field_write(bq, F_IINLIM,
 				bq25890_find_idx(max(input, 100000), TBL_IINLIM));
 	if (!ret) ret = bq25890_field_write(bq, F_EN_HIZ, bq->m86_secondary && !enable);
 	if (!ret) ret = bq25890_field_write(bq, F_ICHG,
@@ -996,8 +1048,10 @@ static void bq25890_m86_poll(struct work_struct *work)
 	mutex_lock(&bq->lock);
 	mutex_lock(&aux->lock);
 	if (bq->otg_vbus_enabled) {
+		bq25890_m86_sync_watchdog(aux, false);
 		if (bq25890_field_read(bq, F_OTG_CFG) <= 0)
 			bq25890_set_otg_cfg(bq, 1);
+		bq25890_m86_sync_watchdog(bq, true);
 		goto out;
 	}
 	/* All decisions use valid current measurements, not fallback 30 C or
@@ -1170,6 +1224,18 @@ apply:
 	else if (aux_input && bq25890_m86_apply(aux, true, aux_input, charge, terminate)) {
 		bq25890_m86_apply(aux, false, 100000, charge, terminate);
 		bq25890_m86_apply(bq, false, 500000, charge, terminate);
+		enable = false;
+	}
+	if (bq25890_m86_sync_watchdog(aux, aux->m86_charge_enabled)) {
+		bq25890_m86_apply(aux, false, 100000, charge, terminate);
+		bq25890_m86_sync_watchdog(aux, false);
+	}
+	if (bq25890_m86_sync_watchdog(bq, bq->m86_charge_enabled)) {
+		bq25890_m86_apply(aux, false, 100000, charge, terminate);
+		bq25890_m86_apply(bq, false, 500000, charge, terminate);
+		bq25890_m86_sync_watchdog(aux, false);
+		bq25890_m86_sync_watchdog(bq, false);
+		enable = false;
 	}
 	goto out;
 cancel:
@@ -1202,11 +1268,13 @@ static void bq25890_m86_stop(void *data)
 	}
 	bq25890_field_write(bq, F_CHG_CFG, 0);
 	bq25890_field_write(bq, F_ICO_EN, 0);
+	bq25890_m86_sync_watchdog(bq, false);
 	if (!bq->m86_secondary && bq->secondary_chrg) {
 		aux = power_supply_get_drvdata(bq->secondary_chrg);
 		gpiod_set_value_cansleep(aux->m86_ce, 0);
 		bq25890_field_write(aux, F_CHG_CFG, 0);
 		bq25890_field_write(aux, F_EN_HIZ, 1);
+		bq25890_m86_sync_watchdog(aux, false);
 	}
 }
 
@@ -1509,6 +1577,20 @@ static int bq25890_vbus_enable(struct regulator_dev *rdev)
 	union power_supply_propval val = {
 		.intval = 0,
 	};
+	int ret;
+
+	if (bq->m86) {
+		mutex_lock(&bq->lock);
+		if (bq->m86_charge_enabled)
+			bq25890_m86_apply(bq, false, 500000, 450000, false);
+		bq->otg_vbus_enabled = true;
+		bq->m86_applied = false;
+		ret = bq25890_set_otg_cfg(bq, 1);
+		if (!ret && !bq->m86_suspended)
+			bq25890_m86_sync_watchdog(bq, true);
+		mutex_unlock(&bq->lock);
+		return ret;
+	}
 
 	bq->otg_vbus_enabled = true;
 
@@ -1530,6 +1612,16 @@ static int bq25890_vbus_disable(struct regulator_dev *rdev)
 		.intval = 1,
 	};
 	int ret;
+
+	if (bq->m86) {
+		mutex_lock(&bq->lock);
+		bq->otg_vbus_enabled = false;
+		bq->m86_applied = false;
+		ret = bq25890_set_otg_cfg(bq, 0);
+		bq25890_m86_sync_watchdog(bq, false);
+		mutex_unlock(&bq->lock);
+		return ret;
+	}
 
 	bq->otg_vbus_enabled = false;
 	ret = bq25890_set_otg_cfg(bq, 0);
@@ -1974,6 +2066,24 @@ static void bq25890_shutdown(struct i2c_client *client)
 static int bq25890_suspend(struct device *dev)
 {
 	struct bq25890_device *bq = dev_get_drvdata(dev);
+	int ret;
+
+	if (bq->m86) {
+		if (!bq->m86_secondary)
+			cancel_delayed_work_sync(&bq->m86_work);
+
+		mutex_lock(&bq->lock);
+		bq->m86_suspended = true;
+		ret = bq25890_field_write(bq, F_CONV_RATE, 0);
+		if (!ret)
+			ret = bq25890_m86_sync_watchdog(bq, false);
+		if (ret)
+			bq->m86_suspended = false;
+		mutex_unlock(&bq->lock);
+		if (ret && !bq->m86_secondary)
+			queue_delayed_work(system_power_efficient_wq, &bq->m86_work, 0);
+		return ret;
+	}
 
 	/*
 	 * If charger is removed, while in suspend, make sure ADC is diabled
@@ -1990,6 +2100,7 @@ static int bq25890_resume(struct device *dev)
 	mutex_lock(&bq->lock);
 
 	bq->m86_applied = false;
+	bq->m86_suspended = false;
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0)
 		goto unlock;
@@ -2006,6 +2117,9 @@ static int bq25890_resume(struct device *dev)
 
 unlock:
 	mutex_unlock(&bq->lock);
+
+	if (bq->m86 && !bq->m86_secondary)
+		queue_delayed_work(system_power_efficient_wq, &bq->m86_work, 0);
 
 	return ret;
 }
