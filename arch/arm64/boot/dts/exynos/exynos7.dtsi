@@ -172,6 +172,11 @@
 			      <0x11006000 0x2000>;
 		};
 
+		pdma_syscon: syscon@10ef0000 {
+			compatible = "samsung,exynos7-pdma-syscon", "syscon";
+			reg = <0x10ef0000 0x20>;
+		};
+
 		pdma0: dma-controller@10e10000 {
 			compatible = "arm,pl330", "arm,primecell";
 			reg = <0x10e10000 0x1000>;
@@ -181,6 +186,7 @@
 			#dma-cells = <1>;
 			arm,pl330-broken-no-flushp;
 			arm,pl330-periph-burst;
+			samsung,pdma-ctrl-syscon = <&pdma_syscon>;
 		};
 
 		pdma1: dma-controller@10eb0000 {
@@ -192,6 +198,7 @@
 			#dma-cells = <1>;
 			arm,pl330-broken-no-flushp;
 			arm,pl330-periph-burst;
+			samsung,pdma-ctrl-syscon = <&pdma_syscon>;
 		};
 
 		clock_topc: clock-controller@10570000 {
@@ -1282,6 +1289,7 @@
 				(GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
 			     <GIC_PPI 10
 				(GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
+		samsung,exynos7420-erratum-cntvoff;
 	};
 };
 
