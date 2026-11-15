@@ -54,6 +54,7 @@
 /* CSIS common control */
 #define MIPI_CSIS_CMN_CTRL			0x04
 #define MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW	BIT(16)
+#define MIPI_CSIS_CMN_CTRL_VC_DT_MODE		(3 << 10)
 #define MIPI_CSIS_CMN_CTRL_INTER_MODE		BIT(10)
 #define MIPI_CSIS_CMN_CTRL_UPDATE_SHADOW_CTRL	BIT(2)
 #define MIPI_CSIS_CMN_CTRL_RESET		BIT(1)
@@ -656,6 +657,8 @@ static void mipi_csis_set_params(struct mipi_csis_device *csis,
 	val |= (lanes - 1) << MIPI_CSIS_CMN_CTRL_LANE_NR_OFFSET;
 	if (csis->info->version == MIPI_CSIS_V3_3)
 		val |= MIPI_CSIS_CMN_CTRL_INTER_MODE;
+	else if (csis->info->version == MIPI_CSIS_V3_4)
+		val |= MIPI_CSIS_CMN_CTRL_VC_DT_MODE;
 	mipi_csis_write(csis, MIPI_CSIS_CMN_CTRL, val);
 
 	__mipi_csis_set_format(csis, format, csis_fmt);
