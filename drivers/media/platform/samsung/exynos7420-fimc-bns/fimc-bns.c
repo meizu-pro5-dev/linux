@@ -17,11 +17,13 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <linux/spinlock.h>
 
 #include <media/media-device.h>
@@ -122,6 +124,7 @@ struct fimc_bns_buffer {
 struct fimc_bns {
 	struct device *dev;
 	void __iomem *regs;
+	struct regmap *sysreg;
 	int irq;
 	struct clk_bulk_data *clks;
 	int num_clks;
@@ -197,9 +200,13 @@ static void fimc_bns_fill_pix(struct v4l2_pix_format *pix,
  * Hardware
  */
 
-static void fimc_bns_cam0_hw_prepare(void)
+static void fimc_bns_cam0_hw_prepare(struct fimc_bns *bns)
 {
+	static const u32 sysreg_cam0_regs[] = {
+		0x518, 0x528, 0x53c, 0x540, 0x544,
+	};
 	void __iomem *base;
+	unsigned int i;
 
 	/*
 	 * Ensure CMU_CAM0_LOCAL (0x140f0000) local clock gates for BNS A/B and
@@ -228,18 +235,11 @@ static void fimc_bns_cam0_hw_prepare(void)
 	}
 
 	/*
-	 * Configure SYSREG_CAM0 (0x10050000 + 0x0518..0x0544) root clock gating
+	 * Configure SYSREG_CAM0 (0x0518..0x0544) root clock gating
 	 * registers as in vendor exynos7420_fimc_is_clk_on().
 	 */
-	base = ioremap(0x10050000, 0x1000);
-	if (base) {
-		writel(0xffffffff, base + 0x518);
-		writel(0xffffffff, base + 0x528);
-		writel(0xffffffff, base + 0x53c);
-		writel(0xffffffff, base + 0x540);
-		writel(0xffffffff, base + 0x544);
-		iounmap(base);
-	}
+	for (i = 0; i < ARRAY_SIZE(sysreg_cam0_regs); i++)
+		regmap_write(bns->sysreg, sysreg_cam0_regs[i], 0xffffffff);
 }
 
 static void fimc_bns_hw_reset(struct fimc_bns *bns)
@@ -492,7 +492,7 @@ static int fimc_bns_start_streaming(struct vb2_queue *vq, unsigned int count)
 	if (ret)
 		goto err_pm;
 
-	fimc_bns_cam0_hw_prepare();
+	fimc_bns_cam0_hw_prepare(bns);
 
 	spin_lock_irqsave(&bns->slock, flags);
 	bns->sequence = 0;
@@ -838,6 +838,13 @@ static int fimc_bns_probe(struct platform_device *pdev)
 	bns->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(bns->regs))
 		return PTR_ERR(bns->regs);
+
+	bns->sysreg = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,sysreg");
+	if (IS_ERR(bns->sysreg))
+		bns->sysreg = syscon_regmap_lookup_by_compatible("samsung,exynos7420-sysreg");
+	if (IS_ERR(bns->sysreg))
+		return dev_err_probe(dev, PTR_ERR(bns->sysreg),
+				     "failed to get SYSREG regmap\n");
 
 	bns->irq = platform_get_irq(pdev, 0);
 	if (bns->irq < 0)

@@ -194,15 +194,10 @@
 		clock-names = "tmu_apbif", "tmu_sclk";
 	};
 
-	m86_disp_sysreg: syscon@10050000 {
-		compatible = "syscon";
-		reg = <0x0 0x10050000 0x0 0x3000>;
-	};
-
 	m86_dsim_phy: dsim-phy {
 		compatible = "samsung,exynos7420-mipi-video-phy";
 		samsung,pmu-syscon = <&pmu_system_controller>;
-		samsung,disp-sysreg = <&m86_disp_sysreg>;
+		samsung,disp-sysreg = <&sysreg>;
 		#phy-cells = <1>;
 	};
 
@@ -428,6 +423,7 @@
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_mif_opp_table>;
 		#interconnect-cells = <0>;
+		samsung,sysreg = <&sysreg>;
 		vdd-supply = <&m86_buck1_mif>;
 		status = "okay";
 	};
@@ -437,6 +433,7 @@
 		operating-points-v2 = <&bus_int_opp_table>;
 		#interconnect-cells = <0>;
 		interconnects = <&bus_mif>;
+		samsung,sysreg = <&sysreg>;
 		vdd-supply = <&m86_buck4_int>;
 		devfreq = <&bus_mif>;
 		status = "okay";
@@ -448,7 +445,7 @@
 	 */
 	m86_cpu_dvfs: m86-cpu-coordinator {
 		compatible = "meizu,m86-cpu-coordinator";
-		meizu,ema-syscon = <&m86_disp_sysreg>;
+		meizu,ema-syscon = <&sysreg>;
 		clocks = <&m86_atlas_clk>, <&m86_apollo_clk>, <&fin_pll>;
 		clock-names = "atlas", "apollo", "fin";
 		atlas-supply = <&m86_buck2_cpu>;
@@ -474,7 +471,7 @@
 		clock-names = "fin", "apollo", "top_g3d";
 		samsung,bus = <&bus_mif>;
 		meizu,gpu = <&gpu>;
-		meizu,sysreg = <&m86_disp_sysreg>;
+		meizu,sysreg = <&sysreg>;
 		meizu,retained-g3d-ownership;
 		meizu,max-validated-frequency = <700000000>;
 		meizu,validated-buck6-normal-on;
@@ -1575,12 +1572,6 @@
 	ranges = <0x00000000 0x0 0x00000000 0x18000000>,
 		 <0x1c000000 0x0 0x1c000000 0x04000000>;
 
-	/* Narrow SYSREG field, no existing syscon covers this register. */
-	pro5_pcie_sysreg: syscon@1005265c {
-		compatible = "samsung,exynos7420-pcie-sysreg", "syscon";
-		reg = <0x1005265c 4>;
-	};
-
 	/* This word lies outside clock_fsys1's existing 0xd00 range. */
 	pro5_pcie_cmu_control: syscon@156e0f00 {
 		compatible = "samsung,exynos7420-pcie-cmu-control", "syscon";
@@ -1593,7 +1584,7 @@
 		      <0x156f00e4 4>, <0x157b0000 0x1000>,
 		      <0x1c000000 0x1000>;
 		reg-names = "elbi", "phy", "pcs", "dbi", "config";
-		samsung,pcie-sysreg = <&pro5_pcie_sysreg>;
+		samsung,pcie-sysreg = <&sysreg 0x265c>;
 		samsung,pmu-syscon = <&pmu_system_controller>;
 		samsung,pcie-cmu-control = <&pro5_pcie_cmu_control>;
 		device_type = "pci";

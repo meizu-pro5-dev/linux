@@ -6,16 +6,14 @@
 #include <linux/debugfs.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/regmap.h>
 #include <linux/seq_file.h>
 #include <linux/m86-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
-
-#define SYSREG_BASE			0x10050000
-#define SYSREG_SIZE			0x3000
 
 #define SYSREG_APOLLO_EMA_CON		0x0038
 #define SYSREG_ATLAS_EMA_L1_CON		0x0138
@@ -23,7 +21,7 @@
 #define SYSREG_G3D_EMA_CON		0x1224
 
 struct exynos7420_sram_ema_data {
-	void __iomem *base;
+	struct regmap *sysreg;
 	struct m86_asv_cal_info cal;
 	bool cal_valid;
 };
@@ -34,11 +32,11 @@ static int exynos7420_sram_ema_show(struct seq_file *s, void *data)
 {
 	u32 val_apollo = 0, val_atlas_l1 = 0, val_atlas_l2 = 0, val_g3d = 0;
 
-	if (ema_data.base) {
-		val_apollo = readl_relaxed(ema_data.base + SYSREG_APOLLO_EMA_CON);
-		val_atlas_l1 = readl_relaxed(ema_data.base + SYSREG_ATLAS_EMA_L1_CON);
-		val_atlas_l2 = readl_relaxed(ema_data.base + SYSREG_ATLAS_EMA_L2_CON);
-		val_g3d = readl_relaxed(ema_data.base + SYSREG_G3D_EMA_CON);
+	if (ema_data.sysreg) {
+		regmap_read(ema_data.sysreg, SYSREG_APOLLO_EMA_CON, &val_apollo);
+		regmap_read(ema_data.sysreg, SYSREG_ATLAS_EMA_L1_CON, &val_atlas_l1);
+		regmap_read(ema_data.sysreg, SYSREG_ATLAS_EMA_L2_CON, &val_atlas_l2);
+		regmap_read(ema_data.sysreg, SYSREG_G3D_EMA_CON, &val_g3d);
 	}
 
 	seq_puts(s, "Exynos7420 SRAM EMA/MCS Hardware Monitor\n\n");
@@ -87,9 +85,12 @@ static int __init exynos7420_sram_ema_init(void)
 	if (!of_machine_is_compatible("samsung,exynos7420"))
 		return 0;
 
-	ema_data.base = ioremap(SYSREG_BASE, SYSREG_SIZE);
-	if (!ema_data.base)
-		pr_warn("exynos7420-sram-ema: failed to ioremap SYSREG\n");
+	ema_data.sysreg = syscon_regmap_lookup_by_compatible("samsung,exynos7420-sysreg");
+	if (IS_ERR(ema_data.sysreg)) {
+		pr_warn("exynos7420-sram-ema: failed to get SYSREG regmap (%ld)\n",
+			PTR_ERR(ema_data.sysreg));
+		ema_data.sysreg = NULL;
+	}
 
 	if (!exynos7420_asv_get_cal(&ema_data.cal) ||
 	    !m86_asv_cal_read(&ema_data.cal))

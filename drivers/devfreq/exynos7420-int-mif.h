@@ -18,8 +18,10 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/ktime.h>
+#include <linux/mfd/syscon.h>
 #include <linux/mutex.h>
 #include <linux/pm_qos.h>
+#include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/m86-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
@@ -559,7 +561,7 @@ struct exynos7420_hw_bus {
 	void __iomem *topc;
 	void __iomem *top0;
 	void __iomem *pmu;
-	void __iomem *sysreg;
+	struct regmap *sysreg;
 	void __iomem *cmu_mif[EXYNOS7420_NUM_MIF_CH];
 	void __iomem *drex[EXYNOS7420_NUM_MIF_CH];
 	void __iomem *phy[EXYNOS7420_NUM_MIF_CH];
@@ -665,10 +667,14 @@ static int exynos7420_hw_bus_init_once(struct device *dev)
 	exynos7420_hw.topc = ioremap(0x10570000, SZ_64K);
 	exynos7420_hw.top0 = ioremap(0x105d0000, SZ_64K);
 	exynos7420_hw.pmu = ioremap(0x105c0000, 0x5000);
-	exynos7420_hw.sysreg = ioremap(0x10050000, 0x3000);
-	if (!exynos7420_hw.topc || !exynos7420_hw.top0 ||
-	    !exynos7420_hw.pmu || !exynos7420_hw.sysreg)
+	if (!exynos7420_hw.topc || !exynos7420_hw.top0 || !exynos7420_hw.pmu)
 		return -ENOMEM;
+
+	exynos7420_hw.sysreg = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,sysreg");
+	if (IS_ERR(exynos7420_hw.sysreg))
+		exynos7420_hw.sysreg = syscon_regmap_lookup_by_compatible("samsung,exynos7420-sysreg");
+	if (IS_ERR(exynos7420_hw.sysreg))
+		return PTR_ERR(exynos7420_hw.sysreg);
 
 	for (i = 0; i < EXYNOS7420_NUM_MIF_CH; i++) {
 		exynos7420_hw.drex[i] = ioremap(drex_phys[i], SZ_64K);
@@ -914,7 +920,8 @@ static int exynos7420_int_target_locked(struct exynos_bus *bus,
 				return ret;
 			exynos7420_hw.cur_int_volt_uv = target_uv;
 		}
-		writel(exynos7420_hw.int_ema_reg, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
+		regmap_write(exynos7420_hw.sysreg, SYSREG_EMA_INT_CON,
+			     exynos7420_hw.int_ema_reg);
 		ret = exynos7420_int_set_clocks(target_idx);
 		if (ret)
 			return ret;
@@ -923,7 +930,8 @@ static int exynos7420_int_target_locked(struct exynos_bus *bus,
 		ret = exynos7420_int_set_clocks(target_idx);
 		if (ret)
 			return ret;
-		writel(exynos7420_hw.int_ema_reg, exynos7420_hw.sysreg + SYSREG_EMA_INT_CON);
+		regmap_write(exynos7420_hw.sysreg, SYSREG_EMA_INT_CON,
+			     exynos7420_hw.int_ema_reg);
 		if (exynos7420_hw.vdd_int && target_uv != old_uv) {
 			ret = regulator_set_voltage(exynos7420_hw.vdd_int,
 						    target_uv,
@@ -1769,16 +1777,21 @@ static ssize_t hw_status_show(struct device *dev,
 				 readl(vtmon + VTMON_DREX_TIMING_SW_SET));
 	}
 
-	len += scnprintf(buf + len, PAGE_SIZE - len,
-			 "INT: lv=%d freq=%u kHz volt=%d uV switches=%lu last_us=%lld\n"
-			 "  CMU_TOPC: MUX_SEL2=0x%08x MUX_SEL3=0x%08x DIV0=0x%08x DIV1=0x%08x\n"
-			 "  CMU_TOP0: MUX_SEL3=0x%08x DIV3=0x%08x EMA_INT=0x%08x\n",
-			 exynos7420_hw.cur_int_idx,
-			 exynos7420_int_table[exynos7420_hw.cur_int_idx].freq_khz,
-			 int_uv, exynos7420_hw.int_switch_count,
-			 (long long)exynos7420_hw.last_int_switch_us,
-			 sel2, sel3, div0, div1, top0_sel3, top0_div3,
-			 readl(exynos7420_hw.sysreg + SYSREG_EMA_INT_CON));
+	{
+		u32 ema_int = 0;
+
+		regmap_read(exynos7420_hw.sysreg, SYSREG_EMA_INT_CON, &ema_int);
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "INT: lv=%d freq=%u kHz volt=%d uV switches=%lu last_us=%lld\n"
+				 "  CMU_TOPC: MUX_SEL2=0x%08x MUX_SEL3=0x%08x DIV0=0x%08x DIV1=0x%08x\n"
+				 "  CMU_TOP0: MUX_SEL3=0x%08x DIV3=0x%08x EMA_INT=0x%08x\n",
+				 exynos7420_hw.cur_int_idx,
+				 exynos7420_int_table[exynos7420_hw.cur_int_idx].freq_khz,
+				 int_uv, exynos7420_hw.int_switch_count,
+				 (long long)exynos7420_hw.last_int_switch_us,
+				 sel2, sel3, div0, div1, top0_sel3, top0_div3,
+				 ema_int);
+	}
 	mutex_unlock(&exynos7420_hw.lock);
 
 	return len;

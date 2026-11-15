@@ -15,9 +15,11 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/mipi-lli.h>
 
 #include <linux/debugfs.h>
@@ -524,14 +526,24 @@ static int exynos_lli_mask_sb_intr(struct mipi_lli *lli, bool flag)
 
 	if (flag) {
 		if (lli->irq_sig_active) {
-			writel(SIG_INT_MASK1,
-				lli->sys_regs + FSYS0_LLI_SIG_INT_MASK0_1);
+			if (lli->sysreg)
+				regmap_write(lli->sysreg,
+					     FSYS0_LLI_SIG_INT_MASK0_1,
+					     SIG_INT_MASK1);
+			else
+				writel(SIG_INT_MASK1,
+				       lli->sys_regs + FSYS0_LLI_SIG_INT_MASK0_1);
 			lli->irq_sig_active = false;
 		}
 	} else {
 		if (!lli->irq_sig_active) {
-			writel(SIG_INT_MASK0,
-				lli->sys_regs + FSYS0_LLI_SIG_INT_MASK0_1);
+			if (lli->sysreg)
+				regmap_write(lli->sysreg,
+					     FSYS0_LLI_SIG_INT_MASK0_1,
+					     SIG_INT_MASK0);
+			else
+				writel(SIG_INT_MASK0,
+				       lli->sys_regs + FSYS0_LLI_SIG_INT_MASK0_1);
 		}
 	}
 
@@ -1004,7 +1016,9 @@ static int exynos_mipi_lli_probe(struct platform_device *pdev)
 	struct device_node *node = dev->of_node;
 	struct mipi_lli *lli;
 	struct resource *res;
-	void __iomem *regs, *remote_regs, *sysregs, *pmuregs;
+	struct regmap *sysreg;
+	void __iomem *regs, *remote_regs, *sysregs = NULL, *pmuregs;
+	unsigned int pmu_res_idx = 3;
 	int irq, irq_sig;
 	int ret = 0;
 
@@ -1032,21 +1046,27 @@ static int exynos_mipi_lli_probe(struct platform_device *pdev)
 		return -EADDRNOTAVAIL;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	if (!res) {
-		dev_err(dev, "cannot find register resource 2\n");
-		return -ENXIO;
+	sysreg = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,sysreg");
+	if (!IS_ERR(sysreg)) {
+		pmu_res_idx = 2;
+	} else {
+		sysreg = NULL;
+		res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+		if (!res) {
+			dev_err(dev, "cannot find register resource 2\n");
+			return -ENXIO;
+		}
+
+		sysregs = devm_ioremap(dev, res->start, resource_size(res));
+		if (!sysregs) {
+			dev_err(dev, "cannot request_and_map registers\n");
+			return -EADDRNOTAVAIL;
+		}
 	}
 
-	sysregs = devm_ioremap(dev, res->start, resource_size(res));
-	if (!sysregs) {
-		dev_err(dev, "cannot request_and_map registers\n");
-		return -EADDRNOTAVAIL;
-	}
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, pmu_res_idx);
 	if (!res) {
-		dev_err(dev, "cannot find register resource 3\n");
+		dev_err(dev, "cannot find PMU register resource %u\n", pmu_res_idx);
 		return -ENXIO;
 	}
 
@@ -1079,6 +1099,7 @@ static int exynos_mipi_lli_probe(struct platform_device *pdev)
 	lli->regs = regs;
 	lli->remote_regs = remote_regs;
 	lli->sys_regs = sysregs;
+	lli->sysreg = sysreg;
 	lli->pmu_regs = pmuregs;
 	lli->is_master = false;
 #if 0 /* vendor LPA notifier, no mainline equivalent */

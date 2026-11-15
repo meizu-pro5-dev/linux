@@ -16,6 +16,7 @@
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include "pcie-designware.h"
@@ -24,6 +25,7 @@ struct pro5_pcie {
 	struct dw_pcie pci;
 	void __iomem *elbi, *phy, *pcs;
 	struct regmap *sysreg, *pmu, *cmu;
+	u32 sysreg_offset;
 	struct clk_bulk_data clks[12];
 	struct gpio_desc *perst, *reg_on;
 	bool msi_installed;
@@ -94,10 +96,10 @@ static int pro5_phy_init(struct pro5_pcie *p)
 	unsigned int i;
 	int ret;
 
-	ret = regmap_update_bits(p->sysreg, 0, GENMASK(5, 4), 0);
+	ret = regmap_update_bits(p->sysreg, p->sysreg_offset, GENMASK(5, 4), 0);
 	if (ret)
 		return ret;
-	ret = regmap_update_bits(p->sysreg, 0, GENMASK(3, 2), BIT(2));
+	ret = regmap_update_bits(p->sysreg, p->sysreg_offset, GENMASK(3, 2), BIT(2));
 	if (ret)
 		return ret;
 	writel(1, p->elbi + 0x130);
@@ -113,14 +115,14 @@ static int pro5_phy_init(struct pro5_pcie *p)
 	for (i = 0; i < ARRAY_SIZE(trsv); i++)
 		writel(trsv[i], p->phy + (0x30 + i) * 4);
 	writel(2, p->pcs);
-	ret = regmap_update_bits(p->sysreg, 0, BIT(7), 0);
+	ret = regmap_update_bits(p->sysreg, p->sysreg_offset, BIT(7), 0);
 	if (ret)
 		return ret;
-	ret = regmap_update_bits(p->sysreg, 0, BIT(7), BIT(7));
+	ret = regmap_update_bits(p->sysreg, p->sysreg_offset, BIT(7), BIT(7));
 	if (ret)
 		return ret;
 	udelay(20);
-	return regmap_update_bits(p->sysreg, 0, BIT(7), 0);
+	return regmap_update_bits(p->sysreg, p->sysreg_offset, BIT(7), 0);
 }
 
 /* 7420 uses exit-L1 guards, not the 5433 DBI sideband bit. */
@@ -370,6 +372,8 @@ static int pro5_probe(struct platform_device *pdev)
 	p->sysreg = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pcie-sysreg");
 	if (IS_ERR(p->sysreg))
 		return dev_err_probe(dev, PTR_ERR(p->sysreg), "SYSREG syscon missing\n");
+	if (of_property_read_u32_index(dev->of_node, "samsung,pcie-sysreg", 1, &p->sysreg_offset))
+		p->sysreg_offset = 0;
 	p->pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pmu-syscon");
 	if (IS_ERR(p->pmu))
 		return dev_err_probe(dev, PTR_ERR(p->pmu), "PMU syscon missing\n");

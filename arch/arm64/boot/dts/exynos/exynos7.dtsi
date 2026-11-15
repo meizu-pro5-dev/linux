@@ -655,6 +655,11 @@
 			status = "disabled";
 		};
 
+		sysreg: syscon@10050000 {
+			compatible = "samsung,exynos7420-sysreg", "syscon";
+			reg = <0x10050000 0x3000>;
+		};
+
 		pmu_system_controller: system-controller@105c0000 {
 			compatible = "samsung,exynos7-pmu", "syscon";
 			reg = <0x105c0000 0x5000>;
@@ -809,8 +814,8 @@
 			compatible = "samsung,exynos-mipi-lli";
 			reg = <0x10f24000 0x4000>,
 			      <0x10f34000 0x4000>,
-			      <0x10050000 0x2000>,
 			      <0x105c0724 0x4>;
+			samsung,sysreg = <&sysreg>;
 			interrupts = <GIC_SPI 208 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 209 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clock_fsys0 ACLK_XIU_LLISFRX>,
@@ -949,6 +954,7 @@
 				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
+			samsung,sysreg = <&sysreg>;
 			power-domains = <&pd_cam0>;
 			iommus = <&sysmmu_cam0>;
 			status = "disabled";
@@ -966,6 +972,7 @@
 				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
+			samsung,sysreg = <&sysreg>;
 			power-domains = <&pd_cam0>;
 			iommus = <&sysmmu_cam0>;
 			status = "disabled";

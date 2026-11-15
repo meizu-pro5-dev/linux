@@ -113,6 +113,8 @@ struct mipi_lli_dump {
 	u32	mphy_pma[128];
 };
 
+struct regmap;
+
 struct mipi_lli_modem {
 	char	*name;
 	bool	scrambler;
@@ -147,7 +149,8 @@ struct mipi_lli {
 	bool			irq_sig_active;
 	void __iomem		*regs;		/* device memory/io */
 	void __iomem		*remote_regs;	/* device memory/io */
-	void __iomem		*sys_regs;	/* device memory/io */
+	void __iomem		*sys_regs;	/* legacy fallback sysreg */
+	struct regmap		*sysreg;	/* shared SYSREG regmap */
 	void __iomem		*pmu_regs;	/* device memory/io */
 
 	struct mutex		lli_mutex;

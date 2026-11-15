@@ -173,7 +173,12 @@ static int exynos_lli_loopback_test(struct mipi_lli *lli)
 
 static void exynos_lli_system_config(struct mipi_lli *lli)
 {
-	if (lli->sys_regs) {
+	if (lli->sysreg) {
+		/* MODEM, 0:PCIe, 1:LLI */
+		regmap_write(lli->sysreg, FSYS0_AXI_SEL_DEMUX, 1);
+		regmap_write(lli->sysreg, FSYS0_LLI_SIG_INT_MASK0_1, SIG_INT_MASK0);
+		regmap_write(lli->sysreg, FSYS0_LLI_SIG_INT_MASK2_3, SIG_INT_MASK1);
+	} else if (lli->sys_regs) {
 		/* MODEM, 0:PCIe, 1:LLI */
 		writel(1, lli->sys_regs + FSYS0_AXI_SEL_DEMUX);
 
