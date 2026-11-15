@@ -12,6 +12,8 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/m86-seclog.h>
+#include <linux/memblock.h>
+#include <linux/mm.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/types.h>
@@ -20,7 +22,8 @@
 #include <asm/cacheflush.h>
 #include <asm/fixmap.h>
 
-#define M86_SECLOG_BASE		0xf9780000ULL
+#define M86_SECLOG_BASE_DEFAULT	0xf9780000ULL
+#define M86_SECLOG_HIGH_MIN	0x100000000ULL
 #define M86_SECLOG_SIZE		SZ_512K
 #define M86_SECLOG_BANK_SIZE	SZ_256K
 #define M86_SECLOG_CLOG		0x474f4c43U
@@ -113,34 +116,64 @@ static bool __init m86_seclog_bank_valid(struct m86_seclog_header *header)
 		READ_ONCE(header->full) <= 1;
 }
 
+/*
+ * Vendor Recovery places SECLOG in the final 512 KiB of the highest DRAM bank
+ * (0xf9780000 on 3 GiB SKUs, 0x13ff80000 on 4 GiB SKUs). Must run after
+ * arm64_memblock_init() and before paging_init().
+ */
+static u64 __init m86_seclog_select_base(void)
+{
+	phys_addr_t top = memblock_end_of_DRAM();
+	u64 cand;
+
+	if (top <= M86_SECLOG_HIGH_MIN)
+		return M86_SECLOG_BASE_DEFAULT;
+
+	cand = top - M86_SECLOG_SIZE;
+	if (!PAGE_ALIGNED(cand) || memblock_is_region_reserved(cand, M86_SECLOG_SIZE)) {
+		pr_warn("PRO5-SECLOG: high DRAM candidate %#llx unavailable, fallback %#llx\n",
+			cand, M86_SECLOG_BASE_DEFAULT);
+		return M86_SECLOG_BASE_DEFAULT;
+	}
+	if (memblock_mark_nomap(cand, M86_SECLOG_SIZE) ||
+	    memblock_reserve(cand, M86_SECLOG_SIZE)) {
+		pr_warn("PRO5-SECLOG: failed to reserve %#llx, fallback %#llx\n",
+			cand, M86_SECLOG_BASE_DEFAULT);
+		return M86_SECLOG_BASE_DEFAULT;
+	}
+	return cand;
+}
+
 void __init m86_seclog_init(void)
 {
 	static const char marker[] = "PRO5-SECLOG-seclog-r1: mapped-before-console\n";
 
 	struct m86_seclog_header *bank[2];
 	unsigned long base;
+	u64 phys_base;
 	unsigned int page, selected;
 	int i, previous = -1;
 
 	BUILD_BUG_ON(sizeof(struct m86_seclog_header) != 16);
 	BUILD_BUG_ON(offsetof(struct m86_seclog_header, full) != 12);
-	BUILD_BUG_ON(M86_SECLOG_BASE & (PAGE_SIZE - 1));
+	BUILD_BUG_ON(M86_SECLOG_BASE_DEFAULT & (PAGE_SIZE - 1));
 	BUILD_BUG_ON(M86_SECLOG_SIZE % PAGE_SIZE);
 	BUILD_BUG_ON((FIX_M86_SECLOG_BEGIN - FIX_M86_SECLOG_END + 1) *
 		     PAGE_SIZE != M86_SECLOG_SIZE);
 
 	if (current_bank)
 		return;
+	phys_base = m86_seclog_select_base();
 	/*
 	 * Permanent fixmaps exist immediately after early_fixmap_init(). Their
 	 * page tables are sized from FIXADDR_TOT_START and copied by
 	 * fixmap_copy() during paging_init(), including any PMD crossing.
 	 * Use normal cacheable RAM with explicit PoC writeback, never Device
-	 * memory; the DT no-map reservation prevents a conflicting alias.
+	 * memory; nomap reservation prevents a conflicting linear-map alias.
 	 */
 	for (page = 0; page < M86_SECLOG_SIZE / PAGE_SIZE; page++)
 		__set_fixmap(FIX_M86_SECLOG_BEGIN - page,
-			     M86_SECLOG_BASE + page * PAGE_SIZE, PAGE_KERNEL);
+			     phys_base + page * PAGE_SIZE, PAGE_KERNEL);
 	base = fix_to_virt(FIX_M86_SECLOG_BEGIN);
 	for (i = 0; i < 2; i++) {
 		bank[i] = (void *)(base + i * M86_SECLOG_BANK_SIZE);
@@ -174,6 +207,6 @@ void __init m86_seclog_init(void)
 	m86_seclog_write(&m86_seclog_console, marker, sizeof(marker) - 1);
 	register_console(&m86_seclog_console);
 	pr_notice("PRO5-SECLOG-seclog-r1: ready base=%#llx size=%#x bank=%u previous=%d capacity=%#lx\n",
-		  M86_SECLOG_BASE, M86_SECLOG_SIZE, selected, previous,
+		  phys_base, M86_SECLOG_SIZE, selected, previous,
 		  (unsigned long)M86_SECLOG_CAPACITY);
 }

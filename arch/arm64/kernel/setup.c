@@ -311,7 +311,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	arm64_use_ng_mappings = kaslr_requires_kpti();
 
 	early_fixmap_init();
-	m86_seclog_init();
 	early_ioremap_init();
 
 	setup_machine_fdt(__fdt_pointer);
@@ -349,6 +348,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	}
 
 	arm64_memblock_init();
+	m86_seclog_init();
 
 	paging_init();
 
