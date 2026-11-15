@@ -676,6 +676,15 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4060 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_CAM1_ARM_668>,
+				 <&clock_top0 CLK_ACLK_CAM1_FD_468>,
+				 <&clock_top0 CLK_ACLK_CAM1_SCLVRA_491>,
+				 <&clock_top0 CLK_ACLK_CAM1_TREX_532>,
+				 <&clock_top0 CLK_ACLK_CAM1_NOCP_133>,
+				 <&clock_top0 CLK_ACLK_CAM1_BNR_491>,
+				 <&clock_top0 CLK_SCLK_ISP_SPI0>,
+				 <&clock_top0 CLK_SCLK_ISP_SPI1>,
+				 <&clock_top0 CLK_SCLK_ISP_UART>;
 			label = "CAM1";
 		};
 
@@ -683,6 +692,16 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4040 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_CAM0_CSIS0_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_BNSA_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_BNSB_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_CSIS3_133>,
+				 <&clock_top0 CLK_ACLK_CAM0_CSIS1_174>,
+				 <&clock_top0 CLK_ACLK_CAM0_CSIS2_414>,
+				 <&clock_top0 CLK_ACLK_CAM0_3AA0_690>,
+				 <&clock_top0 CLK_ACLK_CAM0_3AA1_468>,
+				 <&clock_top0 CLK_ACLK_CAM0_TREX_532>,
+				 <&clock_top0 CLK_ACLK_CAM0_NOCP_133>;
 			power-domains = <&pd_cam1>;
 			label = "CAM0";
 		};
@@ -691,6 +710,8 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c41e0 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_VPP0_400>,
+				 <&clock_top0 CLK_ACLK_VPP1_400>;
 			label = "VPP";
 		};
 
@@ -698,6 +719,12 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4080 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_DISP_400>,
+				 <&clock_top0 CLK_SCLK_DECON_INT_ECLK>,
+				 <&clock_top0 CLK_SCLK_DECON_EXT_ECLK>,
+				 <&clock_top0 CLK_SCLK_DECON_VCLK>,
+				 <&clock_top0 CLK_TOP_SCLK_DSD>,
+				 <&clock_top0 CLK_SCLK_DECON_TV_VCLK>;
 			label = "DISP";
 			status = "okay";
 		};
@@ -714,6 +741,8 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4180 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_ISP1_ISP1_468>,
+				 <&clock_top0 CLK_ACLK_ISP1_AHB_117>;
 			power-domains = <&pd_cam1>;
 			label = "ISP1";
 		};
@@ -722,6 +751,9 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4140 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_top0 CLK_ACLK_ISP0_ISP0_590>,
+				 <&clock_top0 CLK_ACLK_ISP0_TPU_590>,
+				 <&clock_top0 CLK_ACLK_ISP0_TREX_532>;
 			power-domains = <&pd_isp1>, <&pd_cam0>, <&pd_cam1>;
 			label = "ISP0";
 		};
@@ -730,6 +762,7 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c41a0 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_topc ACLK_MFC_532>;
 			label = "MFC";
 		};
 
@@ -737,6 +770,7 @@
 			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c41c0 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_topc ACLK_MSCL_532>;
 			label = "MSCL";
 		};
 

@@ -10,6 +10,7 @@
 // based power domain support is included.
 
 #include <linux/arm-smccc.h>
+#include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
@@ -45,8 +46,6 @@ struct exynos7420_pd_cfg {
 	const char *name;
 	u32 pmu_off;
 	bool is_aud;
-	const struct exynos7420_reg_bits *top_clks;
-	size_t num_top_clks;
 	const struct exynos7420_reg_bits *local_clks;
 	size_t num_local_clks;
 	const struct exynos7420_reg_bits *async_clks;
@@ -70,9 +69,6 @@ struct exynos7420_pd_cfg {
 #define EXYNOS7420_CFW_VPP0		5
 #define EXYNOS7420_CFW_VPP1		6
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_mfc[] = {
-	{ 0x10570804, BIT(8) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_mfc[] = {
 	{ 0x15280800, BIT(31) | BIT(30) | BIT(19) },
 };
@@ -85,9 +81,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_mfc[] = {
 	{ 0x105c15b0, BIT(0) },
 };
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_mscl[] = {
-	{ 0x10570804, BIT(20) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_mscl[] = {
 	{ 0x150d0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) | BIT(27) | BIT(26) },
 };
@@ -100,9 +93,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_mscl[] = {
 	{ 0x105c15b4, BIT(0) },
 };
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_isp0[] = {
-	{ 0x105d0810, BIT(28) | BIT(24) | BIT(20) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_isp0[] = {
 	{ 0x146d0800, BIT(17) | BIT(15) | BIT(13) | BIT(1) | BIT(0) },
 	{ 0x146d0804, BIT(1) | BIT(0) },
@@ -125,9 +115,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp0[] = {
 	{ 0x105c15a8, BIT(0) },
 };
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_isp1[] = {
-	{ 0x105d0810, BIT(16) | BIT(12) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_isp1[] = {
 	{ 0x147d0800, BIT(12) | BIT(9) | BIT(8) | BIT(1) | BIT(0) },
 	{ 0x147d0900, BIT(0) },
@@ -148,10 +135,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_isp1[] = {
 	{ 0x105c15ac, BIT(0) },
 };
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_cam0[] = {
-	{ 0x105d0814, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
-	{ 0x105d0818, BIT(28) | BIT(24) | BIT(20) | BIT(16) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_cam0[] = {
 	{ 0x144d0800, BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
 	{ 0x144d0804, BIT(18) | BIT(17) | BIT(16) | BIT(10) },
@@ -170,22 +153,6 @@ static const struct exynos7420_reg_bits exynos7420_sys_pwr_cam0[] = {
 	{ 0x105c1508, BIT(0) },
 	{ 0x105c1548, BIT(5) | BIT(4) | BIT(1) | BIT(0) },
 	{ 0x105c1588, BIT(0) },
-};
-static struct exynos7420_sfr exynos7420_save_cam0[] = {
-	{ .pa = 0x144d0600 },	/* DIV_CAM0 */
-	{ .pa = 0x144d0200 },	/* MUX_SEL_CAM00 */
-	{ .pa = 0x144d0204 },	/* MUX_SEL_CAM01 */
-	{ .pa = 0x144d0208 },	/* MUX_SEL_CAM02 */
-	{ .pa = 0x144d0800 },	/* ENABLE_ACLK_CAM00 */
-	{ .pa = 0x144d0804 },	/* ENABLE_ACLK_CAM01 */
-	{ .pa = 0x144d0900 },	/* ENABLE_PCLK_CAM00 */
-	{ .pa = 0x144d0904 },	/* ENABLE_PCLK_CAM01 */
-	{ .pa = 0x144d0a00 },	/* ENABLE_SCLK_CAM0 */
-};
-
-static const struct exynos7420_reg_bits exynos7420_top_clks_cam1[] = {
-	{ 0x105d081c, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) | BIT(8) },
-	{ 0x105d0a24, BIT(20) | BIT(8) | BIT(4) },
 };
 static const struct exynos7420_reg_bits exynos7420_local_clks_cam1[] = {
 	{ 0x145d0800, BIT(3) | BIT(2) | BIT(0) },
@@ -221,10 +188,6 @@ static struct exynos7420_sfr exynos7420_save_cam1[] = {
 	{ .pa = 0x145d0a08 },	/* ENABLE_SCLK_CAM12 */
 };
 
-/* Vendor pm_domains-exynos7420-cal.h:315-389, regs-pmu-exynos7420.h. */
-static const struct exynos7420_reg_bits exynos7420_top_clks_vpp[] = {
-	{ 0x105d080c, BIT(8) | BIT(4) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_vpp[] = {
 	{ 0x13ed0800, BIT(15) | BIT(14) | BIT(3) | BIT(2) | BIT(1) | BIT(0) },
 };
@@ -250,10 +213,6 @@ static const u32 exynos7420_cfw_vpp[] = {
 	EXYNOS7420_CFW_VPP0, EXYNOS7420_CFW_VPP1,
 };
 
-static const struct exynos7420_reg_bits exynos7420_top_clks_disp[] = {
-	{ 0x105d080c, BIT(28) },
-	{ 0x105d0a20, BIT(28) | BIT(24) | BIT(20) | BIT(16) | BIT(12) },
-};
 static const struct exynos7420_reg_bits exynos7420_local_clks_disp[] = {
 	{ 0x13ad0800, BIT(31) | BIT(30) | BIT(29) | BIT(28) },
 };
@@ -322,8 +281,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-mfc",
 		.pmu_off = 0x41a0,
-		.top_clks = exynos7420_top_clks_mfc,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mfc),
 		.local_clks = exynos7420_local_clks_mfc,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mfc),
 		.sys_pwr_regs = exynos7420_sys_pwr_mfc,
@@ -332,8 +289,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-mscl",
 		.pmu_off = 0x41c0,
-		.top_clks = exynos7420_top_clks_mscl,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_mscl),
 		.local_clks = exynos7420_local_clks_mscl,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_mscl),
 		.sys_pwr_regs = exynos7420_sys_pwr_mscl,
@@ -342,8 +297,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-isp0",
 		.pmu_off = 0x4140,
-		.top_clks = exynos7420_top_clks_isp0,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp0),
 		.local_clks = exynos7420_local_clks_isp0,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp0),
 		.async_clks = exynos7420_async_clks_isp0,
@@ -354,8 +307,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-isp1",
 		.pmu_off = 0x4180,
-		.top_clks = exynos7420_top_clks_isp1,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_isp1),
 		.local_clks = exynos7420_local_clks_isp1,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_isp1),
 		.async_clks = exynos7420_async_clks_isp1,
@@ -366,8 +317,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-cam0",
 		.pmu_off = 0x4040,
-		.top_clks = exynos7420_top_clks_cam0,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam0),
 		.local_clks = exynos7420_local_clks_cam0,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam0),
 		.async_clks = exynos7420_async_clks_cam0,
@@ -375,14 +324,10 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.async_before_on = true,
 		.sys_pwr_regs = exynos7420_sys_pwr_cam0,
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_cam0),
-		.save_regs = exynos7420_save_cam0,
-		.num_save_regs = ARRAY_SIZE(exynos7420_save_cam0),
 	},
 	{
 		.name = "pd-cam1",
 		.pmu_off = 0x4060,
-		.top_clks = exynos7420_top_clks_cam1,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_cam1),
 		.local_clks = exynos7420_local_clks_cam1,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_cam1),
 		.async_clks = exynos7420_async_clks_cam1,
@@ -396,8 +341,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-vpp",
 		.pmu_off = 0x41e0,
-		.top_clks = exynos7420_top_clks_vpp,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_vpp),
 		.local_clks = exynos7420_local_clks_vpp,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_vpp),
 		.sys_pwr_regs = exynos7420_sys_pwr_vpp,
@@ -410,8 +353,6 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-disp",
 		.pmu_off = 0x4080,
-		.top_clks = exynos7420_top_clks_disp,
-		.num_top_clks = ARRAY_SIZE(exynos7420_top_clks_disp),
 		.local_clks = exynos7420_local_clks_disp,
 		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_disp),
 		.async_clks = exynos7420_async_clks_disp,
@@ -424,9 +365,52 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	},
 };
 
+#define EXYNOS7420_PAGE_CACHE_MAX	32
+
+struct exynos7420_page_map {
+	phys_addr_t page;
+	void __iomem *base;
+};
+
+static DEFINE_MUTEX(exynos7420_page_cache_lock);
+static struct exynos7420_page_map exynos7420_page_cache[EXYNOS7420_PAGE_CACHE_MAX];
+static size_t exynos7420_page_cache_cnt;
+
+/* Cache permanent 4 KiB MMIO page mappings to avoid per-cycle ioremap/iounmap. */
+static void __iomem *exynos7420_cached_page(phys_addr_t pa)
+{
+	phys_addr_t page = pa & PAGE_MASK;
+	void __iomem *base = NULL;
+	size_t i;
+
+	mutex_lock(&exynos7420_page_cache_lock);
+	for (i = 0; i < exynos7420_page_cache_cnt; i++) {
+		if (exynos7420_page_cache[i].page == page) {
+			base = exynos7420_page_cache[i].base;
+			goto out;
+		}
+	}
+
+	if (exynos7420_page_cache_cnt < EXYNOS7420_PAGE_CACHE_MAX) {
+		base = ioremap(page, PAGE_SIZE);
+		if (base) {
+			exynos7420_page_cache[exynos7420_page_cache_cnt].page = page;
+			exynos7420_page_cache[exynos7420_page_cache_cnt].base = base;
+			exynos7420_page_cache_cnt++;
+		}
+	} else {
+		pr_warn_once("exynos-pd: page cache full (%d entries)\n",
+			     EXYNOS7420_PAGE_CACHE_MAX);
+	}
+
+out:
+	mutex_unlock(&exynos7420_page_cache_lock);
+	return base;
+}
+
 static int exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
 {
-	void __iomem *base = ioremap(pa & PAGE_MASK, PAGE_SIZE);
+	void __iomem *base = exynos7420_cached_page(pa);
 	u32 off = pa & ~PAGE_MASK;
 	u32 val;
 
@@ -438,7 +422,6 @@ static int exynos7420_rmw_phys(phys_addr_t pa, u32 set_mask, u32 clr_mask)
 	val &= ~clr_mask;
 	writel_relaxed(val, base + off);
 	readl_relaxed(base + off);
-	iounmap(base);
 	return 0;
 }
 
@@ -454,12 +437,11 @@ static void exynos7420_save_regs(const struct exynos7420_pd_cfg *pd)
 		if (pd->is_aud && i == 6)
 			exynos7420_rmw_phys(0x114c0900, BIT(20), 0);
 
-		base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
+		base = exynos7420_cached_page(sfr->pa);
 		if (!base)
 			continue;
 		sfr->val = readl_relaxed(base + (sfr->pa & ~PAGE_MASK));
 		sfr->valid = true;
-		iounmap(base);
 	}
 }
 
@@ -473,11 +455,10 @@ static void exynos7420_restore_regs(const struct exynos7420_pd_cfg *pd)
 
 		if (!sfr->valid)
 			continue;
-		base = ioremap(sfr->pa & PAGE_MASK, PAGE_SIZE);
+		base = exynos7420_cached_page(sfr->pa);
 		if (!base)
 			continue;
 		writel_relaxed(sfr->val, base + (sfr->pa & ~PAGE_MASK));
-		iounmap(base);
 	}
 }
 
@@ -493,6 +474,31 @@ static int exynos7420_apply_reg_list(const struct exynos7420_reg_bits *list,
 					  set ? 0 : list[i].mask);
 		if (ret)
 			return ret;
+	}
+	return 0;
+}
+
+static int exynos7420_apply_pmu_list(void __iomem *pmu_base,
+				     const struct exynos7420_reg_bits *list,
+				     size_t n, bool set)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		phys_addr_t pa = list[i].pa;
+		u32 off, val;
+
+		if (pa < 0x105c0000 || pa >= 0x105c5000)
+			return -EINVAL;
+
+		off = pa - 0x105c0000;
+		val = readl_relaxed(pmu_base + off);
+		if (set)
+			val |= list[i].mask;
+		else
+			val &= ~list[i].mask;
+		writel_relaxed(val, pmu_base + off);
+		readl_relaxed(pmu_base + off);
 	}
 	return 0;
 }
@@ -556,29 +562,57 @@ static void exynos7420_apply_async_clks(void __iomem *pmu_base,
 	}
 }
 
-static int exynos7420_power_off_one(void __iomem *pmu_base,
-					  const struct exynos7420_pd_cfg *pd)
+/*
+ * Exynos specific wrapper around the generic power domain
+ */
+struct exynos_pm_domain {
+	void __iomem *base;
+	struct generic_pm_domain pd;
+	u32 local_pwr_cfg;
+	u32 local_pwr_option;
+	const struct exynos7420_pd_cfg *e7420_cfg;
+	void __iomem *pmu_base;
+	struct clk_bulk_data *clks;
+	int num_clks;
+	bool clks_enabled;
+};
+
+static int exynos7420_power_off_one(struct exynos_pm_domain *pd)
 {
-	u32 stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
+	const struct exynos7420_pd_cfg *cfg = pd->e7420_cfg;
+	void __iomem *pmu_base = pd->pmu_base;
+	u32 stat = readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf;
 	int timeout;
 
-	if (stat == 0)
+	if (stat == 0) {
+		if (pd->clks_enabled) {
+			clk_bulk_disable(pd->num_clks, pd->clks);
+			pd->clks_enabled = false;
+		}
 		return 0;
+	}
 
-	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, true);
+	if (!pd->clks_enabled && pd->num_clks > 0) {
+		int ret = clk_bulk_enable(pd->num_clks, pd->clks);
+
+		if (ret)
+			return ret;
+		pd->clks_enabled = true;
+	}
 	udelay(10);
-	exynos7420_save_regs(pd);
-	exynos7420_apply_reg_list(pd->local_clks, pd->num_local_clks, true);
-	if (pd->is_aud)
+	exynos7420_save_regs(cfg);
+	exynos7420_apply_reg_list(cfg->local_clks, cfg->num_local_clks, true);
+	if (cfg->is_aud)
 		exynos7420_rmw_phys(0x114c0200, 0, BIT(20) | BIT(16) | BIT(12));
-	exynos7420_apply_async_clks(pmu_base, pd);
-	exynos7420_apply_reg_list(pd->sys_pwr_regs, pd->num_sys_pwr_regs, false);
+	exynos7420_apply_async_clks(pmu_base, cfg);
+	exynos7420_apply_pmu_list(pmu_base, cfg->sys_pwr_regs,
+				  cfg->num_sys_pwr_regs, false);
 
-	writel_relaxed(0x0102, pmu_base + pd->pmu_off + 0x8);
-	writel_relaxed(0x0, pmu_base + pd->pmu_off + 0x0);
+	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
+	writel_relaxed(0x0, pmu_base + cfg->pmu_off + 0x0);
 
 	timeout = 200;
-	while ((readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf) != 0) {
+	while ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0) {
 		if (--timeout <= 0)
 			break;
 		usleep_range(10, 20);
@@ -593,12 +627,12 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 	 * by TrustZone (SError ESR 0xbf000002) in non-secure Linux. Report
 	 * -EBUSY cleanly instead.
 	 */
-	stat = readl_relaxed(pmu_base + pd->pmu_off + 0x4) & 0xf;
+	stat = readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf;
 	if (stat != 0) {
 		pr_err("exynos-pd: failed to power off %s: conf %#x stat %#x option %#x\n",
-		       pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x0),
-		       readl_relaxed(pmu_base + pd->pmu_off + 0x4),
-		       readl_relaxed(pmu_base + pd->pmu_off + 0x8));
+		       cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x0),
+		       readl_relaxed(pmu_base + cfg->pmu_off + 0x4),
+		       readl_relaxed(pmu_base + cfg->pmu_off + 0x8));
 		/*
 		 * Writing the domain back on from here hangs the SoC on Exynos
 		 * 7420 DISP, so only report it.
@@ -606,22 +640,23 @@ static int exynos7420_power_off_one(void __iomem *pmu_base,
 		return -EBUSY;
 	}
 
-	exynos7420_apply_reg_list(pd->top_clks, pd->num_top_clks, false);
+	if (pd->clks_enabled) {
+		clk_bulk_disable(pd->num_clks, pd->clks);
+		pd->clks_enabled = false;
+	}
 	pr_info("exynos-pd: powered off %s (stat=%#x, top_clks gated)\n",
-		pd->name, readl_relaxed(pmu_base + pd->pmu_off + 0x4));
+		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
 	return 0;
 }
 
 static void exynos7420_aud_post_power_on(void __iomem *pmu_base,
 					 const struct exynos7420_pd_cfg *cfg)
 {
-	void __iomem *cmu, *gpz, *lpass, *smmu;
+	void __iomem *cmu = exynos7420_cached_page(0x114c0000);
+	void __iomem *gpz = exynos7420_cached_page(0x114b0000);
+	void __iomem *lpass = exynos7420_cached_page(0x11400000);
+	void __iomem *smmu = exynos7420_cached_page(0x114e0000);
 	size_t i;
-
-	cmu = ioremap(0x114c0000, 0x1000);
-	gpz = ioremap(0x114b0000, 0x1000);
-	lpass = ioremap(0x11400000, 0x100);
-	smmu = ioremap(0x114e0000, 0x100);
 
 	if (cmu) {
 		if (cfg && cfg->save_regs[0].valid) {
@@ -683,31 +718,31 @@ static void exynos7420_aud_post_power_on(void __iomem *pmu_base,
 		writel_relaxed(cfg->save_regs[5].val, cmu + 0x0a00);
 		readl_relaxed(cmu + 0x0a00);
 	}
-
-	if (smmu)
-		iounmap(smmu);
-	if (lpass)
-		iounmap(lpass);
-	if (gpz)
-		iounmap(gpz);
-	if (cmu)
-		iounmap(cmu);
 }
 
-static int exynos7420_power_on_one(void __iomem *pmu_base,
-				   const struct exynos7420_pd_cfg *cfg)
+static int exynos7420_power_on_one(struct exynos_pm_domain *pd)
 {
+	const struct exynos7420_pd_cfg *cfg = pd->e7420_cfg;
+	void __iomem *pmu_base = pd->pmu_base;
+	bool was_enabled = pd->clks_enabled;
 	int timeout = 200;
 	size_t i;
 
 	/* 1. Enable top clocks */
-	exynos7420_apply_reg_list(cfg->top_clks, cfg->num_top_clks, true);
+	if (!pd->clks_enabled && pd->num_clks > 0) {
+		int ret = clk_bulk_enable(pd->num_clks, pd->clks);
+
+		if (ret)
+			return ret;
+		pd->clks_enabled = true;
+	}
 	udelay(10);
 	if (cfg->async_before_on)
 		exynos7420_apply_async_clks(pmu_base, cfg);
 
 	/* 2. Clear sys_pwr_regs before power on */
-	exynos7420_apply_reg_list(cfg->sys_pwr_regs, cfg->num_sys_pwr_regs, false);
+	exynos7420_apply_pmu_list(pmu_base, cfg->sys_pwr_regs,
+				  cfg->num_sys_pwr_regs, false);
 
 	/* 3. Write OPTION and PWR_CFG to power on */
 	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
@@ -723,6 +758,10 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 	if ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0xf) {
 		pr_err("exynos-pd: failed to power on %s (stat=%#x)\n",
 		       cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+		if (!was_enabled && pd->clks_enabled) {
+			clk_bulk_disable(pd->num_clks, pd->clks);
+			pd->clks_enabled = false;
+		}
 		return -ETIMEDOUT;
 	}
 
@@ -760,18 +799,6 @@ static int exynos7420_power_on_one(void __iomem *pmu_base,
 	return 0;
 }
 
-/*
- * Exynos specific wrapper around the generic power domain
- */
-struct exynos_pm_domain {
-	void __iomem *base;
-	struct generic_pm_domain pd;
-	u32 local_pwr_cfg;
-	u32 local_pwr_option;
-	const struct exynos7420_pd_cfg *e7420_cfg;
-	void __iomem *pmu_base;
-};
-
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 {
 	struct exynos_pm_domain *pd;
@@ -785,8 +812,8 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 		int ret;
 
 		mutex_lock(&exynos7420_pd_lock);
-		ret = power_on ? exynos7420_power_on_one(pd->pmu_base, pd->e7420_cfg)
-			       : exynos7420_power_off_one(pd->pmu_base, pd->e7420_cfg);
+		ret = power_on ? exynos7420_power_on_one(pd)
+			       : exynos7420_power_off_one(pd);
 		mutex_unlock(&exynos7420_pd_lock);
 		return ret;
 	}
@@ -921,14 +948,45 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
 
+	ret = devm_clk_bulk_get_all(dev, &pd->clks);
+	if (ret < 0) {
+		iounmap(pd->base);
+		return ret;
+	}
+	pd->num_clks = ret;
+	if (pd->num_clks > 0) {
+		ret = clk_bulk_prepare(pd->num_clks, pd->clks);
+		if (ret) {
+			iounmap(pd->base);
+			return ret;
+		}
+		if (on) {
+			ret = clk_bulk_enable(pd->num_clks, pd->clks);
+			if (ret) {
+				clk_bulk_unprepare(pd->num_clks, pd->clks);
+				iounmap(pd->base);
+				return ret;
+			}
+			pd->clks_enabled = true;
+		}
+	}
+
 	ret = pm_genpd_init(&pd->pd, NULL, !on);
 	if (ret) {
+		if (pd->clks_enabled)
+			clk_bulk_disable(pd->num_clks, pd->clks);
+		if (pd->num_clks > 0)
+			clk_bulk_unprepare(pd->num_clks, pd->clks);
 		iounmap(pd->base);
 		return ret;
 	}
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
 	if (ret) {
 		pm_genpd_remove(&pd->pd);
+		if (pd->clks_enabled)
+			clk_bulk_disable(pd->num_clks, pd->clks);
+		if (pd->num_clks > 0)
+			clk_bulk_unprepare(pd->num_clks, pd->clks);
 		iounmap(pd->base);
 		return ret;
 	}
