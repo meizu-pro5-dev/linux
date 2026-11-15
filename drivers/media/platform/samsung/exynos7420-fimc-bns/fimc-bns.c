@@ -211,26 +211,13 @@ static void fimc_bns_cam0_hw_prepare(struct fimc_bns *bns)
 	/*
 	 * Ensure CMU_CAM0_LOCAL (0x140f0000) local clock gates for BNS A/B and
 	 * CSIS 0/1 are open before touching BNS/CSIS SFRs or starting DMA.
+	 * Keep this in-driver rather than registering a standalone runtime-PM
+	 * CMU node in pd-cam0, which hangs during early pd-cam0 probe.
 	 */
 	base = ioremap(0x140f0000, 0x1000);
 	if (base) {
 		writel(readl(base + 0x800) | 0x7f, base + 0x800);
 		writel(readl(base + 0x900) | 0x7f, base + 0x900);
-		iounmap(base);
-	}
-
-	/*
-	 * Ensure CMU_CAM0 (0x144d0000) USERMUX enable and IP clock-gating masks
-	 * are open as in vendor exynos7420_fimc_is_clk_gate().
-	 */
-	base = ioremap(0x144d0000, 0x1000);
-	if (base) {
-		writel(readl(base + 0x300) | 0x11111111, base + 0x300);
-		writel(readl(base + 0x304) | 0x00000011, base + 0x304);
-		writel(readl(base + 0x308) | 0x00011111, base + 0x308);
-		writel(0xffffffff, base + 0xb00);
-		writel(0xffffffff, base + 0xb04);
-		writel(0xffffffff, base + 0xb08);
 		iounmap(base);
 	}
 

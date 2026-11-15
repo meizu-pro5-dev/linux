@@ -597,33 +597,25 @@ static const struct samsung_gate_clock top0_gate_clks[] __initconst = {
 		ENABLE_ACLK_TOP04, 12, 0, 0),
 
 	GATE(CLK_ACLK_CAM0_CSIS0_690, "aclk_cam0_csis0_690",
-		"dout_aclk_cam0_csis0_690", ENABLE_ACLK_TOP05, 28,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_csis0_690", ENABLE_ACLK_TOP05, 28, 0, 0),
 	GATE(CLK_ACLK_CAM0_BNSA_690, "aclk_cam0_bnsa_690",
-		"dout_aclk_cam0_bnsa_690", ENABLE_ACLK_TOP05, 24,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_bnsa_690", ENABLE_ACLK_TOP05, 24, 0, 0),
 	GATE(CLK_ACLK_CAM0_BNSB_690, "aclk_cam0_bnsb_690",
-		"dout_aclk_cam0_bnsb_690", ENABLE_ACLK_TOP05, 20,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_bnsb_690", ENABLE_ACLK_TOP05, 20, 0, 0),
 	GATE(CLK_ACLK_CAM0_CSIS3_133, "aclk_cam0_csis3_133", "fin_pll",
 		ENABLE_ACLK_TOP05, 16, 0, 0),
 	GATE(CLK_ACLK_CAM0_CSIS1_174, "aclk_cam0_csis1_174",
-		"dout_aclk_cam0_csis1_174", ENABLE_ACLK_TOP05, 12,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_csis1_174", ENABLE_ACLK_TOP05, 12, 0, 0),
 	GATE(CLK_ACLK_CAM0_CSIS2_414, "aclk_cam0_csis2_414", "fin_pll",
 		ENABLE_ACLK_TOP05, 8, 0, 0),
 	GATE(CLK_ACLK_CAM0_3AA0_690, "aclk_cam0_3aa0_690",
-		"dout_aclk_cam0_3aa0_690", ENABLE_ACLK_TOP06, 28,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_3aa0_690", ENABLE_ACLK_TOP06, 28, 0, 0),
 	GATE(CLK_ACLK_CAM0_3AA1_468, "aclk_cam0_3aa1_468",
-		"dout_aclk_cam0_3aa1_468", ENABLE_ACLK_TOP06, 24,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_3aa1_468", ENABLE_ACLK_TOP06, 24, 0, 0),
 	GATE(CLK_ACLK_CAM0_TREX_532, "aclk_cam0_trex_532",
-		"dout_aclk_cam0_trex_532", ENABLE_ACLK_TOP06, 20,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_trex_532", ENABLE_ACLK_TOP06, 20, 0, 0),
 	GATE(CLK_ACLK_CAM0_NOCP_133, "aclk_cam0_nocp_133",
-		"dout_aclk_cam0_nocp_133", ENABLE_ACLK_TOP06, 16,
-		CLK_IS_CRITICAL | CLK_IGNORE_UNUSED, 0),
+		"dout_aclk_cam0_nocp_133", ENABLE_ACLK_TOP06, 16, 0, 0),
 	GATE(CLK_ACLK_CAM1_ARM_668, "aclk_cam1_arm_668", "fin_pll",
 		ENABLE_ACLK_TOP07, 28, 0, 0),
 	GATE(CLK_ACLK_CAM1_FD_468, "aclk_cam1_fd_468", "fin_pll",
@@ -1717,23 +1709,35 @@ static const struct samsung_cmu_info mfc_cmu_info = {
 #define MUX_SEL_CAM00			0x0200
 #define MUX_SEL_CAM01			0x0204
 #define MUX_SEL_CAM02			0x0208
+#define MUX_ENABLE_CAM00		0x0300
+#define MUX_ENABLE_CAM01		0x0304
+#define MUX_ENABLE_CAM02		0x0308
 #define DIV_CAM0			0x0600
 #define ENABLE_ACLK_CAM00		0x0800
 #define ENABLE_ACLK_CAM01		0x0804
 #define ENABLE_PCLK_CAM00		0x0900
 #define ENABLE_PCLK_CAM01		0x0904
 #define ENABLE_SCLK_CAM0		0x0A00
+#define ENABLE_IP_CAM00			0x0B00
+#define ENABLE_IP_CAM01			0x0B04
+#define ENABLE_IP_CAM02			0x0B08
 
 static const unsigned long cam0_clk_regs[] = {
 	MUX_SEL_CAM00,
 	MUX_SEL_CAM01,
 	MUX_SEL_CAM02,
+	MUX_ENABLE_CAM00,
+	MUX_ENABLE_CAM01,
+	MUX_ENABLE_CAM02,
 	DIV_CAM0,
 	ENABLE_ACLK_CAM00,
 	ENABLE_ACLK_CAM01,
 	ENABLE_PCLK_CAM00,
 	ENABLE_PCLK_CAM01,
 	ENABLE_SCLK_CAM0,
+	ENABLE_IP_CAM00,
+	ENABLE_IP_CAM01,
+	ENABLE_IP_CAM02,
 };
 
 /* D-PHY RX byte clocks are outputs of the CSIS0 (S4) and CSIS1 (S2A) PHYs. */
@@ -1821,8 +1825,9 @@ static const struct samsung_gate_clock cam0_gate_clks[] = {
 	GATE(0, "mout_aclk_cam0_nocp_user", "aclk_cam0_nocp_133", MUX_SEL_CAM01,
 		0, CLK_IGNORE_UNUSED, 0),
 	/* CAM0 NoC-P: register path to the CSIS/BNS SFRs. */
-	GATE(0, "aclk_200_cam0_noc_p_cam0", "mout_aclk_cam0_nocp_user",
-		ENABLE_ACLK_CAM01, 28, CLK_IGNORE_UNUSED, 0),
+	GATE(0, "aclk_200_cam0_noc_p_cam0",
+		"mout_aclk_cam0_nocp_user", ENABLE_ACLK_CAM01, 28,
+		CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk_axi2ahb_is0p", "mout_aclk_cam0_nocp_user",
 		ENABLE_ACLK_CAM01, 8, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk_axi2apb_bridge_is0p", "mout_aclk_cam0_nocp_user",
@@ -1899,6 +1904,31 @@ static const struct samsung_cmu_info cam0_cmu_info = {
 	.clk_name		= "aclk_cam0_nocp_133",
 	.no_pm_smc		= true,
 };
+
+static void __init exynos7_clk_cam0_hw_init(struct device_node *np)
+{
+	void __iomem *reg_base = of_iomap(np, 0);
+
+	if (!reg_base)
+		return;
+
+	/*
+	 * Open CMU_CAM0 USERMUX enable and IP clock-gating masks as in
+	 * vendor exynos7420_fimc_is_clk_gate(); cam0_clk_regs[] preserves
+	 * them across pd-cam0 power cycles.
+	 */
+	writel_relaxed(readl_relaxed(reg_base + MUX_ENABLE_CAM00) | 0x11111111,
+		       reg_base + MUX_ENABLE_CAM00);
+	writel_relaxed(readl_relaxed(reg_base + MUX_ENABLE_CAM01) | 0x00000011,
+		       reg_base + MUX_ENABLE_CAM01);
+	writel_relaxed(readl_relaxed(reg_base + MUX_ENABLE_CAM02) | 0x00011111,
+		       reg_base + MUX_ENABLE_CAM02);
+	writel_relaxed(0xffffffff, reg_base + ENABLE_IP_CAM00);
+	writel_relaxed(0xffffffff, reg_base + ENABLE_IP_CAM01);
+	writel_relaxed(0xffffffff, reg_base + ENABLE_IP_CAM02);
+
+	iounmap(reg_base);
+}
 
 /* Register Offset definitions for CMU_AUD (0x114C0000) */
 #define	MUX_SEL_AUD			0x0200
@@ -2454,6 +2484,9 @@ static int __init exynos7_cmu_probe(struct platform_device *pdev)
 	if (of_device_is_compatible(pdev->dev.of_node,
 				    "samsung,exynos7-clock-aud"))
 		exynos7_clk_aud_hw_init(pdev->dev.of_node);
+	else if (of_device_is_compatible(pdev->dev.of_node,
+					 "samsung,exynos7-clock-cam0"))
+		exynos7_clk_cam0_hw_init(pdev->dev.of_node);
 
 	return exynos_arm64_register_cmu_pm(pdev, false);
 }
