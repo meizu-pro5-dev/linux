@@ -1699,6 +1699,10 @@
 	status = "okay";
 };
 
+&sysmmu_cam0 {
+	status = "okay";
+};
+
 /* Replaced by m86_tmu_monitor. */
 &tmuctrl_0 {
 	status = "disabled";

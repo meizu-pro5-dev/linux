@@ -1832,6 +1832,10 @@ static const struct samsung_gate_clock cam0_gate_clks[] = {
 	GATE(CLK_PHYCLK_RXBYTECLKHS3_S4, "phyclk_rxbyteclkhs3_s4_user",
 		"mout_phyclk_rxbyteclkhs3_s4_user", ENABLE_SCLK_CAM0, 7,
 		CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_ACLK_CAM0_SYSMMU, "aclk_cam0_smmu",
+		"mout_aclk_cam0_trex_user", ENABLE_ACLK_CAM01, 0, 0, 0),
+	GATE(CLK_PCLK_CAM0_SYSMMU, "pclk_cam0_smmu",
+		"dout_pclk_cam0_trex_266", ENABLE_PCLK_CAM01, 0, 0, 0),
 };
 
 static const struct samsung_cmu_info cam0_cmu_info = {

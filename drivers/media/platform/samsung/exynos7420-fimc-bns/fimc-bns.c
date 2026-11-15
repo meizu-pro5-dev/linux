@@ -33,6 +33,12 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mc.h>
 #include <media/v4l2-subdev.h>
+
+#if IS_ENABLED(CONFIG_EXYNOS_IOMMU)
+void exynos_iommu_master_ready(struct device *master);
+#else
+static inline void exynos_iommu_master_ready(struct device *master) { }
+#endif
 #include <media/videobuf2-dma-contig.h>
 
 #define FIMC_BNS_DRV_NAME		"exynos7420-fimc-bns"
@@ -232,17 +238,6 @@ static void fimc_bns_cam0_hw_prepare(void)
 		writel(0xffffffff, base + 0x53c);
 		writel(0xffffffff, base + 0x540);
 		writel(0xffffffff, base + 0x544);
-		iounmap(base);
-	}
-
-	/*
-	 * Place sysmmu_cam0 (0x140e0000) in bypass mode (MMU_CTRL = 0x0),
-	 * clearing the reset-default block-when-stop (0x3) bit so FIMC-BNS
-	 * DMA can write directly to contiguous physical memory.
-	 */
-	base = ioremap(0x140e0000, 0x1000);
-	if (base) {
-		writel(0x0, base + 0x000);
 		iounmap(base);
 	}
 }
@@ -852,7 +847,7 @@ static int fimc_bns_probe(struct platform_device *pdev)
 	if (bns->num_clks < 0)
 		return dev_err_probe(dev, bns->num_clks, "failed to get clocks\n");
 
-	/* CIOSA is a 32-bit physical address; the CAM0 SysMMU stays in bypass. */
+	/* CIOSA is a 32-bit DMA/IOVA address behind sysmmu_cam0. */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
@@ -892,6 +887,8 @@ static int fimc_bns_probe(struct platform_device *pdev)
 		goto err_ctrls;
 	}
 
+	/* FIMC-BNS is powered off until start_streaming; enable SysMMU translation. */
+	exynos_iommu_master_ready(dev);
 	pm_runtime_enable(dev);
 
 	ret = fimc_bns_register_video(bns);

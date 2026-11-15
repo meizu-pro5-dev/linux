@@ -924,6 +924,19 @@
 			status = "disabled";
 		};
 
+		sysmmu_cam0: sysmmu@140e0000 {
+			compatible = "samsung,exynos7420-sysmmu", "samsung,exynos-sysmmu";
+			reg = <0x140e0000 0x1000>;
+			interrupts = <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clock_cam0 CLK_ACLK_CAM0_SYSMMU>,
+				 <&clock_cam0 CLK_PCLK_CAM0_SYSMMU>,
+				 <&clock_cam0 CLK_ACLK_TREX_A_5X1>;
+			clock-names = "aclk", "pclk", "master";
+			power-domains = <&pd_cam0>;
+			#iommu-cells = <0>;
+			status = "disabled";
+		};
+
 		fimc_bns_a: fimc-bns@14020000 {
 			compatible = "samsung,exynos7420-fimc-bns";
 			reg = <0x14020000 0x1000>;
@@ -937,6 +950,7 @@
 				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
 			power-domains = <&pd_cam0>;
+			iommus = <&sysmmu_cam0>;
 			status = "disabled";
 		};
 
@@ -953,6 +967,7 @@
 				 <&clock_cam0 CLK_PCLK_TREX_A_5X1>,
 				 <&clock_cam0 CLK_ACLK_AXI_LH_ASYNC_SI_TOP_CAM0>;
 			power-domains = <&pd_cam0>;
+			iommus = <&sysmmu_cam0>;
 			status = "disabled";
 		};
 
