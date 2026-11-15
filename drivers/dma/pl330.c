@@ -23,8 +23,10 @@
 #include <linux/of.h>
 #include <linux/of_dma.h>
 #include <linux/err.h>
+#include <linux/mfd/syscon.h>
 #include <linux/pm_runtime.h>
 #include <linux/bug.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
 
@@ -476,8 +478,8 @@ struct pl330_dmac {
 	unsigned mcbufsz;
 	/* ioremap'ed address of PL330 registers. */
 	void __iomem	*base;
-	/* Exynos7420 FSYS0 PDMA control register (0x10ef0000), or NULL */
-	void __iomem	*exynos7420_ctrl;
+	/* Optional FSYS0 PDMA control syscon regmap, or NULL */
+	struct regmap	*pdma_ctrl;
 	/* Populated by the PL330 core driver during pl330_add */
 	struct pl330_config	pcfg;
 
@@ -2972,30 +2974,35 @@ static inline void init_pl330_debugfs(struct pl330_dmac *pl330)
 #endif
 
 /*
- * Exynos7420: the FSYS0 PDMA control register at 0x10ef0000 resets to 0x3,
- * which blocks PDMA0/PDMA1 AXI master transactions from non-secure channels
- * (CPC stays at the first microcode byte with CS[3:0] = cache-miss).
- * The vendor 3.10 kernel (pl330_fixup_ctrl) writes 0 at probe and resume.
+ * Exynos7420: the FSYS0 PDMA control register resets to 0x3, which blocks
+ * PDMA0/PDMA1 AXI master transactions from non-secure channels (CPC stays at
+ * the first microcode byte with CS[3:0] = cache-miss). The vendor 3.10 kernel
+ * (pl330_fixup_ctrl) writes 0 at probe and resume.
  */
-#define EXYNOS7420_PDMA_CTRL	0x10ef0000
-
-static void pl330_exynos7420_map_ctrl(struct pl330_dmac *pl330)
+static void pl330_pdma_ctrl_init(struct pl330_dmac *pl330)
 {
 	struct device *dev = pl330->ddma.dev;
+	struct regmap *regmap;
 
-	if (!of_machine_is_compatible("samsung,exynos7420"))
+	if (!dev->of_node ||
+	    !of_property_present(dev->of_node, "samsung,pdma-ctrl-syscon"))
 		return;
 
-	/* Shared by pdma0/pdma1, so map without claiming the region. */
-	pl330->exynos7420_ctrl = devm_ioremap(dev, EXYNOS7420_PDMA_CTRL, SZ_4);
-	if (!pl330->exynos7420_ctrl)
-		dev_warn(dev, "failed to map Exynos7420 PDMA control\n");
+	regmap = syscon_regmap_lookup_by_phandle(dev->of_node,
+						 "samsung,pdma-ctrl-syscon");
+	if (IS_ERR(regmap)) {
+		dev_warn(dev, "failed to lookup PDMA control syscon: %ld\n",
+			 PTR_ERR(regmap));
+		return;
+	}
+
+	pl330->pdma_ctrl = regmap;
 }
 
-static void pl330_exynos7420_unlock(struct pl330_dmac *pl330)
+static void pl330_pdma_ctrl_unlock(struct pl330_dmac *pl330)
 {
-	if (pl330->exynos7420_ctrl)
-		writel(0, pl330->exynos7420_ctrl);
+	if (pl330->pdma_ctrl)
+		regmap_write(pl330->pdma_ctrl, 0, 0);
 }
 
 /*
@@ -3026,7 +3033,7 @@ static int __maybe_unused pl330_resume(struct device *dev)
 			return ret;
 	}
 
-	pl330_exynos7420_unlock(amba_get_drvdata(pcdev));
+	pl330_pdma_ctrl_unlock(amba_get_drvdata(pcdev));
 
 	pm_runtime_force_resume(dev);
 
@@ -3075,8 +3082,8 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
 
 	amba_set_drvdata(adev, pl330);
 
-	pl330_exynos7420_map_ctrl(pl330);
-	pl330_exynos7420_unlock(pl330);
+	pl330_pdma_ctrl_init(pl330);
+	pl330_pdma_ctrl_unlock(pl330);
 
 	pl330->rstc = devm_reset_control_get_optional(&adev->dev, "dma");
 	if (IS_ERR(pl330->rstc)) {
