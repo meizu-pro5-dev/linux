@@ -73,6 +73,9 @@ static const struct of_device_id exynos_clkout_ids[] = {
 	}, {
 		.compatible = "samsung,exynos5433-pmu",
 		.data = &exynos_clkout_exynos5,
+	}, {
+		.compatible = "samsung,exynos7-pmu",
+		.data = &exynos_clkout_exynos5,
 	}, { }
 };
 MODULE_DEVICE_TABLE(of, exynos_clkout_ids);

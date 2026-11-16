@@ -47,6 +47,18 @@ properties:
     minItems: 2
     maxItems: 2
 
+  "#clock-cells":
+    const: 0
+
+  clock-output-names:
+    maxItems: 1
+
+  samsung,pmu-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Optional phandle to the PMU system controller to select RTC 32kHz
+      clock output source.
+
 allOf:
   - $ref: rtc.yaml#
   - if:

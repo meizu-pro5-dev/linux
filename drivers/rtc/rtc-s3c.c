@@ -20,14 +20,19 @@
 #include <linux/rtc.h>
 #include <linux/bcd.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/log2.h>
+#include <linux/mfd/syscon.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/regmap.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
 
 #include <asm/irq.h>
 #include "rtc-s3c.h"
+
+#define S3C_PMU_RTC_CLKO_SEL	0x001c
 
 struct s3c_rtc {
 	struct device *dev;
@@ -36,12 +41,15 @@ struct s3c_rtc {
 	void __iomem *base;
 	struct clk *rtc_clk;
 	struct clk *rtc_src_clk;
+	struct regmap *pmu;
+	struct clk_hw clkout_hw;
 	bool alarm_enabled;
 
 	const struct s3c_rtc_data *data;
 
 	int irq_alarm;
 	spinlock_t alarm_lock;
+	spinlock_t con_lock; /* Protects S3C2410_RTCCON RMW updates */
 
 	bool wake_en;
 };
@@ -333,19 +341,25 @@ static const struct rtc_class_ops s3c_rtcops = {
 
 static void s3c24xx_rtc_enable(struct s3c_rtc *info)
 {
+	unsigned long flags;
 	unsigned int con, tmp;
 
+	spin_lock_irqsave(&info->con_lock, flags);
 	con = readw(info->base + S3C2410_RTCCON);
 	/* re-enable the device, and check it is ok */
 	if ((con & S3C2410_RTCCON_RTCEN) == 0) {
+		spin_unlock_irqrestore(&info->con_lock, flags);
 		dev_info(info->dev, "rtc disabled, re-enabling\n");
+		spin_lock_irqsave(&info->con_lock, flags);
 
 		tmp = readw(info->base + S3C2410_RTCCON);
 		writew(tmp | S3C2410_RTCCON_RTCEN, info->base + S3C2410_RTCCON);
 	}
 
 	if (con & S3C2410_RTCCON_CNTSEL) {
+		spin_unlock_irqrestore(&info->con_lock, flags);
 		dev_info(info->dev, "removing RTCCON_CNTSEL\n");
+		spin_lock_irqsave(&info->con_lock, flags);
 
 		tmp = readw(info->base + S3C2410_RTCCON);
 		writew(tmp & ~S3C2410_RTCCON_CNTSEL,
@@ -353,21 +367,27 @@ static void s3c24xx_rtc_enable(struct s3c_rtc *info)
 	}
 
 	if (con & S3C2410_RTCCON_CLKRST) {
+		spin_unlock_irqrestore(&info->con_lock, flags);
 		dev_info(info->dev, "removing RTCCON_CLKRST\n");
+		spin_lock_irqsave(&info->con_lock, flags);
 
 		tmp = readw(info->base + S3C2410_RTCCON);
 		writew(tmp & ~S3C2410_RTCCON_CLKRST,
 		       info->base + S3C2410_RTCCON);
 	}
+	spin_unlock_irqrestore(&info->con_lock, flags);
 }
 
 static void s3c24xx_rtc_disable(struct s3c_rtc *info)
 {
+	unsigned long flags;
 	unsigned int con;
 
+	spin_lock_irqsave(&info->con_lock, flags);
 	con = readw(info->base + S3C2410_RTCCON);
 	con &= ~S3C2410_RTCCON_RTCEN;
 	writew(con, info->base + S3C2410_RTCCON);
+	spin_unlock_irqrestore(&info->con_lock, flags);
 
 	con = readb(info->base + S3C2410_TICNT);
 	con &= ~S3C2410_TICNT_ENABLE;
@@ -376,12 +396,125 @@ static void s3c24xx_rtc_disable(struct s3c_rtc *info)
 
 static void s3c6410_rtc_disable(struct s3c_rtc *info)
 {
+	unsigned long flags;
 	unsigned int con;
 
+	spin_lock_irqsave(&info->con_lock, flags);
 	con = readw(info->base + S3C2410_RTCCON);
 	con &= ~S3C64XX_RTCCON_TICEN;
 	con &= ~S3C2410_RTCCON_RTCEN;
 	writew(con, info->base + S3C2410_RTCCON);
+	spin_unlock_irqrestore(&info->con_lock, flags);
+}
+
+static int s3c_rtc_clkout_prepare(struct clk_hw *hw)
+{
+	struct s3c_rtc *info = container_of(hw, struct s3c_rtc, clkout_hw);
+	unsigned long flags;
+	unsigned int con;
+	int ret;
+
+	ret = clk_enable(info->rtc_clk);
+	if (ret)
+		return ret;
+
+	if (info->pmu) {
+		ret = regmap_write(info->pmu, S3C_PMU_RTC_CLKO_SEL, 0x0);
+		if (ret)
+			dev_warn(info->dev, "failed to clear PMU_RTC_CLKO_SEL: %d\n", ret);
+	}
+
+	spin_lock_irqsave(&info->con_lock, flags);
+	con = readw(info->base + S3C2410_RTCCON);
+	con |= S3C64XX_RTCCON_CLKOUTEN;
+	writew(con, info->base + S3C2410_RTCCON);
+	spin_unlock_irqrestore(&info->con_lock, flags);
+
+	clk_disable(info->rtc_clk);
+	return 0;
+}
+
+static void s3c_rtc_clkout_unprepare(struct clk_hw *hw)
+{
+	struct s3c_rtc *info = container_of(hw, struct s3c_rtc, clkout_hw);
+	unsigned long flags;
+	unsigned int con;
+
+	if (clk_enable(info->rtc_clk))
+		return;
+
+	spin_lock_irqsave(&info->con_lock, flags);
+	con = readw(info->base + S3C2410_RTCCON);
+	con &= ~S3C64XX_RTCCON_CLKOUTEN;
+	writew(con, info->base + S3C2410_RTCCON);
+	spin_unlock_irqrestore(&info->con_lock, flags);
+
+	clk_disable(info->rtc_clk);
+}
+
+static int s3c_rtc_clkout_is_prepared(struct clk_hw *hw)
+{
+	struct s3c_rtc *info = container_of(hw, struct s3c_rtc, clkout_hw);
+	unsigned long flags;
+	unsigned int con;
+
+	if (clk_enable(info->rtc_clk))
+		return 0;
+
+	spin_lock_irqsave(&info->con_lock, flags);
+	con = readw(info->base + S3C2410_RTCCON);
+	spin_unlock_irqrestore(&info->con_lock, flags);
+
+	clk_disable(info->rtc_clk);
+	return !!(con & S3C64XX_RTCCON_CLKOUTEN);
+}
+
+static unsigned long s3c_rtc_clkout_recalc_rate(struct clk_hw *hw,
+						unsigned long parent_rate)
+{
+	return parent_rate ? parent_rate : 32768;
+}
+
+static const struct clk_ops s3c_rtc_clkout_ops = {
+	.prepare	= s3c_rtc_clkout_prepare,
+	.unprepare	= s3c_rtc_clkout_unprepare,
+	.is_prepared	= s3c_rtc_clkout_is_prepared,
+	.recalc_rate	= s3c_rtc_clkout_recalc_rate,
+};
+
+static int s3c_rtc_register_clkout(struct s3c_rtc *info)
+{
+	struct device *dev = info->dev;
+	struct clk_init_data init = {};
+	const char *clkout_name = "rtc_clkout";
+	const char *parent_name;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_COMMON_CLK) || !of_property_present(dev->of_node, "#clock-cells"))
+		return 0;
+
+	if (of_property_present(dev->of_node, "samsung,pmu-syscon")) {
+		info->pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pmu-syscon");
+		if (IS_ERR(info->pmu))
+			return dev_err_probe(dev, PTR_ERR(info->pmu),
+					     "failed to lookup samsung,pmu-syscon\n");
+	}
+
+	of_property_read_string(dev->of_node, "clock-output-names", &clkout_name);
+	init.name = clkout_name;
+	init.ops = &s3c_rtc_clkout_ops;
+	if (info->rtc_src_clk) {
+		parent_name = __clk_get_name(info->rtc_src_clk);
+		init.parent_names = &parent_name;
+		init.num_parents = 1;
+	}
+
+	info->clkout_hw.init = &init;
+	ret = devm_clk_hw_register(dev, &info->clkout_hw);
+	if (ret)
+		return ret;
+
+	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &info->clkout_hw);
 }
 
 static void s3c_rtc_remove(struct platform_device *pdev)
@@ -411,6 +544,7 @@ static int s3c_rtc_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 	spin_lock_init(&info->alarm_lock);
+	spin_lock_init(&info->con_lock);
 
 	platform_set_drvdata(pdev, info);
 
@@ -480,6 +614,12 @@ static int s3c_rtc_probe(struct platform_device *pdev)
 	}
 
 	s3c_rtc_disable_clk(info);
+
+	ret = s3c_rtc_register_clkout(info);
+	if (ret) {
+		s3c_rtc_enable_clk(info);
+		goto err_nortc;
+	}
 
 	return 0;
 
