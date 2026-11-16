@@ -33,11 +33,6 @@ struct s2mps11_info {
 	struct mutex m86_cpu_lock;
 	u32 m86_cpu_ctrl[2];
 	bool m86_cpu_faulted;
-	bool m86_cpu_authorized;
-	void *m86_cpu_authorized_context;
-	struct task_struct *m86_cpu_authorized_task;
-	struct clk *m86_cpu_authorized_clock;
-	unsigned int m86_cpu_authorized_uv;
 	int buck1_sel_cache;
 	int buck4_sel_cache;
 	int ldo8_ctrl_cache;
@@ -1428,16 +1423,6 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 				if (!ctx) { ret = -ENOMEM; goto out; }
 				ctx->info = s2mps11;
 				ctx->index = idx;
-				mutex_lock(&m86_context_lock);
-				if (m86_active_context[idx]) {
-					mutex_unlock(&m86_context_lock);
-					ret = -EBUSY;
-					goto out;
-				}
-				m86_active_context[idx] = ctx;
-				mutex_unlock(&m86_context_lock);
-				ret = devm_add_action_or_reset(&pdev->dev, m86_clear_context, ctx);
-				if (ret) goto out;
 				config.driver_data = ctx;
 				s2mps11->m86_cpu_ctrl[idx] = ctrl;
 				cpu_desc->ops = &m86_cpu_buck_active_ops;

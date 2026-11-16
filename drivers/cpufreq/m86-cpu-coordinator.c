@@ -69,7 +69,6 @@ static struct m86_coord *coordinator;
 static bool debug_transitions;
 module_param(debug_transitions, bool, 0644);
 MODULE_PARM_DESC(debug_transitions, "Log manual CPU DVFS actual clock/rail/EMA evidence");
-#include "m86-cpu-rail-api.h"
 
 static int cluster_index(unsigned int cpu)
 {
@@ -156,7 +155,7 @@ static int verify_ema(struct m86_coord *d, unsigned int index, unsigned int uv)
 }
 
 static int set_voltage_ema(struct m86_coord *d, unsigned int index,
-			   unsigned int uv, unsigned long expected_hz)
+			   unsigned int uv)
 {
 	struct m86_cluster *c = &d->cluster[index];
 	int old_uv = regulator_get_voltage(c->supply), ret;
@@ -172,7 +171,7 @@ static int set_voltage_ema(struct m86_coord *d, unsigned int index,
 		if (ret)
 			return ret;
 	}
-	ret = m86_cpu_rail_set_linear(c->supply, c->clk, uv, index, expected_hz);
+	ret = regulator_set_voltage(c->supply, uv, uv);
 	if (ret)
 		return ret;
 	if (regulator_get_voltage(c->supply) != uv)
@@ -447,7 +446,7 @@ static int m86_target_local(struct cpufreq_policy *policy, unsigned int index)
 		if (ret)
 			goto fault;
 		phase = "linear down voltage/EMA";
-		ret = set_voltage_ema(d, ci, c->opp[index].uv, target * 1000UL);
+		ret = set_voltage_ema(d, ci, c->opp[index].uv);
 		if (ret)
 			goto fault;
 		mutex_lock(&d->bus_lock);
@@ -493,7 +492,7 @@ static int m86_target_local(struct cpufreq_policy *policy, unsigned int index)
 
 		/* Raise rail/readback and EMA at old OPP before clock increase. */
 		phase = "linear up voltage/EMA";
-		ret = set_voltage_ema(d, ci, c->opp[index].uv, old_hz);
+		ret = set_voltage_ema(d, ci, c->opp[index].uv);
 		if (ret)
 			goto fault;
 		phase = "linear up clock";

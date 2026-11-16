@@ -1,4 +1,3 @@
-#include "m86-cpu-rail-api.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Candidate only. Included by s2mps11.c after struct s2mps11_info definition.
  * Source: PRO5 vendor drivers/regulator/s2mps15.c:360-396,507-560.
@@ -10,27 +9,14 @@ struct m86_cpu_rail_state {
 	bool sync;
 };
 
-/* Coordinator handshake: only CPU-specific provider contexts are accepted. */
 struct m86_cpu_rail_context {
 	struct s2mps11_info *info;
 	unsigned int index;
-	bool linear, bit0_observed;
-	unsigned long linear_hz;
+	bool bit0_observed;
 	int cached_selector;
 	struct m86_cpu_rail_state state;
 	bool state_valid;
 };
-static DEFINE_MUTEX(m86_context_lock);
-static struct m86_cpu_rail_context *m86_active_context[2];
-
-static void m86_clear_context(void *data)
-{
-	struct m86_cpu_rail_context *ctx = data;
-	mutex_lock(&m86_context_lock);
-	if (m86_active_context[ctx->index] == ctx)
-		m86_active_context[ctx->index] = NULL;
-	mutex_unlock(&m86_context_lock);
-}
 
 static int m86_cpu_read_register(struct regulator_dev *rdev,
 				 unsigned int reg, unsigned int *value)
@@ -193,24 +179,6 @@ static int m86_cpu_set_selector(struct regulator_dev *rdev, unsigned int sel)
 		goto unlock;
 	}
 	old_uv = 300000 + ctx->cached_selector * 6250;
-	if (ctx->linear && ctx->state.sync != (new_uv + ctx->state.delta_uv <= 1175000)) {
-		ret = -EOPNOTSUPP; /* No writes: linear API never invokes sync bridge. */
-		goto unlock;
-	}
-	/* Only a synchronous coordinator wrapper may change voltage. The token
-	 * is tied to this rail context, caller task, exact voltage and clock.
-	 */
-	if (!info->m86_cpu_authorized ||
-	    info->m86_cpu_authorized_context != ctx ||
-	    info->m86_cpu_authorized_task != current ||
-	    info->m86_cpu_authorized_uv != new_uv ||
-	    clk_get_rate(info->m86_cpu_authorized_clock) !=
-		(ctx->linear ? ctx->linear_hz :
-		 (ctx->index ? 400000000UL : 800000000UL))) {
-		ret = -EPERM;
-		goto unlock;
-	}
-	info->m86_cpu_authorized = false; /* consume once, before first write */
 	wanted_sync = new_uv + ctx->state.delta_uv <= 1175000;
 	if (wanted_sync != ctx->state.sync) {
 		/* Vendor crossing sequence: temporarily 1.075V, settle, change
@@ -254,92 +222,6 @@ unlock:
 	mutex_unlock(&info->m86_cpu_lock);
 	return ret;
 }
-
-/* Fixed staging rates are part of the measured bin15 coordination contract.
- * Coordinator must own clock exclusivity and verify vendor EMA beforehand.
- */
-static int m86_cpu_rail_set_internal(struct regulator *rail, struct clk *cpu_clock,
-			       unsigned int uv, unsigned int cluster_index,
-			       bool linear, unsigned long expected_hz)
-{
-	struct m86_cpu_rail_context *ctx;
-	struct s2mps11_info *info;
-	unsigned long stage;
-	const char *name;
-	int ret;
-
-	if (!rail || !cpu_clock || cluster_index > 1)
-		return -EINVAL;
-	mutex_lock(&m86_context_lock);
-	ctx = m86_active_context[cluster_index];
-	if (!ctx || regulator_get_drvdata(rail) != ctx) {
-		ret = -ENODEV;
-		goto out;
-	}
-	name = __clk_get_name(cpu_clock);
-	stage = linear ? expected_hz :
-		(cluster_index ? 400000000UL : 800000000UL);
-	if (linear && (stage < (cluster_index ? 400000000UL : 800000000UL) ||
-		       stage > (cluster_index ? 1500000000UL : 2100000000UL))) {
-		ret = -EINVAL;
-		goto out;
-	}
-	if (strcmp(name, cluster_index ? "m86_apollo_cpu" : "m86_atlas_cpu") ||
-	    clk_get_rate(cpu_clock) != stage) {
-		ret = -EPERM;
-		goto out;
-	}
-	usleep_range(2, 5);
-	if (clk_get_rate(cpu_clock) != stage) {
-		ret = -EPERM;
-		goto out;
-	}
-	info = ctx->info;
-	mutex_lock(&info->m86_cpu_lock);
-	if (info->m86_cpu_faulted || info->m86_cpu_authorized) {
-		ret = -EIO;
-		mutex_unlock(&info->m86_cpu_lock);
-		goto out;
-	}
-	ctx->linear = linear;
-	ctx->linear_hz = stage;
-	info->m86_cpu_authorized_context = ctx;
-	info->m86_cpu_authorized_task = current;
-	info->m86_cpu_authorized_clock = cpu_clock;
-	info->m86_cpu_authorized_uv = uv;
-	info->m86_cpu_authorized = true;
-	mutex_unlock(&info->m86_cpu_lock);
-	ret = regulator_set_voltage(rail, uv, uv);
-	mutex_lock(&info->m86_cpu_lock);
-	info->m86_cpu_authorized = false;
-	ctx->linear = false;
-	ctx->linear_hz = 0;
-	info->m86_cpu_authorized_task = NULL;
-	info->m86_cpu_authorized_context = NULL;
-	info->m86_cpu_authorized_clock = NULL;
-	mutex_unlock(&info->m86_cpu_lock);
-out:
-	mutex_unlock(&m86_context_lock);
-	return ret;
-}
-int m86_cpu_rail_set_coordinated(struct regulator *rail, struct clk *cpu_clock,
-			       unsigned int uv, unsigned int index)
-{
-	return m86_cpu_rail_set_internal(rail, cpu_clock, uv, index, false, 0);
-}
-EXPORT_SYMBOL_GPL(m86_cpu_rail_set_coordinated);
-
-/* Caller exclusively owns clock and has verified actual known OPP+EMA.
- * Rising rail: expected_hz is old OPP; falling rail: target OPP is already set.
- * No sync-bit change or hidden1.075V intermediate is permitted by this API.
- */
-int m86_cpu_rail_set_linear(struct regulator *rail, struct clk *cpu_clock,
-			  unsigned int uv, unsigned int index,
-			  unsigned long expected_hz)
-{
-	return m86_cpu_rail_set_internal(rail, cpu_clock, uv, index, true, expected_hz);
-}
-EXPORT_SYMBOL_GPL(m86_cpu_rail_set_linear);
 
 static const struct regulator_ops m86_cpu_buck_active_ops = {
 	.list_voltage = regulator_list_voltage_linear_range,
