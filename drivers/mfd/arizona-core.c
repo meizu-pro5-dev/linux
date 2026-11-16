@@ -559,6 +559,9 @@ static int arizona_runtime_resume(struct device *dev)
 		arizona_disable_reset(arizona);
 		enable_irq(arizona->irq);
 		arizona->has_fully_powered_off = false;
+	} else if (arizona->type == WM8998) {
+		/* Match post-reset settle time after internal LDO1 re-enable */
+		usleep_range(5000, 10000);
 	}
 
 	regcache_cache_only(arizona->regmap, false);
