@@ -173,10 +173,19 @@ static int __init exynos7420_coupler_init(void)
 	static const int vthr_table[4] = {
 		750000, 800000, 700000, 850000
 	};
+	struct device_node *np;
+	bool enable_coupler = false;
 	struct arm_smccc_res res = { 0 };
 	unsigned int vthr_idx = 0, delta_idx = 0;
 
-	if (!of_machine_is_compatible("meizu,m86"))
+	for_each_compatible_node(np, NULL, "samsung,s2mps15-pmic") {
+		if (of_property_read_bool(np, "meizu,int-ldo8-coupler")) {
+			enable_coupler = true;
+			of_node_put(np);
+			break;
+		}
+	}
+	if (!enable_coupler)
 		return 0;
 
 	arm_smccc_smc((u32)-101, (3U << 30) | (0x101e0198U >> 2),

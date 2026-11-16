@@ -415,8 +415,6 @@ static int m86_probe(struct platform_device *pdev)
 	int ret;
 	u32 ceiling;
 
-	if (!of_machine_is_compatible("meizu,m86"))
-		return -ENODEV;
 	c = devm_kzalloc(&pdev->dev, sizeof(*c), GFP_KERNEL);
 	if (!c)
 		return -ENOMEM;

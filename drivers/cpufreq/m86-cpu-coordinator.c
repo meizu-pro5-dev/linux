@@ -923,9 +923,11 @@ static int m86_probe(struct platform_device *pdev)
 	u32 bus_floor, ceilings[2];
 	int temp, ret;
 
-	if (coordinator || !of_machine_is_compatible("meizu,m86") ||
+	if (coordinator ||
 	    !of_property_read_bool(pdev->dev.of_node, "meizu,cpu-dvfs-active"))
-		return dev_err_probe(&pdev->dev, -ENODEV, "bootstrap singleton/machine/activation at source line %u\n", __LINE__);
+		return dev_err_probe(&pdev->dev, -ENODEV,
+				     "bootstrap singleton/activation at source line %u\n",
+				     __LINE__);
 	if (!IS_ENABLED(CONFIG_CPU_FREQ) || !IS_ENABLED(CONFIG_CPU_FREQ_THERMAL) ||
 	    !IS_ENABLED(CONFIG_ENERGY_MODEL))
 		return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "bootstrap CPU_FREQ/CPU_FREQ_THERMAL config at source line %u\n", __LINE__);

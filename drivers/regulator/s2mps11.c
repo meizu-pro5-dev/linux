@@ -1370,6 +1370,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 	struct of_regulator_match *rdata = NULL;
 	struct regulator_config config = { };
 	struct s2mps11_info *s2mps11;
+	bool skip_undescribed;
 	unsigned int rdev_num = 0;
 	int i, ret = 0;
 	const struct regulator_desc *regulators;
@@ -1444,22 +1445,28 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, s2mps11);
 
+	skip_undescribed = iodev->device_type == S2MPS15X &&
+			   pdev->dev.parent->of_node &&
+			   of_property_read_bool(pdev->dev.parent->of_node,
+						 "meizu,skip-undescribed-rails");
+
 	config.dev = &pdev->dev;
 	config.regmap = iodev->regmap_pmic;
 	config.driver_data = s2mps11;
 	for (i = 0; i < rdev_num; i++) {
 		struct regulator_dev *regulator;
 		const struct regulator_desc *desc = &regulators[i];
+		struct device_node *rail_np = rdata[i].of_node;
+
 		config.driver_data = s2mps11;
 
-		/* M86 bring-up must leave undescribed firmware-owned rails alone. */
-		if (iodev->device_type == S2MPS15X &&
-		    of_machine_is_compatible("meizu,m86") && !rdata[i].of_node)
+		/* Leave undescribed firmware-owned rails alone when opted in. */
+		if (skip_undescribed && !rail_np)
 			continue;
 
-		if (iodev->device_type == S2MPS15X &&
-		    of_machine_is_compatible("meizu,m86") &&
-		    (i == S2MPS15_BUCK1 || i == S2MPS15_BUCK4)) {
+		if (iodev->device_type == S2MPS15X && rail_np &&
+		    (i == S2MPS15_BUCK1 || i == S2MPS15_BUCK4) &&
+		    of_property_read_bool(rail_np, "meizu,cached-voltage-rail")) {
 			struct regulator_desc *buck_desc;
 
 			buck_desc = devm_kmemdup(&pdev->dev, desc,
@@ -1471,9 +1478,10 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 			}
 			buck_desc->ops = &s2mps15_m86_buck14_ops;
 			desc = buck_desc;
-		} else if (iodev->device_type == S2MPS15X &&
-			   of_machine_is_compatible("meizu,m86") &&
-			   i == S2MPS15_LDO8) {
+		} else if (iodev->device_type == S2MPS15X && rail_np &&
+			   i == S2MPS15_LDO8 &&
+			   of_property_read_bool(rail_np,
+						 "meizu,cached-voltage-rail")) {
 			struct regulator_desc *ldo_desc;
 
 			ldo_desc = devm_kmemdup(&pdev->dev, desc,
@@ -1513,10 +1521,9 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 			desc = ldo_desc;
 		}
 
-		if (iodev->device_type == S2MPS15X &&
-		    of_machine_is_compatible("meizu,m86") &&
-		    (of_property_read_bool(rdata[i].of_node, "meizu,cpu-read-only") ||
-		     of_property_read_bool(rdata[i].of_node, "meizu,cpu-dvfs-active"))) {
+		if (iodev->device_type == S2MPS15X && rail_np &&
+		    (of_property_read_bool(rail_np, "meizu,cpu-read-only") ||
+		     of_property_read_bool(rail_np, "meizu,cpu-dvfs-active"))) {
 			struct regulator_desc *cpu_desc;
 			struct linear_range *range;
 			u32 base, revision;

@@ -28,9 +28,6 @@ static int m86_tsu6721_probe(struct i2c_client *client)
 	unsigned int id;
 	int ret;
 
-	if (!of_machine_is_compatible("meizu,m86"))
-		return -ENODEV;
-
 	map = devm_regmap_init_i2c(client, &tsu_regmap_config);
 	if (IS_ERR(map))
 		return PTR_ERR(map);

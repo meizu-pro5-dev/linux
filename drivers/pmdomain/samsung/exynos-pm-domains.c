@@ -1111,7 +1111,7 @@ static int __init exynos7420_init_aud_lpass(void)
 	void __iomem *pmu_base, *lpass_base, *ccore_base, *rtc_base;
 	u32 sw_reset, intr_mask, aud_status;
 
-	if (!of_machine_is_compatible("meizu,m86") &&
+	if (!of_machine_is_compatible("samsung,exynos7420") &&
 	    !of_machine_is_compatible("samsung,exynos7"))
 		return 0;
 

@@ -1918,7 +1918,6 @@ static int bq25890_probe(struct i2c_client *client)
 	bq->m86_secondary = device_property_read_bool(dev, "meizu,secondary-charger");
 	bq->force_hiz = bq->m86_secondary;
 	if (bq->m86) {
-		if (!of_machine_is_compatible("meizu,m86")) return -ENODEV;
 		bq->m86_ce = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
 		if (IS_ERR(bq->m86_ce)) return PTR_ERR(bq->m86_ce);
 		if (!bq->m86_secondary) {

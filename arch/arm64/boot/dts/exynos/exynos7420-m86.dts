@@ -1070,6 +1070,8 @@
 	m86_pmic: pmic@66 {
 		compatible = "samsung,s2mps15-pmic";
 		reg = <0x66>;
+		meizu,skip-undescribed-rails;
+		meizu,int-ldo8-coupler;
 		/* No PMIC IRQ: no RTC alarm or wakeup from the PMIC. */
 		regulators {
 			/* Dynamic MIF, CPU, and INT rails: BUCK1, BUCK2, BUCK3, BUCK4 */
@@ -1078,6 +1080,7 @@
 				regulator-min-microvolt = <500000>;
 				regulator-max-microvolt = <1100000>;
 				regulator-always-on;
+				meizu,cached-voltage-rail;
 			};
 			m86_buck2_cpu: BUCK2 {
 				regulator-name = "vdd_atlas";
@@ -1098,6 +1101,7 @@
 				regulator-min-microvolt = <500000>;
 				regulator-max-microvolt = <1000000>;
 				regulator-always-on;
+				meizu,cached-voltage-rail;
 				regulator-coupled-with = <&m86_ldo8_int_m &m86_buck5_disp>;
 				regulator-coupled-max-spread = <400000 500000>;
 			};
@@ -1116,6 +1120,7 @@
 				regulator-max-microvolt = <1100000>;
 				regulator-boot-on;
 				regulator-always-on;
+				meizu,cached-voltage-rail;
 				regulator-coupled-with = <&m86_buck4_int &m86_buck5_disp>;
 				regulator-coupled-max-spread = <400000 400000>;
 			};
