@@ -48,10 +48,12 @@ struct gpu_dvfs {
  struct device *dev, *pmic;
  struct device_node *gpu_node;
  struct clk_hw hw;
- struct clk *clock, *top_g3d_clk;
+ struct clk *clock, *top_g3d_clk, *mif_clk;
+ struct clk *int_bus0_clk, *int_bus1_clk, *int_bus1_low_clk;
+ struct clk *int_pclk_clk, *int_pclk_mux_clk, *int_imem_clk, *int_imem_low_clk;
  struct regmap *pmu, *sysreg;
  struct thermal_zone_device *zone;
- void __iomem *cmu, *dvs, *gpio, *topc;
+ void __iomem *cmu, *dvs, *gpio;
  struct mutex transaction, hardware;
  unsigned long cap, current_rate;
  u32 mcs[4];
@@ -833,15 +835,28 @@ unlock:
 EXPORT_SYMBOL_GPL(m86_gpu_domain_suspend);
 static int bus_floor(struct gpu_dvfs *d,u32 floor)
 {
- u32 con,sel,con2,sel2,p,m,s;
+ u64 mif_hz;
  exynos7420_bus_dvfs_read_lock();
- con=readl(d->topc+0x150);sel=readl(d->topc+0x214);
- con2=readl(d->topc+0x150);sel2=readl(d->topc+0x214);
+ mif_hz=clk_get_rate(d->mif_clk);
  exynos7420_bus_dvfs_read_unlock();
- p=(con>>8)&63;m=(con>>16)&1023;s=con&7;
- if(!p || !m || (con&(BIT(31)|BIT(29)))!=(BIT(31)|BIT(29)) ||
-    !(sel&BIT(16)) || !(sel&BIT(20)) || con!=con2 || sel!=sel2)return -EIO;
- return div_u64(24000000ULL*m,(p<<s)*2000)>=floor ? 0 : -ERANGE;
+ if(!mif_hz)return -EIO;
+ return div_u64(mif_hz,1000)>=floor ? 0 : -ERANGE;
+}
+static int read_int_rates(struct gpu_dvfs *d,struct pro5_int_always_on_rates *r)
+{
+ exynos7420_bus_dvfs_read_lock();
+ r->bus0=clk_get_rate(d->int_bus0_clk);
+ r->bus1=clk_get_rate(d->int_bus1_clk);
+ r->bus1_low=clk_get_rate(d->int_bus1_low_clk);
+ r->pclk=clk_get_rate(d->int_pclk_clk);
+ r->pclk_parent_hz=clk_get_rate(d->int_pclk_mux_clk);
+ r->imem=clk_get_rate(d->int_imem_clk);
+ r->imem_low=clk_get_rate(d->int_imem_low_clk);
+ exynos7420_bus_dvfs_read_unlock();
+ if(!r->bus0 || !r->bus1 || !r->bus1_low || !r->pclk ||
+    !r->pclk_parent_hz || !r->imem || !r->imem_low)
+  return -EIO;
+ return 0;
 }
 /* The vote normally lands within a MIF switch; under a QoS writer it cannot
  * run until target returns, so give up after 5 ms and defer to the next poll. */
@@ -919,9 +934,7 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   {
    struct pro5_int_always_on_rates int_rates;
    stage="INT-read";
-   exynos7420_bus_dvfs_read_lock();
-   ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);
-   exynos7420_bus_dvfs_read_unlock();
+   ret=read_int_rates(d,&int_rates);
    if(ret)goto fault;
    stage="INT-floor";
    ret=pro5_topc_int_always_on_floor(&int_rates,r->int_qos);
@@ -1137,13 +1150,32 @@ static int gpu_probe(struct platform_device *pdev)
   d->top_g3d_enabled=true;
   ret=devm_add_action_or_reset(&pdev->dev,put_top_g3d_clk,d);if(ret)return ret;
  }
+ {
+  struct {
+   const char *name;
+   struct clk **slot;
+  } clks[] = {
+   { "mif", &d->mif_clk },
+   { "int_bus0", &d->int_bus0_clk },
+   { "int_bus1", &d->int_bus1_clk },
+   { "int_bus1_low", &d->int_bus1_low_clk },
+   { "int_pclk", &d->int_pclk_clk },
+   { "int_pclk_mux", &d->int_pclk_mux_clk },
+   { "int_imem", &d->int_imem_clk },
+   { "int_imem_low", &d->int_imem_low_clk },
+  };
+  unsigned int ci;
+  for(ci=0;ci<ARRAY_SIZE(clks);ci++) {
+   *clks[ci].slot=devm_clk_get(&pdev->dev,clks[ci].name);
+   if(IS_ERR(*clks[ci].slot))return PTR_ERR(*clks[ci].slot);
+  }
+ }
  d->pmu=syscon_regmap_lookup_by_compatible("samsung,exynos7-pmu");if(IS_ERR(d->pmu))return PTR_ERR(d->pmu);
  d->sysreg=syscon_regmap_lookup_by_phandle(pdev->dev.of_node,"meizu,sysreg");if(IS_ERR(d->sysreg))return PTR_ERR(d->sysreg);
  d->cmu=devm_ioremap(&pdev->dev,0x14aa0000,0x1000);
  d->dvs=devm_ioremap(&pdev->dev,0x105c6100,8);
  d->gpio=devm_ioremap(&pdev->dev,0x13470000,4);
- d->topc=devm_ioremap(&pdev->dev,0x10570000,0x1000);
- if(!d->cmu||!d->dvs||!d->gpio||!d->topc)return -ENOMEM;
+ if(!d->cmu||!d->dvs||!d->gpio)return -ENOMEM;
  d->pmic=bus_find_device_by_name(&i2c_bus_type,NULL,"5-0066");
  if(!d->pmic)return dev_err_probe(&pdev->dev,-EPROBE_DEFER,"PMIC 5-0066 is not present\n");
  ret=devm_add_action_or_reset(&pdev->dev,put_pmic,d->pmic);if(ret)return ret;
@@ -1174,7 +1206,7 @@ static int gpu_probe(struct platform_device *pdev)
   /* GPU consumes these six always-on INT leaves. Logical INT QoS is not
    * one leaf'sMHz: compare vendor level's minimum vector without INT writes. */
   struct pro5_int_always_on_rates int_rates;
-  ret=pro5_topc_int_read_stable(d->topc,24000000,&int_rates);if(ret)return ret;
+  ret=read_int_rates(d,&int_rates);if(ret)return ret;
   ret=pro5_topc_int_always_on_floor(&int_rates,200000);if(ret)return ret;
   node=of_parse_phandle(pdev->dev.of_node,"meizu,thermal-monitor",0);
   if(!node)return -EINVAL;

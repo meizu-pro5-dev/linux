@@ -13,6 +13,8 @@
 #ifndef __EXYNOS7420_INT_MIF_H
 #define __EXYNOS7420_INT_MIF_H
 
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/devfreq.h>
 #include <linux/io.h>
@@ -33,37 +35,6 @@
 /* Vendor DMC_DQS_MODE2 CMOS_SE_OFFSET (exynos7420_bus.c line 4643) */
 #define EXYNOS7420_CMOS_SE_OFFSET_UV	56250
 #define EXYNOS7420_VOLT_STEP_UV		100000
-
-/*
- * CMU_TOPC (0x10570000) offsets from regs-clock-exynos7420.h:
- * Note: MIF_LOCK is 0x0014, MIF_CON is 0x0150, ENABLE_SCLK_TOPC1 bit 6 is
- * sclk_bus0_pll_mif (clk-exynos7420.c line 2044).
- */
-#define TOPC_MIF_PLL_LOCK		0x0014
-#define TOPC_CC_PLL_CON0		0x0100
-#define TOPC_BUS0_PLL_CON0		0x0110
-#define TOPC_BUS1_PLL_CON0		0x0120
-#define TOPC_MFC_PLL_CON0		0x0130
-#define TOPC_MIF_PLL_CON0		0x0150
-#define TOPC_MUX_SEL0			0x0200
-#define TOPC_MUX_SEL1			0x0204
-#define TOPC_MUX_SEL2			0x0208
-#define TOPC_MUX_SEL3			0x020c
-#define TOPC_MUX_SEL5			0x0214
-#define TOPC_MUX_STAT1			0x0404
-#define TOPC_MUX_STAT2			0x0408
-#define TOPC_MUX_STAT3			0x040c
-#define TOPC_MUX_STAT5			0x0414
-#define TOPC_DIV0			0x0600
-#define TOPC_DIV1			0x0604
-#define TOPC_DIV3			0x060c
-#define TOPC_DIV_STAT0			0x0700
-#define TOPC_DIV_STAT1			0x0704
-#define TOPC_DIV_STAT3			0x070c
-#define TOPC_ENABLE_ACLK0		0x0800
-#define TOPC_ENABLE_ACLK1		0x0804
-#define TOPC_ENABLE_SCLK1		0x0a04
-#define TOPC_PAUSE			0x1008
 
 /* CMU_TOP0 (0x105d0000) offsets */
 #define TOP0_MUX_SEL3			0x020c
@@ -555,10 +526,18 @@ static const u8 exynos7420_mif_to_int_idx[EXYNOS7420_MIF_LV_COUNT] = {
 	[MIF_LV12] = 11, /*  100 MHz -> INT 100 MHz */
 };
 
+struct exynos7420_comp_clk {
+	struct clk *mux;
+	struct clk *div;
+	struct clk *parents[12];
+	unsigned int nr_parents;
+};
+
 struct exynos7420_hw_bus {
 	bool initialized;
+	bool mif_clks_ready;
+	bool int_clks_ready;
 	struct mutex lock;
-	void __iomem *topc;
 	void __iomem *top0;
 	void __iomem *pmu;
 	struct regmap *sysreg;
@@ -566,6 +545,30 @@ struct exynos7420_hw_bus {
 	void __iomem *drex[EXYNOS7420_NUM_MIF_CH];
 	void __iomem *phy[EXYNOS7420_NUM_MIF_CH];
 	void __iomem *vtmon[EXYNOS7420_NUM_MIF_CH];
+	struct clk *fout_mif_pll;
+	struct clk *mout_topc_mif_pll;
+	struct clk *mout_sclk_bus0_pll_mif;
+	struct clk *dout_sclk_bus0_pll_mif;
+	struct clk *sclk_bus0_pll_mif;
+	struct clk *mout_aclk_mif_pll;
+	struct clk *aclk_mif_logical;
+	struct clk *dout_ccore_133;
+	struct clk *mout_ccore_133;
+	struct clk *aclk_ccore_133;
+	struct exynos7420_comp_clk comp_ccore_532;
+	struct exynos7420_comp_clk comp_bus0_532;
+	struct exynos7420_comp_clk comp_bus1_532;
+	struct exynos7420_comp_clk comp_bus1_200;
+	struct exynos7420_comp_clk comp_imem_266;
+	struct exynos7420_comp_clk comp_imem_200;
+	struct clk *mout_pclk_133;
+	struct clk *dout_pclk_133;
+	struct clk *aclk_bus0_532;
+	struct clk *aclk_bus1_532;
+	struct clk *aclk_bus1_200;
+	struct clk *pclk_bus0_133;
+	struct clk *aclk_imem_266;
+	struct clk *aclk_imem_200;
 	u32 g_phy_cg_en;
 	u32 per_mrs_en;
 	u32 int_ema_reg;
@@ -664,10 +667,9 @@ static int exynos7420_hw_bus_init_once(struct device *dev)
 		dev_warn(dev, "MIF/INT ASV CAL read failed (%d), keeping default v15/group8 table\n", ret);
 	}
 
-	exynos7420_hw.topc = ioremap(0x10570000, SZ_64K);
 	exynos7420_hw.top0 = ioremap(0x105d0000, SZ_64K);
 	exynos7420_hw.pmu = ioremap(0x105c0000, 0x5000);
-	if (!exynos7420_hw.topc || !exynos7420_hw.top0 || !exynos7420_hw.pmu)
+	if (!exynos7420_hw.top0 || !exynos7420_hw.pmu)
 		return -ENOMEM;
 
 	exynos7420_hw.sysreg = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,sysreg");
@@ -714,22 +716,165 @@ static int exynos7420_find_int_idx(unsigned long freq_hz)
 	return -EINVAL;
 }
 
-static int exynos7420_switch_div_only(void __iomem *div_reg, u8 div_shift,
-				      u8 div_width, void __iomem *div_stat_reg,
-				      u8 div_stat_bit, u8 new_div)
+static void exynos7420_clk_put_action(void *data)
 {
-	u32 mask = ((1U << div_width) - 1U) << div_shift;
-	u32 val, old_div;
+	clk_put(data);
+}
 
-	val = readl(div_reg);
-	old_div = (val & mask) >> div_shift;
+static struct clk *exynos7420_devm_clk_from_hw(struct device *dev,
+					       struct clk_hw *hw)
+{
+	struct clk *clk;
+	int ret;
+
+	if (!hw)
+		return ERR_PTR(-ENODEV);
+	clk = clk_hw_get_clk(hw, NULL);
+	if (IS_ERR(clk))
+		return clk;
+	ret = devm_add_action_or_reset(dev, exynos7420_clk_put_action, clk);
+	return ret ? ERR_PTR(ret) : clk;
+}
+
+static int exynos7420_init_comp_clk(struct device *dev,
+				    struct exynos7420_comp_clk *c,
+				    const char *mux_name, const char *div_name)
+{
+	struct clk_hw *mux_hw;
+	unsigned int i;
+
+	c->mux = devm_clk_get(dev, mux_name);
+	if (IS_ERR(c->mux))
+		return PTR_ERR(c->mux);
+	c->div = devm_clk_get(dev, div_name);
+	if (IS_ERR(c->div))
+		return PTR_ERR(c->div);
+
+	mux_hw = __clk_get_hw(c->mux);
+	c->nr_parents = clk_hw_get_num_parents(mux_hw);
+	if (!c->nr_parents || c->nr_parents > ARRAY_SIZE(c->parents))
+		return -EINVAL;
+
+	for (i = 0; i < c->nr_parents; i++) {
+		struct clk_hw *p = clk_hw_get_parent_by_index(mux_hw, i);
+
+		if (!p)
+			return -EINVAL;
+		c->parents[i] = exynos7420_devm_clk_from_hw(dev, p);
+		if (IS_ERR(c->parents[i]))
+			return PTR_ERR(c->parents[i]);
+	}
+	return 0;
+}
+
+static int exynos7420_mif_parse_clocks(struct device *dev)
+{
+	struct {
+		const char *name;
+		struct clk **slot;
+	} clks[] = {
+		{ "mif_pll", &exynos7420_hw.fout_mif_pll },
+		{ "mout_topc_mif_pll", &exynos7420_hw.mout_topc_mif_pll },
+		{ "mout_sclk_bus0_pll_mif", &exynos7420_hw.mout_sclk_bus0_pll_mif },
+		{ "dout_sclk_bus0_pll_mif", &exynos7420_hw.dout_sclk_bus0_pll_mif },
+		{ "sclk_bus0_pll_mif", &exynos7420_hw.sclk_bus0_pll_mif },
+		{ "mout_aclk_mif_pll", &exynos7420_hw.mout_aclk_mif_pll },
+		{ "aclk_mif_logical", &exynos7420_hw.aclk_mif_logical },
+		{ "dout_ccore_133", &exynos7420_hw.dout_ccore_133 },
+		{ "aclk_ccore_133", &exynos7420_hw.aclk_ccore_133 },
+	};
+	struct clk_hw *p;
+	unsigned int i;
+	int ret;
+
+	if (exynos7420_hw.mif_clks_ready)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(clks); i++) {
+		*clks[i].slot = devm_clk_get(dev, clks[i].name);
+		if (IS_ERR(*clks[i].slot))
+			return PTR_ERR(*clks[i].slot);
+	}
+
+	p = clk_hw_get_parent(__clk_get_hw(exynos7420_hw.dout_ccore_133));
+	if (!p)
+		return -EINVAL;
+	exynos7420_hw.mout_ccore_133 = exynos7420_devm_clk_from_hw(dev, p);
+	if (IS_ERR(exynos7420_hw.mout_ccore_133))
+		return PTR_ERR(exynos7420_hw.mout_ccore_133);
+
+	ret = exynos7420_init_comp_clk(dev, &exynos7420_hw.comp_ccore_532,
+				       "mout_ccore_532", "dout_ccore_532");
+	if (ret)
+		return ret;
+
+	exynos7420_hw.mif_clks_ready = true;
+	return 0;
+}
+
+static int exynos7420_int_parse_clocks(struct device *dev)
+{
+	struct {
+		struct exynos7420_comp_clk *comp;
+		const char *mux_name;
+		const char *div_name;
+	} comps[] = {
+		{ &exynos7420_hw.comp_bus0_532, "mout_bus0_532", "dout_bus0_532" },
+		{ &exynos7420_hw.comp_bus1_532, "mout_bus1_532", "dout_bus1_532" },
+		{ &exynos7420_hw.comp_bus1_200, "mout_bus1_200", "dout_bus1_200" },
+		{ &exynos7420_hw.comp_imem_266, "mout_imem_266", "dout_imem_266" },
+		{ &exynos7420_hw.comp_imem_200, "mout_imem_200", "dout_imem_200" },
+	};
+	struct {
+		const char *name;
+		struct clk **slot;
+	} clks[] = {
+		{ "mout_pclk_133", &exynos7420_hw.mout_pclk_133 },
+		{ "dout_pclk_133", &exynos7420_hw.dout_pclk_133 },
+		{ "aclk_bus0_532", &exynos7420_hw.aclk_bus0_532 },
+		{ "aclk_bus1_532", &exynos7420_hw.aclk_bus1_532 },
+		{ "aclk_bus1_200", &exynos7420_hw.aclk_bus1_200 },
+		{ "pclk_bus0_133", &exynos7420_hw.pclk_bus0_133 },
+		{ "aclk_imem_266", &exynos7420_hw.aclk_imem_266 },
+		{ "aclk_imem_200", &exynos7420_hw.aclk_imem_200 },
+	};
+	unsigned int i;
+	int ret;
+
+	if (exynos7420_hw.int_clks_ready)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(comps); i++) {
+		ret = exynos7420_init_comp_clk(dev, comps[i].comp,
+					       comps[i].mux_name,
+					       comps[i].div_name);
+		if (ret)
+			return ret;
+	}
+	for (i = 0; i < ARRAY_SIZE(clks); i++) {
+		*clks[i].slot = devm_clk_get(dev, clks[i].name);
+		if (IS_ERR(*clks[i].slot))
+			return PTR_ERR(*clks[i].slot);
+	}
+
+	exynos7420_hw.int_clks_ready = true;
+	return 0;
+}
+
+static int exynos7420_switch_div_only(struct clk *div_clk, struct clk *parent_clk,
+				      u8 new_div)
+{
+	unsigned long parent_hz = clk_get_rate(parent_clk);
+	unsigned long cur_hz = clk_get_rate(div_clk);
+	u32 old_div;
+
+	if (!parent_hz || !cur_hz)
+		return -EIO;
+	old_div = DIV_ROUND_CLOSEST(parent_hz, cur_hz) - 1;
 	if (old_div == new_div)
 		return 0;
 
-	val = (val & ~mask) | ((u32)new_div << div_shift);
-	writel(val, div_reg);
-	return readl_poll_timeout_atomic(div_stat_reg, val,
-					 !(val & BIT(div_stat_bit)), 1, 10000);
+	return clk_set_rate(div_clk, DIV_ROUND_CLOSEST_ULL((u64)parent_hz, new_div + 1));
 }
 
 /*
@@ -737,65 +882,39 @@ static int exynos7420_switch_div_only(void __iomem *div_reg, u8 div_shift,
  * - When increasing divider (new_div > old_div): write DIV first, then MUX.
  * - When decreasing/keeping divider (new_div <= old_div): write MUX first, then DIV.
  */
-static int exynos7420_switch_composite(void __iomem *mux_reg, u8 mux_shift,
-				       u8 mux_width, void __iomem *mux_stat_reg,
-				       u8 mux_stat_shift, u8 mux_stat_width,
-				       u8 new_mux,
-				       void __iomem *div_reg, u8 div_shift,
-				       u8 div_width, void __iomem *div_stat_reg,
-				       u8 div_stat_bit, u8 new_div)
+static int exynos7420_switch_composite(struct exynos7420_comp_clk *c,
+				       u8 new_mux, u8 new_div)
 {
-	u32 mux_mask = ((1U << mux_width) - 1U) << mux_shift;
-	u32 div_mask = ((1U << div_width) - 1U) << div_shift;
-	u32 busy_bit = BIT(mux_stat_shift + mux_stat_width - 1);
-	u32 val, old_mux, old_div;
+	unsigned long mux_hz, div_hz;
+	u32 old_div;
 	int ret;
 
-	old_mux = (readl(mux_reg) & mux_mask) >> mux_shift;
-	old_div = (readl(div_reg) & div_mask) >> div_shift;
+	if (new_mux >= c->nr_parents || !c->parents[new_mux])
+		return -EINVAL;
+	mux_hz = clk_get_rate(c->mux);
+	div_hz = clk_get_rate(c->div);
+	if (!mux_hz || !div_hz)
+		return -EIO;
+	old_div = DIV_ROUND_CLOSEST(mux_hz, div_hz) - 1;
 
 	if (new_div > old_div) {
-		val = (readl(div_reg) & ~div_mask) | ((u32)new_div << div_shift);
-		writel(val, div_reg);
-		ret = readl_poll_timeout_atomic(div_stat_reg, val,
-						!(val & BIT(div_stat_bit)),
-						1, 10000);
+		ret = clk_set_rate(c->div,
+				   DIV_ROUND_CLOSEST_ULL((u64)mux_hz, new_div + 1));
 		if (ret)
 			return ret;
-
-		if (new_mux != old_mux) {
-			val = (readl(mux_reg) & ~mux_mask) |
-			      ((u32)new_mux << mux_shift);
-			writel(val, mux_reg);
-			if (mux_stat_reg) {
-				ret = readl_poll_timeout_atomic(mux_stat_reg, val,
-								!(val & busy_bit),
-								1, 10000);
-				if (ret)
-					return ret;
-			}
-		}
+		ret = clk_set_parent(c->mux, c->parents[new_mux]);
+		if (ret)
+			return ret;
 	} else {
-		if (new_mux != old_mux) {
-			val = (readl(mux_reg) & ~mux_mask) |
-			      ((u32)new_mux << mux_shift);
-			writel(val, mux_reg);
-			if (mux_stat_reg) {
-				ret = readl_poll_timeout_atomic(mux_stat_reg, val,
-								!(val & busy_bit),
-								1, 10000);
-				if (ret)
-					return ret;
-			}
-		}
-
+		ret = clk_set_parent(c->mux, c->parents[new_mux]);
+		if (ret)
+			return ret;
 		if (new_div != old_div) {
-			val = (readl(div_reg) & ~div_mask) |
-			      ((u32)new_div << div_shift);
-			writel(val, div_reg);
-			ret = readl_poll_timeout_atomic(div_stat_reg, val,
-							!(val & BIT(div_stat_bit)),
-							1, 10000);
+			mux_hz = clk_get_rate(c->mux);
+			if (!mux_hz)
+				return -EIO;
+			ret = clk_set_rate(c->div,
+					   DIV_ROUND_CLOSEST_ULL((u64)mux_hz, new_div + 1));
 			if (ret)
 				return ret;
 		}
@@ -807,62 +926,40 @@ static int exynos7420_switch_composite(void __iomem *mux_reg, u8 mux_shift,
 static int exynos7420_int_set_clocks(int target_idx)
 {
 	const struct exynos7420_int_level *lv = &exynos7420_int_table[target_idx];
-	void __iomem *topc = exynos7420_hw.topc;
 	int ret;
 
+	if (!exynos7420_hw.int_clks_ready)
+		return -ENODEV;
+
 	/* Always-on CMU_TOPC INT clocks */
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 8, 4,
-					  topc + TOPC_MUX_STAT2, 8, 4,
-					  lv->bus0_532_mux,
-					  topc + TOPC_DIV0, 8, 4,
-					  topc + TOPC_DIV_STAT0, 8,
-					  lv->bus0_532_div);
+	ret = exynos7420_switch_composite(&exynos7420_hw.comp_bus0_532,
+					  lv->bus0_532_mux, lv->bus0_532_div);
 	if (ret)
 		return ret;
 
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 12, 4,
-					  topc + TOPC_MUX_STAT2, 12, 4,
-					  lv->bus1_532_mux,
-					  topc + TOPC_DIV0, 12, 4,
-					  topc + TOPC_DIV_STAT0, 12,
-					  lv->bus1_532_div);
+	ret = exynos7420_switch_composite(&exynos7420_hw.comp_bus1_532,
+					  lv->bus1_532_mux, lv->bus1_532_div);
 	if (ret)
 		return ret;
 
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 16, 4,
-					  topc + TOPC_MUX_STAT2, 16, 4,
-					  lv->bus1_200_mux,
-					  topc + TOPC_DIV0, 16, 4,
-					  topc + TOPC_DIV_STAT0, 16,
-					  lv->bus1_200_div);
+	ret = exynos7420_switch_composite(&exynos7420_hw.comp_bus1_200,
+					  lv->bus1_200_mux, lv->bus1_200_div);
 	if (ret)
 		return ret;
 
-	ret = exynos7420_switch_div_only(topc + TOPC_DIV1, 28, 4,
-					 topc + TOPC_DIV_STAT1, 28,
+	ret = exynos7420_switch_div_only(exynos7420_hw.dout_pclk_133,
+					 exynos7420_hw.mout_pclk_133,
 					 lv->pclk_133_div);
 	if (ret)
 		return ret;
 
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 20, 2,
-					  topc + TOPC_MUX_STAT2, 20, 4,
-					  lv->imem_266_mux,
-					  topc + TOPC_DIV0, 20, 4,
-					  topc + TOPC_DIV_STAT0, 20,
-					  lv->imem_266_div);
+	ret = exynos7420_switch_composite(&exynos7420_hw.comp_imem_266,
+					  lv->imem_266_mux, lv->imem_266_div);
 	if (ret)
 		return ret;
 
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 24, 2,
-					  topc + TOPC_MUX_STAT2, 24, 4,
-					  lv->imem_200_mux,
-					  topc + TOPC_DIV0, 24, 4,
-					  topc + TOPC_DIV_STAT0, 24,
-					  lv->imem_200_div);
-	if (ret)
-		return ret;
-
-	return 0;
+	return exynos7420_switch_composite(&exynos7420_hw.comp_imem_200,
+					   lv->imem_200_mux, lv->imem_200_div);
 }
 
 static int exynos7420_mif_target_locked(struct exynos_bus *bus,
@@ -1044,18 +1141,11 @@ static int exynos7420_mif_restore_vt_mon(void)
 	return 0;
 }
 
-/* exynos7_devfreq_waiting_pause (exynos7420_bus.c lines 4106-4132) */
-static int exynos7420_mif_waiting_pause(void)
+/* Wait for CMU_MIF[0..3] pause completion (TOPC_PAUSE is waited by clk-exynos7). */
+static int exynos7420_mif_waiting_cmu_pause(void)
 {
 	u32 val;
 	int ret, i;
-
-	ret = readl_poll_timeout_atomic(exynos7420_hw.topc + TOPC_PAUSE, val,
-					!(val & (0x07U << 16)), 1, 10000);
-	if (ret) {
-		pr_err("DEVFREQ(MIF): timeout waiting TOPC pause\n");
-		return ret;
-	}
 
 	for (i = 0; i < EXYNOS7420_NUM_MIF_CH; i++) {
 		ret = readl_poll_timeout_atomic(exynos7420_hw.cmu_mif[i] + MIF_PAUSE, val,
@@ -1081,22 +1171,6 @@ static int exynos7420_mif_check_mux_ctrl_by_cmuc(void)
 			pr_err("DEVFREQ(MIF): timeout waiting mif_mux_ctrl_by_cmuc ch%d\n", i);
 			return ret;
 		}
-	}
-	return 0;
-}
-
-/* exynos7_devfreq_waiting_mux (exynos7420_bus.c lines 4155-4168) */
-static int exynos7420_mif_waiting_mux(void)
-{
-	u32 val;
-	int ret;
-
-	/* check whether ACLK_MIF_PLL_CLK_STAT0/1/2/3 is 0 */
-	ret = readl_poll_timeout_atomic(exynos7420_hw.topc + TOPC_MUX_STAT5, val,
-					!(val & (0x0fU << 24)), 1, 10000);
-	if (ret) {
-		pr_err("DEVFREQ(MIF): timeout waiting mux completion\n");
-		return ret;
 	}
 	return 0;
 }
@@ -1131,81 +1205,37 @@ static int exynos7420_set_clkdiv_sclk_hpm(int target_idx)
 static int exynos7420_ccore_set_freq(int target_idx)
 {
 	const struct exynos7420_mif_opp_info *opp = &exynos7420_mif_opp_table[target_idx];
-	void __iomem *topc = exynos7420_hw.topc;
 	int ret;
 
-	ret = exynos7420_switch_composite(topc + TOPC_MUX_SEL2, 0, 4,
-					  NULL, 0, 0,
+	ret = exynos7420_switch_composite(&exynos7420_hw.comp_ccore_532,
 					  opp->ccore_532_mux,
-					  topc + TOPC_DIV0, 0, 4,
-					  topc + TOPC_DIV_STAT0, 0,
 					  opp->ccore_532_div);
 	if (ret)
 		return ret;
 
-	return exynos7420_switch_div_only(topc + TOPC_DIV0, 4, 4,
-					  topc + TOPC_DIV_STAT0, 4,
+	return exynos7420_switch_div_only(exynos7420_hw.dout_ccore_133,
+					  exynos7420_hw.mout_ccore_133,
 					  opp->ccore_133_div);
 }
 
 /*
- * DOUT_SCLK_BUS0_PLL_MIF divider in TOPC_DIV3[6:4] (clk-exynos7420.c line 1356):
- * - 1600 MHz -> div = 0 (MIF switching clock = 1600/2 = 800 MHz, MIF_LV4)
- * -  800 MHz -> div = 1 (MIF switching clock =  800/2 = 400 MHz, MIF_LV7)
+ * DOUT_SCLK_BUS0_PLL_MIF divider via CCF:
+ * - div_val = 0 -> MIF switching clock = 1600/2 = 800 MHz (MIF_LV4)
+ * - div_val = 1 -> MIF switching clock =  800/2 = 400 MHz (MIF_LV7)
  */
 static int exynos7420_set_dout_sclk_bus0_pll_mif(u32 div_val)
 {
-	void __iomem *topc = exynos7420_hw.topc;
-	u32 tmp, val;
-
-	tmp = __raw_readl(topc + TOPC_DIV3);
-	if (((tmp >> 4) & 0x7U) == div_val)
-		return 0;
-	tmp = (tmp & ~(0x7U << 4)) | ((div_val & 0x7U) << 4);
-	__raw_writel(tmp, topc + TOPC_DIV3);
-	return readl_poll_timeout_atomic(topc + TOPC_DIV_STAT3, val,
-					 !(val & BIT(4)), 1, 10000);
+	return exynos7420_switch_div_only(exynos7420_hw.dout_sclk_bus0_pll_mif,
+					  exynos7420_hw.mout_sclk_bus0_pll_mif,
+					  div_val);
 }
 
-/*
- * samsung_pll145xx_set_rate for MIF_PLL (composite.c lines 316-365):
- * - If M and P are unchanged and only S changes: write S directly without
- *   clearing bit 31 (avoids PLL unlock when only post-scaler S changes).
- * - If M or P changes: write pdiv * 150 to TOPC_MIF_PLL_LOCK (0x0014),
- *   clear bit 31 with new M/P/S, set bit 31, and wait for bit 29 (LOCKED).
- */
 static int exynos7420_mif_pll_set_rate(int target_idx)
 {
 	const struct exynos7420_mif_opp_info *opp = &exynos7420_mif_opp_table[target_idx];
-	void __iomem *topc = exynos7420_hw.topc;
-	u32 pll_con, cur_m, cur_p, cur_s, val;
 
-	pll_con = __raw_readl(topc + TOPC_MIF_PLL_CON0);
-	cur_m = (pll_con >> 16) & 0x3ffU;
-	cur_p = (pll_con >> 8) & 0x3fU;
-	cur_s = (pll_con >> 0) & 0x7U;
-
-	if (cur_m == opp->mdiv && cur_p == opp->pdiv) {
-		if (cur_s == opp->sdiv)
-			return 0;
-		pll_con &= ~0x7U;
-		pll_con |= (opp->sdiv & 0x7U);
-		__raw_writel(pll_con, topc + TOPC_MIF_PLL_CON0);
-		return 0;
-	}
-
-	__raw_writel((u32)opp->pdiv * 150U, topc + TOPC_MIF_PLL_LOCK);
-
-	pll_con &= ~((0x3ffU << 16) | (0x3fU << 8) | 0x7U);
-	pll_con |= ((u32)opp->mdiv << 16) | ((u32)opp->pdiv << 8) | (u32)opp->sdiv;
-	pll_con &= ~BIT(31);
-	__raw_writel(pll_con, topc + TOPC_MIF_PLL_CON0);
-
-	pll_con |= BIT(31);
-	__raw_writel(pll_con, topc + TOPC_MIF_PLL_CON0);
-
-	return readl_poll_timeout_atomic(topc + TOPC_MIF_PLL_CON0, val,
-					 (val & BIT(29)), 1, 10000);
+	return clk_set_rate(exynos7420_hw.fout_mif_pll,
+			    (unsigned long)opp->freq_khz * 2000UL);
 }
 
 /*
@@ -1432,7 +1462,6 @@ static int exynos7420_mif_target_locked(struct exynos_bus *bus,
 	int pll_safe_idx;
 	int ret;
 	u32 voltage = 0;
-	u32 tmp;
 	ktime_t t0;
 
 	if (old_idx < 0)
@@ -1563,24 +1592,22 @@ static int exynos7420_mif_target_locked(struct exynos_bus *bus,
 	/* Apply timing set 1 for switching PLL */
 	exynos7420_mif_preset(pll_safe_idx, 1);
 
-	/* clk enable for switching PLL (sclk_bus0_pll_mif = ENABLE_SCLK_TOPC1 bit 6) */
-	tmp = __raw_readl(exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
-	tmp |= BIT(6);
-	__raw_writel(tmp, exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
+	/* clk enable for switching PLL (sclk_bus0_pll_mif) */
+	ret = clk_prepare_enable(exynos7420_hw.sclk_bus0_pll_mif);
+	if (ret)
+		goto err_vt_mon;
 
 	/* sclk_hpm_mif dfs for cl-dvfs */
 	ret = exynos7420_set_clkdiv_sclk_hpm(pll_safe_idx);
 	if (ret)
 		goto err_sclk;
 
-	/* Change to switching PLL (sclk_bus0_pll_mif: MUX_SEL_TOPC5 bit 20 = 0), wait pause & mux */
-	tmp = __raw_readl(exynos7420_hw.topc + TOPC_MUX_SEL5);
-	tmp &= ~BIT(20);
-	__raw_writel(tmp, exynos7420_hw.topc + TOPC_MUX_SEL5);
-	ret = exynos7420_mif_waiting_pause();
+	/* Change to switching PLL (sclk_bus0_pll_mif), wait TOPC & MIF pause */
+	ret = clk_set_parent(exynos7420_hw.mout_aclk_mif_pll,
+			     exynos7420_hw.sclk_bus0_pll_mif);
 	if (ret)
-		goto err_switching_mux;
-	ret = exynos7420_mif_waiting_mux();
+		goto err_sclk;
+	ret = exynos7420_mif_waiting_cmu_pause();
 	if (ret)
 		goto err_switching_mux;
 
@@ -1618,21 +1645,17 @@ static int exynos7420_mif_target_locked(struct exynos_bus *bus,
 	if (ret)
 		goto err_on_switching_pll;
 
-	/* Change to target PLL (mif_pll: MUX_SEL_TOPC5 bit 20 = 1), wait pause & mux */
-	tmp = __raw_readl(exynos7420_hw.topc + TOPC_MUX_SEL5);
-	tmp |= BIT(20);
-	__raw_writel(tmp, exynos7420_hw.topc + TOPC_MUX_SEL5);
-	ret = exynos7420_mif_waiting_pause();
+	/* Change to target PLL (mout_topc_mif_pll), wait TOPC & MIF pause */
+	ret = clk_set_parent(exynos7420_hw.mout_aclk_mif_pll,
+			     exynos7420_hw.mout_topc_mif_pll);
 	if (ret)
 		goto err_target_mux;
-	ret = exynos7420_mif_waiting_mux();
+	ret = exynos7420_mif_waiting_cmu_pause();
 	if (ret)
 		goto err_target_mux;
 
-	/* clk disable for switching PLL (sclk_bus0_pll_mif = ENABLE_SCLK_TOPC1 bit 6) */
-	tmp = __raw_readl(exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
-	tmp &= ~BIT(6);
-	__raw_writel(tmp, exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
+	/* clk disable for switching PLL (sclk_bus0_pll_mif) */
+	clk_disable_unprepare(exynos7420_hw.sclk_bus0_pll_mif);
 
 	/* Change CCORE clock for target */
 	if (pll_safe_idx >= old_idx && pll_safe_idx >= target_idx) {
@@ -1698,9 +1721,7 @@ err_target_mux:
 	return ret;
 
 err_sclk:
-	tmp = __raw_readl(exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
-	tmp &= ~BIT(6);
-	__raw_writel(tmp, exynos7420_hw.topc + TOPC_ENABLE_SCLK1);
+	clk_disable_unprepare(exynos7420_hw.sclk_bus0_pll_mif);
 err_switching_mux:
 	/* If we failed during switching MUX, try to ensure VT_MON is restored */
 err_vt_mon:
@@ -1715,31 +1736,32 @@ static ssize_t hw_status_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
 	ssize_t len = 0;
-	u32 con0, sel5, stat5, div3, sel2, sel3, div0, div1, top0_sel3, top0_div3;
-	u32 p, m, s, pll_khz = 0, logic_khz = 0;
+	u32 top0_sel3, top0_div3;
+	unsigned long pll_khz = 0, logic_khz = 0, ccore532_khz = 0, ccore133_khz = 0;
+	unsigned long bus0_khz = 0, bus1_khz = 0, bus1_low_khz = 0;
+	unsigned long pclk_khz = 0, imem_khz = 0, imem_low_khz = 0;
 	int mif_uv = 0, int_uv = 0, i;
 
 	if (!exynos7420_hw.initialized)
 		return scnprintf(buf, PAGE_SIZE, "uninitialized\n");
 
 	mutex_lock(&exynos7420_hw.lock);
-	con0 = readl(exynos7420_hw.topc + TOPC_MIF_PLL_CON0);
-	sel5 = readl(exynos7420_hw.topc + TOPC_MUX_SEL5);
-	stat5 = readl(exynos7420_hw.topc + TOPC_MUX_STAT5);
-	div3 = readl(exynos7420_hw.topc + TOPC_DIV3);
-	sel2 = readl(exynos7420_hw.topc + TOPC_MUX_SEL2);
-	sel3 = readl(exynos7420_hw.topc + TOPC_MUX_SEL3);
-	div0 = readl(exynos7420_hw.topc + TOPC_DIV0);
-	div1 = readl(exynos7420_hw.topc + TOPC_DIV1);
 	top0_sel3 = readl(exynos7420_hw.top0 + TOP0_MUX_SEL3);
 	top0_div3 = readl(exynos7420_hw.top0 + TOP0_DIV3);
 
-	m = (con0 >> 16) & 0x3ff;
-	p = (con0 >> 8) & 0x3f;
-	s = con0 & 0x7;
-	if (p) {
-		pll_khz = (24000U * m) / (p << s);
-		logic_khz = pll_khz / 2;
+	if (exynos7420_hw.mif_clks_ready) {
+		pll_khz = clk_get_rate(exynos7420_hw.fout_mif_pll) / 1000UL;
+		logic_khz = clk_get_rate(exynos7420_hw.aclk_mif_logical) / 1000UL;
+		ccore532_khz = clk_get_rate(exynos7420_hw.comp_ccore_532.div) / 1000UL;
+		ccore133_khz = clk_get_rate(exynos7420_hw.aclk_ccore_133) / 1000UL;
+	}
+	if (exynos7420_hw.int_clks_ready) {
+		bus0_khz = clk_get_rate(exynos7420_hw.aclk_bus0_532) / 1000UL;
+		bus1_khz = clk_get_rate(exynos7420_hw.aclk_bus1_532) / 1000UL;
+		bus1_low_khz = clk_get_rate(exynos7420_hw.aclk_bus1_200) / 1000UL;
+		pclk_khz = clk_get_rate(exynos7420_hw.pclk_bus0_133) / 1000UL;
+		imem_khz = clk_get_rate(exynos7420_hw.aclk_imem_266) / 1000UL;
+		imem_low_khz = clk_get_rate(exynos7420_hw.aclk_imem_200) / 1000UL;
 	}
 	if (exynos7420_hw.vdd_mif)
 		mif_uv = regulator_get_voltage(exynos7420_hw.vdd_mif);
@@ -1747,12 +1769,12 @@ static ssize_t hw_status_show(struct device *dev,
 		int_uv = regulator_get_voltage(exynos7420_hw.vdd_int);
 
 	len += scnprintf(buf + len, PAGE_SIZE - len,
-			 "MIF: lv=%d freq=%u kHz (MIF_PLL=%u kHz, M=%u P=%u S=%u) volt=%d uV switches=%lu last_us=%lld\n"
-			 "  CMU_TOPC: MIF_PLL_CON0=0x%08x MUX_SEL5=0x%08x MUX_STAT5=0x%08x DIV3=0x%08x\n",
-			 exynos7420_hw.cur_mif_idx, logic_khz, pll_khz, m, p, s,
+			 "MIF: lv=%d freq=%lu kHz (MIF_PLL=%lu kHz) volt=%d uV switches=%lu last_us=%lld\n"
+			 "  CCORE: 532=%lu kHz 133=%lu kHz\n",
+			 exynos7420_hw.cur_mif_idx, logic_khz, pll_khz,
 			 mif_uv, exynos7420_hw.mif_switch_count,
 			 (long long)exynos7420_hw.last_mif_switch_us,
-			 con0, sel5, stat5, div3);
+			 ccore532_khz, ccore133_khz);
 
 	for (i = 0; i < EXYNOS7420_NUM_MIF_CH; i++) {
 		void __iomem *cmu = exynos7420_hw.cmu_mif[i];
@@ -1783,13 +1805,14 @@ static ssize_t hw_status_show(struct device *dev,
 		regmap_read(exynos7420_hw.sysreg, SYSREG_EMA_INT_CON, &ema_int);
 		len += scnprintf(buf + len, PAGE_SIZE - len,
 				 "INT: lv=%d freq=%u kHz volt=%d uV switches=%lu last_us=%lld\n"
-				 "  CMU_TOPC: MUX_SEL2=0x%08x MUX_SEL3=0x%08x DIV0=0x%08x DIV1=0x%08x\n"
+				 "  TOPC CCF: bus0=%lu bus1=%lu bus1_low=%lu pclk=%lu imem=%lu imem_low=%lu kHz\n"
 				 "  CMU_TOP0: MUX_SEL3=0x%08x DIV3=0x%08x EMA_INT=0x%08x\n",
 				 exynos7420_hw.cur_int_idx,
 				 exynos7420_int_table[exynos7420_hw.cur_int_idx].freq_khz,
 				 int_uv, exynos7420_hw.int_switch_count,
 				 (long long)exynos7420_hw.last_int_switch_us,
-				 sel2, sel3, div0, div1, top0_sel3, top0_div3,
+				 bus0_khz, bus1_khz, bus1_low_khz, pclk_khz,
+				 imem_khz, imem_low_khz, top0_sel3, top0_div3,
 				 ema_int);
 	}
 	mutex_unlock(&exynos7420_hw.lock);

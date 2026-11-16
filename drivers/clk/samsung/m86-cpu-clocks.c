@@ -28,7 +28,7 @@ struct m86_rate {
 struct m86_cpuclk {
 	struct clk_hw hw;
 	struct device *dev;
-	void __iomem *base, *topc;
+	void __iomem *base;
 	struct clk *safe, *fin;
 	const struct m86_rate *rates;
 	unsigned int nr_rates, shift;
@@ -52,19 +52,10 @@ static unsigned long pll_rate(u32 con, unsigned long fin)
 	return div_u64((u64)fin * ((con >> 16) & 0x3ff), p << (con & 7));
 }
 
-/* Verify TOPC CPU route against independently decoded BUS0, not a/b gates. */
+/* Query TOPC CPU safe clock rate via CCF instead of direct TOPC MMIO. */
 static unsigned long safe_rate(struct m86_cpuclk *c)
 {
-	u32 sel = (readl(c->topc + 0x204) >> c->shift) & 3;
-	u32 stat = (readl(c->topc + 0x404) >> c->shift) & 0xf;
-	unsigned long rate;
-
-	if (sel > 1 || stat != sel || !(readl(c->topc + 0x200) & 1) ||
-	    (readl(c->topc + 0x400) & 7) != 1)
-		return 0;
-	rate = pll_rate(readl(c->topc + 0x110), clk_get_rate(c->fin));
-	rate >>= sel;
-	return rate == clk_get_rate(c->safe) ? rate : 0;
+	return clk_get_rate(c->safe);
 }
 
 static bool accessible(struct m86_cpuclk *c)
@@ -120,14 +111,8 @@ static unsigned long current_rate_raw(struct m86_cpuclk *c, unsigned long fin,
 		rate = pll_rate(readl(c->base + 0x100), fin);
 	} else if (root == 1 && (readl(c->base + 0x204) & 1) &&
 		   (readl(c->base + 0x404) & 7) == 1) {
-		u32 sel = (readl(c->topc + 0x204) >> c->shift) & 3;
-		u32 stat = (readl(c->topc + 0x404) >> c->shift) & 0xf;
-
-		if (sel > 1 || stat != sel || !(readl(c->topc + 0x200) & 1) ||
-		    (readl(c->topc + 0x400) & 7) != 1)
-			return 0;
-		rate = pll_rate(readl(c->topc + 0x110), fin) >> sel;
-		if (rate != safe)
+		rate = safe;
+		if (!rate)
 			return 0;
 	} else {
 		return 0;
@@ -462,9 +447,6 @@ static int m86_probe(struct platform_device *pdev)
 	c->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(c->base))
 		return PTR_ERR(c->base);
-	c->topc = devm_ioremap(&pdev->dev, 0x10570000, 0x1000);
-	if (!c->topc)
-		return -ENOMEM;
 	c->safe = devm_clk_get(&pdev->dev, "safe");
 	if (IS_ERR(c->safe))
 		return PTR_ERR(c->safe);

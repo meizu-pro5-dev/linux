@@ -423,6 +423,23 @@
 		compatible = "samsung,exynos-bus";
 		operating-points-v2 = <&bus_mif_opp_table>;
 		#interconnect-cells = <0>;
+		clocks = <&clock_topc CLK_FOUT_MIF_PLL>,
+			 <&clock_topc CLK_MOUT_TOPC_MIF_PLL>,
+			 <&clock_topc CLK_MOUT_SCLK_BUS0_PLL_MIF>,
+			 <&clock_topc CLK_DOUT_SCLK_BUS0_PLL_MIF>,
+			 <&clock_topc CLK_SCLK_BUS0_PLL_MIF>,
+			 <&clock_topc CLK_MOUT_ACLK_MIF_PLL>,
+			 <&clock_topc CLK_ACLK_MIF_LOGICAL>,
+			 <&clock_topc CLK_MOUT_ACLK_CCORE_532>,
+			 <&clock_topc CLK_DOUT_ACLK_CCORE_532>,
+			 <&clock_topc DOUT_ACLK_CCORE_133>,
+			 <&clock_topc ACLK_CCORE_133>;
+		clock-names = "mif_pll", "mout_topc_mif_pll",
+			      "mout_sclk_bus0_pll_mif", "dout_sclk_bus0_pll_mif",
+			      "sclk_bus0_pll_mif", "mout_aclk_mif_pll",
+			      "aclk_mif_logical", "mout_ccore_532",
+			      "dout_ccore_532", "dout_ccore_133",
+			      "aclk_ccore_133";
 		samsung,sysreg = <&sysreg>;
 		vdd-supply = <&m86_buck1_mif>;
 		status = "okay";
@@ -433,6 +450,30 @@
 		operating-points-v2 = <&bus_int_opp_table>;
 		#interconnect-cells = <0>;
 		interconnects = <&bus_mif>;
+		clocks = <&clock_topc CLK_MOUT_ACLK_BUS0_532>,
+			 <&clock_topc CLK_DOUT_ACLK_BUS0_532>,
+			 <&clock_topc CLK_ACLK_BUS0_532>,
+			 <&clock_topc CLK_MOUT_ACLK_BUS1_532>,
+			 <&clock_topc CLK_DOUT_ACLK_BUS1_532>,
+			 <&clock_topc CLK_ACLK_BUS1_532>,
+			 <&clock_topc CLK_MOUT_ACLK_BUS1_200>,
+			 <&clock_topc CLK_DOUT_ACLK_BUS1_200>,
+			 <&clock_topc CLK_ACLK_BUS1_200>,
+			 <&clock_topc CLK_MOUT_PCLK_BUS01_133>,
+			 <&clock_topc CLK_DOUT_PCLK_BUS01_133>,
+			 <&clock_topc CLK_PCLK_BUS0_133>,
+			 <&clock_topc CLK_MOUT_ACLK_IMEM_266>,
+			 <&clock_topc CLK_DOUT_ACLK_IMEM_266>,
+			 <&clock_topc CLK_ACLK_IMEM_266>,
+			 <&clock_topc CLK_MOUT_ACLK_IMEM_200>,
+			 <&clock_topc CLK_DOUT_ACLK_IMEM_200>,
+			 <&clock_topc CLK_ACLK_IMEM_200>;
+		clock-names = "mout_bus0_532", "dout_bus0_532", "aclk_bus0_532",
+			      "mout_bus1_532", "dout_bus1_532", "aclk_bus1_532",
+			      "mout_bus1_200", "dout_bus1_200", "aclk_bus1_200",
+			      "mout_pclk_133", "dout_pclk_133", "pclk_bus0_133",
+			      "mout_imem_266", "dout_imem_266", "aclk_imem_266",
+			      "mout_imem_200", "dout_imem_200", "aclk_imem_200";
 		samsung,sysreg = <&sysreg>;
 		vdd-supply = <&m86_buck4_int>;
 		devfreq = <&bus_mif>;
@@ -446,8 +487,9 @@
 	m86_cpu_dvfs: m86-cpu-coordinator {
 		compatible = "meizu,m86-cpu-coordinator";
 		meizu,ema-syscon = <&sysreg>;
-		clocks = <&m86_atlas_clk>, <&m86_apollo_clk>, <&fin_pll>;
-		clock-names = "atlas", "apollo", "fin";
+		clocks = <&m86_atlas_clk>, <&m86_apollo_clk>, <&fin_pll>,
+			 <&clock_topc CLK_ACLK_MIF_LOGICAL>;
+		clock-names = "atlas", "apollo", "fin", "mif";
 		atlas-supply = <&m86_buck2_cpu>;
 		apollo-supply = <&m86_buck3_cpu>;
 		meizu,thermal-monitor = <&m86_tmu_monitor>;
@@ -467,8 +509,18 @@
 		compatible = "meizu,m86-gpu-dvfs-retained";
 		#clock-cells = <0>;
 		clocks = <&fin_pll>, <&m86_apollo_clk>,
-			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>;
-		clock-names = "fin", "apollo", "top_g3d";
+			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>,
+			 <&clock_topc CLK_ACLK_MIF_LOGICAL>,
+			 <&clock_topc CLK_ACLK_BUS0_532>,
+			 <&clock_topc CLK_ACLK_BUS1_532>,
+			 <&clock_topc CLK_ACLK_BUS1_200>,
+			 <&clock_topc CLK_PCLK_BUS0_133>,
+			 <&clock_topc CLK_MOUT_PCLK_BUS01_133>,
+			 <&clock_topc CLK_ACLK_IMEM_266>,
+			 <&clock_topc CLK_ACLK_IMEM_200>;
+		clock-names = "fin", "apollo", "top_g3d", "mif",
+			      "int_bus0", "int_bus1", "int_bus1_low",
+			      "int_pclk", "int_pclk_mux", "int_imem", "int_imem_low";
 		samsung,bus = <&bus_mif>;
 		meizu,gpu = <&gpu>;
 		meizu,sysreg = <&sysreg>;

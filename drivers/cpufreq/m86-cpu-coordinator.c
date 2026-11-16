@@ -52,8 +52,7 @@ struct m86_coord {
 	struct m86_cluster cluster[2]; /* 0 atlas, 1 apollo */
 	struct m86_asv_cal_info asv_cal;
 	struct regmap *ema; /* Existing shared SYSREG regmap. */
-	void __iomem *topc;
-	struct clk *fin;
+	struct clk *fin, *mif;
 	struct thermal_zone_device *zone;
 	struct notifier_block tmu_nb;
 	struct delayed_work thermal_work;
@@ -248,27 +247,18 @@ static int throttle_cluster_safe(struct m86_cluster *c, unsigned int ci,
  */
 static int fixed_bus_floor(struct m86_coord *d)
 {
-	u32 con, sel, con2, sel2;
-	u32 m, p, s, req_khz;
-	u64 logical_khz;
+	u64 mif_hz, fin_hz;
+	u32 req_khz;
 
 	exynos7420_bus_dvfs_read_lock();
-	con = readl(d->topc + 0x150);
-	sel = readl(d->topc + 0x214);
-	con2 = readl(d->topc + 0x150);
-	sel2 = readl(d->topc + 0x214);
+	mif_hz = clk_get_rate(d->mif);
+	fin_hz = clk_get_rate(d->fin);
 	req_khz = READ_ONCE(d->required_bus_qos);
 	exynos7420_bus_dvfs_read_unlock();
 
-	m = (con >> 16) & 0x3ff;
-	p = (con >> 8) & 0x3f;
-	s = con & 7;
-	if (con != con2 || sel != sel2 ||
-	    !(con & BIT(31)) || !(con & BIT(29)) || !m || !p ||
-	    !(sel & BIT(16)) || !(sel & BIT(20)) || clk_get_rate(d->fin) != 24000000)
+	if (!mif_hz || fin_hz != 24000000)
 		return -EIO;
-	logical_khz = div_u64(24000000ULL * m, (p << s) * 2000);
-	return logical_khz >= req_khz ? 0 : -ERANGE;
+	return div_u64(mif_hz, 1000) >= req_khz ? 0 : -ERANGE;
 }
 
 static int temperature(struct m86_coord *d, int *temp, bool refresh)
@@ -976,9 +966,9 @@ static int m86_probe(struct platform_device *pdev)
 	d->fin = devm_clk_get(&pdev->dev, "fin");
 	if (IS_ERR(d->fin))
 		return dev_err_probe(&pdev->dev, PTR_ERR(d->fin), "bootstrap fin clock at source line %u\n", __LINE__);
-	d->topc = devm_ioremap(&pdev->dev, 0x10570000, 0x1000);
-	if (!d->topc)
-		return dev_err_probe(&pdev->dev, -ENOMEM, "bootstrap TOPC mapping at source line %u\n", __LINE__);
+	d->mif = devm_clk_get(&pdev->dev, "mif");
+	if (IS_ERR(d->mif))
+		return dev_err_probe(&pdev->dev, PTR_ERR(d->mif), "bootstrap mif clock at source line %u\n", __LINE__);
 	d->ema = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "meizu,ema-syscon");
 	if (IS_ERR(d->ema))
 		return dev_err_probe(&pdev->dev, PTR_ERR(d->ema), "bootstrap EMA syscon at source line %u\n", __LINE__);

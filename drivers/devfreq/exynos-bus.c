@@ -411,10 +411,16 @@ static int exynos_bus_parse_of(struct device_node *np,
 		}
 
 		if (of_node_name_eq(np, "bus-mif")) {
+			ret = exynos7420_mif_parse_clocks(dev);
+			if (ret)
+				goto err_clk;
 			bus->is_exynos7420_mif = true;
 			bus->reg_vdd = vdd;
 			rate = 1552000000UL;
 		} else if (of_node_name_eq(np, "bus-int")) {
+			ret = exynos7420_int_parse_clocks(dev);
+			if (ret)
+				goto err_clk;
 			bus->is_exynos7420_int = true;
 			bus->reg_vdd = vdd;
 			rate = 400000000UL;

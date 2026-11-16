@@ -9,6 +9,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/syscon.h>
 #include <linux/lockdep.h>
@@ -17,6 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/slab.h>
 
 #include "clk.h"
 #include "clk-exynos-arm64.h"
@@ -28,21 +30,30 @@
 #define BUS1_DPLL_LOCK		0x0008
 #define MFC_PLL_LOCK		0x000C
 #define AUD_PLL_LOCK		0x0010
+#define MIF_PLL_LOCK		0x0014
 #define CC_PLL_CON0		0x0100
 #define BUS0_PLL_CON0		0x0110
 #define BUS1_DPLL_CON0		0x0120
 #define MFC_PLL_CON0		0x0130
 #define AUD_PLL_CON0		0x0140
+#define MIF_PLL_CON0		0x0150
 #define MUX_SEL_TOPC0		0x0200
 #define MUX_SEL_TOPC1		0x0204
 #define MUX_SEL_TOPC2		0x0208
 #define MUX_SEL_TOPC3		0x020C
+#define MUX_SEL_TOPC5		0x0214
+#define MUX_STAT_TOPC2		0x0408
+#define MUX_STAT_TOPC5		0x0414
 #define DIV_TOPC0		0x0600
 #define DIV_TOPC1		0x0604
 #define DIV_TOPC3		0x060C
+#define DIV_STAT_TOPC0		0x0700
+#define DIV_STAT_TOPC1		0x0704
+#define DIV_STAT_TOPC3		0x070C
 #define ENABLE_ACLK_TOPC0	0x0800
 #define ENABLE_ACLK_TOPC1	0x0804
 #define ENABLE_SCLK_TOPC1	0x0A04
+#define TOPC_PAUSE		0x1008
 
 static const struct samsung_fixed_factor_clock topc_fixed_factor_clks[] __initconst = {
 	FFACTOR(0, "ffac_topc_bus1_pll_div4", "ffac_topc_bus1_pll_div2", 1, 2, 0),
@@ -120,8 +131,12 @@ static const struct samsung_mux_clock topc_mux_clks[] __initconst = {
 		MUX_SEL_TOPC1, 4, 2, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
 	MUX_F(CLK_MOUT_BUS0_APOLLO, "mout_sclk_bus0_pll_apollo", m86_topc_cpu_safe_p,
 		MUX_SEL_TOPC1, 8, 2, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
-	MUX(CLK_MOUT_ACLK_BUS0_532, "mout_aclk_bus0_532", mout_aclk_bus0_532_p,
-		MUX_SEL_TOPC2, 8, 4),
+	MUX_F(CLK_MOUT_SCLK_BUS0_PLL_MIF, "mout_sclk_bus0_pll_mif",
+		m86_topc_cpu_safe_p, MUX_SEL_TOPC1, 12, 2,
+		CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+	MUX_F(CLK_MOUT_PCLK_BUS01_133, "mout_pclk_bus01_133", mout_topc_group2,
+		MUX_SEL_TOPC3, 28, 2,
+		CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT, 0),
 	MUX(0, "mout_topc_bus0_pll", mout_topc_bus0_pll_ctrl_p,
 		MUX_SEL_TOPC0, 0, 1),
 	MUX(0, "mout_topc_bus1_pll", mout_topc_bus1_pll_ctrl_p,
@@ -155,10 +170,6 @@ static const struct samsung_div_clock topc_div_clks[] __initconst = {
 	DIV_F(CLK_DOUT_SCLK_BUS_PLL_G3D, "dout_sclk_bus_pll_g3d",
 		"mout_sclk_bus_pll_g3d", DIV_TOPC3, 20, 4,
 		CLK_GET_RATE_NOCACHE, CLK_DIVIDER_READ_ONLY),
-	DIV(CLK_DOUT_ACLK_BUS0_532, "dout_aclk_bus0_532", "mout_aclk_bus0_532",
-		DIV_TOPC0, 8, 4),
-	DIV(DOUT_ACLK_CCORE_133, "dout_aclk_ccore_133", "mout_aclk_ccore_133",
-		DIV_TOPC0, 4, 4),
 
 	DIV(DOUT_ACLK_MFC_532, "dout_aclk_mfc_532", "mout_aclk_mfc_532",
 		DIV_TOPC1, 8, 4),
@@ -187,10 +198,6 @@ static const struct samsung_pll_rate_table pll1460x_24mhz_tbl[] __initconst = {
 static const struct samsung_gate_clock topc_gate_clks[] __initconst = {
 	GATE(CLK_TOP_SCLK_BUS_PLL_G3D, "top_sclk_bus_pll_g3d",
 		"dout_sclk_bus_pll_g3d", ENABLE_SCLK_TOPC1, 9, CLK_IGNORE_UNUSED, 0),
-	GATE(CLK_ACLK_BUS0_532, "top_aclk_bus0_532", "dout_aclk_bus0_532",
-		ENABLE_ACLK_TOPC0, 8, CLK_IS_CRITICAL, 0),
-	GATE(ACLK_CCORE_133, "aclk_ccore_133", "dout_aclk_ccore_133",
-		ENABLE_ACLK_TOPC0, 4, CLK_IS_CRITICAL, 0),
 
 	GATE(ACLK_MFC_532, "aclk_mfc_532", "dout_aclk_mfc_532",
 		ENABLE_ACLK_TOPC1, 8, 0, 0),
@@ -255,9 +262,416 @@ static const struct samsung_cmu_info topc_cmu_info __initconst = {
 	.nr_clk_regs		= ARRAY_SIZE(topc_clk_regs),
 };
 
+/*
+ * CMU_TOPC DVFS-managed clocks (MIF PLL, MIF glitchless mux, INT/CCORE
+ * composite mux/div pairs with MUX_STAT / DIV_STAT handshake polling).
+ * Never save/restore MIF_PLL_* or MUX_SEL_TOPC5 in topc_clk_regs[].
+ */
+struct exynos7_mif_pll {
+	struct clk_hw hw;
+	void __iomem *base;
+	spinlock_t *lock;
+};
+
+struct exynos7_mif_pll_entry {
+	unsigned long rate;
+	u16 mdiv;
+	u8 pdiv;
+	u8 sdiv;
+};
+
+static const struct exynos7_mif_pll_entry exynos7_mif_pll_tbl[] = {
+	{ 3104000000UL, 388, 3, 0 },
+	{ 2912000000UL, 364, 3, 0 },
+	{ 2528000000UL, 316, 3, 0 },
+	{ 2052000000UL, 171, 2, 0 },
+	{ 1656000000UL, 207, 3, 0 },
+	{ 1264000000UL, 316, 3, 1 },
+	{ 1086000000UL, 181, 2, 1 },
+	{  832000000UL, 208, 3, 1 },
+	{  696000000UL, 348, 3, 2 },
+	{  552000000UL, 276, 3, 2 },
+	{  334000000UL, 334, 3, 3 },
+	{  266000000UL, 266, 3, 3 },
+	{  200000000UL, 200, 3, 3 },
+};
+
+static const struct exynos7_mif_pll_entry *
+exynos7_find_mif_pll_entry(unsigned long drate)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(exynos7_mif_pll_tbl); i++)
+		if (exynos7_mif_pll_tbl[i].rate == drate)
+			return &exynos7_mif_pll_tbl[i];
+	return NULL;
+}
+
+static unsigned long exynos7_mif_pll_recalc_rate(struct clk_hw *hw,
+						 unsigned long parent_rate)
+{
+	struct exynos7_mif_pll *pll = container_of(hw, struct exynos7_mif_pll, hw);
+	u32 con = readl(pll->base + MIF_PLL_CON0);
+	u32 m = (con >> 16) & 0x3ffU;
+	u32 p = (con >> 8) & 0x3fU;
+	u32 s = con & 0x7U;
+
+	if (!m || !p || (con & (BIT(31) | BIT(29))) != (BIT(31) | BIT(29)))
+		return 0;
+	return div_u64((u64)parent_rate * m, p << s);
+}
+
+static long exynos7_mif_pll_round_rate(struct clk_hw *hw, unsigned long drate,
+				       unsigned long *prate)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(exynos7_mif_pll_tbl); i++)
+		if (exynos7_mif_pll_tbl[i].rate <= drate)
+			return exynos7_mif_pll_tbl[i].rate;
+	return exynos7_mif_pll_tbl[ARRAY_SIZE(exynos7_mif_pll_tbl) - 1].rate;
+}
+
+static int exynos7_mif_pll_set_rate(struct clk_hw *hw, unsigned long drate,
+				    unsigned long prate)
+{
+	struct exynos7_mif_pll *pll = container_of(hw, struct exynos7_mif_pll, hw);
+	const struct exynos7_mif_pll_entry *opp = exynos7_find_mif_pll_entry(drate);
+	unsigned long flags;
+	u32 con, cur_m, cur_p, cur_s, val;
+
+	if (!opp)
+		return -EINVAL;
+
+	spin_lock_irqsave(pll->lock, flags);
+	con = readl(pll->base + MIF_PLL_CON0);
+	cur_m = (con >> 16) & 0x3ffU;
+	cur_p = (con >> 8) & 0x3fU;
+	cur_s = con & 0x7U;
+
+	if (cur_m == opp->mdiv && cur_p == opp->pdiv) {
+		if (cur_s != opp->sdiv) {
+			con = (con & ~0x7U) | opp->sdiv;
+			writel(con, pll->base + MIF_PLL_CON0);
+		}
+		spin_unlock_irqrestore(pll->lock, flags);
+		return 0;
+	}
+
+	writel((u32)opp->pdiv * 150U, pll->base + MIF_PLL_LOCK);
+	con &= ~((0x3ffU << 16) | (0x3fU << 8) | 0x7U | BIT(31));
+	con |= ((u32)opp->mdiv << 16) | ((u32)opp->pdiv << 8) | opp->sdiv;
+	writel(con, pll->base + MIF_PLL_CON0);
+	writel(con | BIT(31), pll->base + MIF_PLL_CON0);
+	spin_unlock_irqrestore(pll->lock, flags);
+
+	return readl_poll_timeout_atomic(pll->base + MIF_PLL_CON0, val,
+					 (val & BIT(29)), 1, 10000);
+}
+
+static const struct clk_ops exynos7_mif_pll_ops = {
+	.recalc_rate = exynos7_mif_pll_recalc_rate,
+	.round_rate = exynos7_mif_pll_round_rate,
+	.set_rate = exynos7_mif_pll_set_rate,
+};
+
+struct exynos7_topc_stat_mux {
+	struct clk_mux mux;
+	void __iomem *stat_reg;
+	u32 busy_mask;
+	bool mif_pause;
+};
+
+static int exynos7_stat_mux_set_parent(struct clk_hw *hw, u8 index)
+{
+	struct clk_mux *mux = to_clk_mux(hw);
+	struct exynos7_topc_stat_mux *sm =
+		container_of(mux, struct exynos7_topc_stat_mux, mux);
+	u32 val;
+	int ret;
+
+	ret = clk_mux_ops.set_parent(hw, index);
+	if (ret)
+		return ret;
+	if (sm->mif_pause) {
+		ret = readl_poll_timeout_atomic(sm->stat_reg + (TOPC_PAUSE - MUX_STAT_TOPC5),
+						val, !(val & (0x07U << 16)), 1, 10000);
+		if (ret)
+			return ret;
+	}
+	if (sm->stat_reg)
+		return readl_poll_timeout_atomic(sm->stat_reg, val,
+						 !(val & sm->busy_mask), 1, 10000);
+	return 0;
+}
+
+static u8 exynos7_stat_mux_get_parent(struct clk_hw *hw)
+{
+	return clk_mux_ops.get_parent(hw);
+}
+
+static const struct clk_ops exynos7_stat_mux_ops = {
+	.get_parent = exynos7_stat_mux_get_parent,
+	.set_parent = exynos7_stat_mux_set_parent,
+	.determine_rate = clk_hw_determine_rate_no_reparent,
+};
+
+struct exynos7_topc_stat_div {
+	struct clk_divider div;
+	void __iomem *stat_reg;
+	u32 stat_mask;
+};
+
+static unsigned long exynos7_stat_div_recalc_rate(struct clk_hw *hw,
+						  unsigned long parent_rate)
+{
+	return clk_divider_ops.recalc_rate(hw, parent_rate);
+}
+
+static long exynos7_stat_div_round_rate(struct clk_hw *hw, unsigned long rate,
+					unsigned long *prate)
+{
+	return clk_divider_ops.round_rate(hw, rate, prate);
+}
+
+static int exynos7_stat_div_determine_rate(struct clk_hw *hw,
+					   struct clk_rate_request *req)
+{
+	return clk_divider_ops.determine_rate(hw, req);
+}
+
+static int exynos7_stat_div_set_rate(struct clk_hw *hw, unsigned long rate,
+				     unsigned long parent_rate)
+{
+	struct clk_divider *div = to_clk_divider(hw);
+	struct exynos7_topc_stat_div *sd =
+		container_of(div, struct exynos7_topc_stat_div, div);
+	u32 val;
+	int ret;
+
+	ret = clk_divider_ops.set_rate(hw, rate, parent_rate);
+	if (ret)
+		return ret;
+	return readl_poll_timeout_atomic(sd->stat_reg, val,
+					 !(val & sd->stat_mask), 1, 10000);
+}
+
+static const struct clk_ops exynos7_stat_div_ops = {
+	.recalc_rate = exynos7_stat_div_recalc_rate,
+	.round_rate = exynos7_stat_div_round_rate,
+	.determine_rate = exynos7_stat_div_determine_rate,
+	.set_rate = exynos7_stat_div_set_rate,
+};
+
+struct exynos7_stat_mux_desc {
+	unsigned int id;
+	const char *name;
+	const char * const *parents;
+	u8 num_parents;
+	unsigned long flags;
+	u16 reg;
+	u8 shift;
+	u8 width;
+	u16 stat_reg;
+	u32 busy_mask;
+	bool mif_pause;
+};
+
+struct exynos7_stat_div_desc {
+	unsigned int id;
+	const char *name;
+	const char *parent;
+	unsigned long flags;
+	u16 reg;
+	u8 shift;
+	u8 width;
+	u16 stat_reg;
+	u8 stat_bit;
+};
+
+PNAME(mout_topc_mif_pll_p) = { "fin_pll", "fout_mif_pll" };
+PNAME(mout_aclk_mif_pll_p) = { "sclk_bus0_pll_mif", "mout_topc_mif_pll" };
+
+static const struct exynos7_stat_mux_desc topc_stat_muxes[] __initconst = {
+	{ CLK_MOUT_ACLK_BUS0_532, "mout_aclk_bus0_532", mout_aclk_bus0_532_p,
+	  ARRAY_SIZE(mout_aclk_bus0_532_p), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 8, 4, MUX_STAT_TOPC2, BIT(11), false },
+	{ CLK_MOUT_ACLK_BUS1_532, "mout_aclk_bus1_532", mout_aclk_bus0_532_p,
+	  ARRAY_SIZE(mout_aclk_bus0_532_p), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 12, 4, MUX_STAT_TOPC2, BIT(15), false },
+	{ CLK_MOUT_ACLK_BUS1_200, "mout_aclk_bus1_200", mout_topc_group2,
+	  ARRAY_SIZE(mout_topc_group2), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 16, 2, MUX_STAT_TOPC2, BIT(19), false },
+	{ CLK_MOUT_ACLK_IMEM_266, "mout_aclk_imem_266", mout_topc_group2,
+	  ARRAY_SIZE(mout_topc_group2), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 20, 2, MUX_STAT_TOPC2, BIT(23), false },
+	{ CLK_MOUT_ACLK_IMEM_200, "mout_aclk_imem_200", mout_topc_group2,
+	  ARRAY_SIZE(mout_topc_group2), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 24, 2, MUX_STAT_TOPC2, BIT(27), false },
+	{ CLK_MOUT_ACLK_CCORE_532, "mout_aclk_ccore_532", mout_aclk_bus0_532_p,
+	  ARRAY_SIZE(mout_aclk_bus0_532_p), CLK_GET_RATE_NOCACHE | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC2, 0, 4, 0, 0, false },
+	{ CLK_MOUT_TOPC_MIF_PLL, "mout_topc_mif_pll", mout_topc_mif_pll_p,
+	  ARRAY_SIZE(mout_topc_mif_pll_p),
+	  CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL | CLK_SET_RATE_NO_REPARENT,
+	  MUX_SEL_TOPC5, 16, 1, 0, 0, false },
+};
+
+static const struct exynos7_stat_div_desc topc_stat_divs[] __initconst = {
+	{ CLK_DOUT_ACLK_BUS0_532, "dout_aclk_bus0_532", "mout_aclk_bus0_532",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 8, 4, DIV_STAT_TOPC0, 8 },
+	{ CLK_DOUT_ACLK_BUS1_532, "dout_aclk_bus1_532", "mout_aclk_bus1_532",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 12, 4, DIV_STAT_TOPC0, 12 },
+	{ CLK_DOUT_ACLK_BUS1_200, "dout_aclk_bus1_200", "mout_aclk_bus1_200",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 16, 4, DIV_STAT_TOPC0, 16 },
+	{ CLK_DOUT_ACLK_IMEM_266, "dout_aclk_imem_266", "mout_aclk_imem_266",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 20, 4, DIV_STAT_TOPC0, 20 },
+	{ CLK_DOUT_ACLK_IMEM_200, "dout_aclk_imem_200", "mout_aclk_imem_200",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 24, 4, DIV_STAT_TOPC0, 24 },
+	{ CLK_DOUT_ACLK_CCORE_532, "dout_aclk_ccore_532", "mout_aclk_ccore_532",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 0, 4, DIV_STAT_TOPC0, 0 },
+	{ DOUT_ACLK_CCORE_133, "dout_aclk_ccore_133", "mout_aclk_ccore_133",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC0, 4, 4, DIV_STAT_TOPC0, 4 },
+	{ CLK_DOUT_PCLK_BUS01_133, "dout_pclk_bus01_133", "mout_pclk_bus01_133",
+	  CLK_GET_RATE_NOCACHE, DIV_TOPC1, 28, 4, DIV_STAT_TOPC1, 28 },
+	{ CLK_DOUT_SCLK_BUS0_PLL_MIF, "dout_sclk_bus0_pll_mif",
+	  "mout_sclk_bus0_pll_mif", CLK_GET_RATE_NOCACHE,
+	  DIV_TOPC3, 4, 3, DIV_STAT_TOPC3, 4 },
+};
+
+static const struct samsung_gate_clock topc_dvfs_gates[] __initconst = {
+	GATE(CLK_ACLK_BUS0_532, "top_aclk_bus0_532", "dout_aclk_bus0_532",
+		ENABLE_ACLK_TOPC0, 8, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_ACLK_BUS1_532, "top_aclk_bus1_532", "dout_aclk_bus1_532",
+		ENABLE_ACLK_TOPC0, 12, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_ACLK_BUS1_200, "top_aclk_bus1_200", "dout_aclk_bus1_200",
+		ENABLE_ACLK_TOPC0, 16, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_ACLK_IMEM_266, "aclk_imem_266", "dout_aclk_imem_266",
+		ENABLE_ACLK_TOPC0, 20, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_ACLK_IMEM_200, "aclk_imem_200", "dout_aclk_imem_200",
+		ENABLE_ACLK_TOPC0, 24, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(ACLK_CCORE_133, "aclk_ccore_133", "dout_aclk_ccore_133",
+		ENABLE_ACLK_TOPC0, 4, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_PCLK_BUS0_133, "top_pclk_bus0_133", "dout_pclk_bus01_133",
+		ENABLE_ACLK_TOPC1, 28, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_PCLK_BUS1_133, "top_pclk_bus1_133", "dout_pclk_bus01_133",
+		ENABLE_ACLK_TOPC1, 29, CLK_IS_CRITICAL | CLK_GET_RATE_NOCACHE, 0),
+	GATE(CLK_SCLK_BUS0_PLL_MIF, "sclk_bus0_pll_mif", "dout_sclk_bus0_pll_mif",
+		ENABLE_SCLK_TOPC1, 6, CLK_GET_RATE_NOCACHE, 0),
+};
+
+static const struct exynos7_stat_mux_desc topc_mif_mux_desc __initconst = {
+	CLK_MOUT_ACLK_MIF_PLL, "mout_aclk_mif_pll", mout_aclk_mif_pll_p,
+	ARRAY_SIZE(mout_aclk_mif_pll_p),
+	CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL | CLK_SET_RATE_NO_REPARENT,
+	MUX_SEL_TOPC5, 20, 1, MUX_STAT_TOPC5, (0x0fU << 24), true,
+};
+
+static void __init exynos7_register_stat_mux(struct samsung_clk_provider *ctx,
+					     const struct exynos7_stat_mux_desc *d)
+{
+	struct exynos7_topc_stat_mux *sm = kzalloc(sizeof(*sm), GFP_KERNEL);
+	struct clk_init_data init = {
+		.name = d->name,
+		.ops = &exynos7_stat_mux_ops,
+		.flags = d->flags,
+		.parent_names = d->parents,
+		.num_parents = d->num_parents,
+	};
+
+	if (!sm)
+		return;
+	sm->mux.reg = ctx->reg_base + d->reg;
+	sm->mux.shift = d->shift;
+	sm->mux.mask = (1U << d->width) - 1U;
+	sm->mux.lock = &ctx->lock;
+	sm->mux.hw.init = &init;
+	if (d->stat_reg)
+		sm->stat_reg = ctx->reg_base + d->stat_reg;
+	sm->busy_mask = d->busy_mask;
+	sm->mif_pause = d->mif_pause;
+	if (clk_hw_register(ctx->dev, &sm->mux.hw)) {
+		pr_err("%s: failed to register mux %s\n", __func__, d->name);
+		kfree(sm);
+		return;
+	}
+	samsung_clk_add_lookup(ctx, &sm->mux.hw, d->id);
+}
+
+static void __init exynos7_register_stat_div(struct samsung_clk_provider *ctx,
+					     const struct exynos7_stat_div_desc *d)
+{
+	struct exynos7_topc_stat_div *sd = kzalloc(sizeof(*sd), GFP_KERNEL);
+	struct clk_init_data init = {
+		.name = d->name,
+		.ops = &exynos7_stat_div_ops,
+		.flags = d->flags,
+		.parent_names = &d->parent,
+		.num_parents = 1,
+	};
+
+	if (!sd)
+		return;
+	sd->div.reg = ctx->reg_base + d->reg;
+	sd->div.shift = d->shift;
+	sd->div.width = d->width;
+	sd->div.flags = CLK_DIVIDER_ROUND_CLOSEST;
+	sd->div.lock = &ctx->lock;
+	sd->div.hw.init = &init;
+	sd->stat_reg = ctx->reg_base + d->stat_reg;
+	sd->stat_mask = BIT(d->stat_bit);
+	if (clk_hw_register(ctx->dev, &sd->div.hw)) {
+		pr_err("%s: failed to register div %s\n", __func__, d->name);
+		kfree(sd);
+		return;
+	}
+	samsung_clk_add_lookup(ctx, &sd->div.hw, d->id);
+}
+
 static void __init exynos7_clk_topc_init(struct device_node *np)
 {
-	samsung_cmu_register_one(np, &topc_cmu_info);
+	struct samsung_clk_provider *ctx;
+	struct exynos7_mif_pll *mif_pll;
+	struct clk_hw *hw;
+	const char *fin_parent = "fin_pll";
+	struct clk_init_data pll_init = {
+		.name = "fout_mif_pll",
+		.ops = &exynos7_mif_pll_ops,
+		.flags = CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL,
+		.parent_names = &fin_parent,
+		.num_parents = 1,
+	};
+	unsigned int i;
+
+	ctx = samsung_cmu_register_one(np, &topc_cmu_info);
+	if (!ctx)
+		return;
+
+	mif_pll = kzalloc(sizeof(*mif_pll), GFP_KERNEL);
+	if (mif_pll) {
+		mif_pll->base = ctx->reg_base;
+		mif_pll->lock = &ctx->lock;
+		mif_pll->hw.init = &pll_init;
+		if (!clk_hw_register(ctx->dev, &mif_pll->hw))
+			samsung_clk_add_lookup(ctx, &mif_pll->hw, CLK_FOUT_MIF_PLL);
+		else
+			kfree(mif_pll);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(topc_stat_muxes); i++)
+		exynos7_register_stat_mux(ctx, &topc_stat_muxes[i]);
+	for (i = 0; i < ARRAY_SIZE(topc_stat_divs); i++)
+		exynos7_register_stat_div(ctx, &topc_stat_divs[i]);
+
+	samsung_clk_register_gate(ctx, topc_dvfs_gates,
+				  ARRAY_SIZE(topc_dvfs_gates));
+
+	exynos7_register_stat_mux(ctx, &topc_mif_mux_desc);
+	hw = clk_hw_register_fixed_factor(ctx->dev, "aclk_mif_logical",
+					  "mout_aclk_mif_pll",
+					  CLK_GET_RATE_NOCACHE, 1, 2);
+	if (!IS_ERR(hw))
+		samsung_clk_add_lookup(ctx, hw, CLK_ACLK_MIF_LOGICAL);
 }
 
 CLK_OF_DECLARE(exynos7_clk_topc, "samsung,exynos7-clock-topc",
