@@ -35,7 +35,10 @@ struct s2mps11_info {
 	bool m86_cpu_faulted;
 	int buck1_sel_cache;
 	int buck4_sel_cache;
+	int buck6_sel_cache;
 	int ldo8_ctrl_cache;
+	unsigned int buck6_ramp_delay;
+	bool buck6_normal_on;
 	int ramp_delay2;
 	int ramp_delay34;
 	int ramp_delay5;
@@ -738,17 +741,28 @@ static const struct regulator_ops s2mps15_reg_buck_ops = {
 	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
 };
 
+static int *s2mps15_m86_buck_cache(struct s2mps11_info *s2mps11, int id)
+{
+	switch (id) {
+	case S2MPS15_BUCK1:
+		return &s2mps11->buck1_sel_cache;
+	case S2MPS15_BUCK4:
+		return &s2mps11->buck4_sel_cache;
+	case S2MPS15_BUCK6:
+		return &s2mps11->buck6_sel_cache;
+	default:
+		return NULL;
+	}
+}
+
 static int s2mps15_m86_buck14_get_voltage_sel(struct regulator_dev *rdev)
 {
 	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
 	unsigned int val = 0;
-	int id = rdev_get_id(rdev), *cache, cached, ret;
+	int *cache = s2mps15_m86_buck_cache(s2mps11, rdev_get_id(rdev));
+	int cached, ret;
 
-	if (id == S2MPS15_BUCK1)
-		cache = &s2mps11->buck1_sel_cache;
-	else if (id == S2MPS15_BUCK4)
-		cache = &s2mps11->buck4_sel_cache;
-	else
+	if (!cache)
 		return regulator_get_voltage_sel_regmap(rdev);
 
 	cached = READ_ONCE(*cache);
@@ -767,14 +781,11 @@ static int s2mps15_m86_buck14_set_voltage_sel(struct regulator_dev *rdev,
 					      unsigned int sel)
 {
 	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
-	int id = rdev_get_id(rdev), *cache, ret;
+	int *cache = s2mps15_m86_buck_cache(s2mps11, rdev_get_id(rdev));
+	int ret;
 
 	sel &= rdev->desc->vsel_mask;
-	if (id == S2MPS15_BUCK1)
-		cache = &s2mps11->buck1_sel_cache;
-	else if (id == S2MPS15_BUCK4)
-		cache = &s2mps11->buck4_sel_cache;
-	else
+	if (!cache)
 		return -EINVAL;
 
 	if (READ_ONCE(*cache) == (int)sel)
@@ -851,6 +862,107 @@ static const struct regulator_ops s2mps15_m86_ldo8_ops = {
 	.set_voltage_sel	= s2mps15_m86_ldo8_set_voltage_sel,
 	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
 };
+
+/*
+ * Fixed Normal-ON G3D memory rail (LDO10): keep permanently on and immutable
+ * after takeover to respect the S2MPS15 GPU cold-rail erratum.
+ */
+static const struct regulator_ops s2mps15_m86_ldo10_ops = {
+	.list_voltage		= regulator_list_voltage_linear_range,
+	.is_enabled		= regulator_is_enabled_regmap,
+	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
+};
+
+/**
+ * s2mps15_m86_buck6_takeover - Switch G3D BUCK6 + LDO10 from GPIO-DVS to Normal-ON
+ *
+ * Executed once during PMIC probe before regulator registration:
+ * enable LDO10 (0xd4) and BUCK6 (0xf8) in Normal-ON mode, then clear
+ * S2MPS15_REG_LDODSCH4 (0x52) bit 6 so DVS GPIO state can no longer gate G3D.
+ */
+static int s2mps15_m86_buck6_takeover(struct sec_pmic_dev *iodev,
+				      struct device *dev,
+				      struct s2mps11_info *s2mps11)
+{
+	struct regmap *map = iodev->regmap_pmic;
+	unsigned int id, ctrl1, ctrl2, ramp, ldo10, sync;
+	int ret;
+
+	ret = regmap_read(map, S2MPS15_REG_ID, &id);
+	if (ret)
+		return ret;
+	if (id != 0x12) {
+		dev_err(dev, "Unexpected S2MPS15 ID %#x for GPU Normal-ON takeover\n",
+			id);
+		return -EOPNOTSUPP;
+	}
+
+	ret = regmap_read(map, S2MPS15_REG_B6CTRL1, &ctrl1);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, S2MPS15_REG_B6CTRL2, &ctrl2);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, S2MPS15_REG_BRAMP, &ramp);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, S2MPS15_REG_L10CTRL, &ldo10);
+	if (ret)
+		return ret;
+	/* S2MPS15_REG_LDODSCH4 (0x52) bit 6 controls LDO10/BUCK6 DVS sync */
+	ret = regmap_read(map, S2MPS15_REG_LDODSCH4, &sync);
+	if (ret)
+		return ret;
+
+	if (ldo10 != 0xd4 || (ctrl1 & 0xfe) != 0xf8 || (sync & BIT(6))) {
+		if ((ctrl1 & 0xfe) != 0x38 || ldo10 != 0x14) {
+			dev_err(dev,
+				"Unexpected BUCK6/LDO10 handoff state: B6CTRL1=%#x L10CTRL=%#x sync=%#x\n",
+				ctrl1, ldo10, sync);
+			return -EOPNOTSUPP;
+		}
+
+		ret = regmap_update_bits(map, S2MPS15_REG_L10CTRL,
+					 S2MPS15_ENABLE_MASK,
+					 S2MPS15_ENABLE_MASK);
+		if (ret)
+			return ret;
+		ret = regmap_read(map, S2MPS15_REG_L10CTRL, &ldo10);
+		if (ret || ldo10 != 0xd4)
+			return ret ?: -EIO;
+		usleep_range(200, 300);
+
+		ret = regmap_update_bits(map, S2MPS15_REG_B6CTRL1,
+					 S2MPS15_ENABLE_MASK,
+					 S2MPS15_ENABLE_MASK);
+		if (ret)
+			return ret;
+		ret = regmap_read(map, S2MPS15_REG_B6CTRL1, &ctrl1);
+		if (ret || (ctrl1 & 0xfe) != 0xf8)
+			return ret ?: -EIO;
+		usleep_range(200, 300);
+
+		ret = regmap_read(map, S2MPS15_REG_L10CTRL, &ldo10);
+		if (ret || ldo10 != 0xd4)
+			return ret ?: -EIO;
+
+		ret = regmap_update_bits(map, S2MPS15_REG_LDODSCH4, BIT(6), 0);
+		if (ret)
+			return ret;
+		ret = regmap_read(map, S2MPS15_REG_LDODSCH4, &sync);
+		if (ret || (sync & BIT(6)))
+			return ret ?: -EIO;
+		usleep_range(200, 300);
+	}
+
+	s2mps11->buck6_sel_cache = ctrl2 & S2MPS15_BUCK_VSEL_MASK;
+	s2mps11->buck6_ramp_delay = 6000U << (ramp & 3);
+	s2mps11->buck6_normal_on = true;
+	dev_info(dev,
+		 "GPU BUCK6/LDO10 Normal-ON active (sel=%#x ramp=%u uV/us)\n",
+		 s2mps11->buck6_sel_cache, s2mps11->buck6_ramp_delay);
+	return 0;
+}
 
 #define regulator_desc_s2mps15_ldo(num, range) {	\
 	.name		= "LDO"#num,			\
@@ -1270,6 +1382,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 	mutex_init(&s2mps11->m86_cpu_lock);
 	s2mps11->buck1_sel_cache = -1;
 	s2mps11->buck4_sel_cache = -1;
+	s2mps11->buck6_sel_cache = -1;
 	s2mps11->ldo8_ctrl_cache = -1;
 	s2mps11->dev_type = platform_get_device_id(pdev)->driver_data;
 	switch (s2mps11->dev_type) {
@@ -1320,6 +1433,15 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 	if (ret)
 		goto out;
 
+	if (s2mps11->dev_type == S2MPS15X &&
+	    rdata[S2MPS15_BUCK6].of_node &&
+	    of_property_read_bool(rdata[S2MPS15_BUCK6].of_node,
+				  "meizu,gpu-normal-on")) {
+		ret = s2mps15_m86_buck6_takeover(iodev, &pdev->dev, s2mps11);
+		if (ret)
+			goto out;
+	}
+
 	platform_set_drvdata(pdev, s2mps11);
 
 	config.dev = &pdev->dev;
@@ -1363,6 +1485,31 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 			}
 			ldo_desc->ops = &s2mps15_m86_ldo8_ops;
 			ldo_desc->ramp_delay = 12000;
+			desc = ldo_desc;
+		} else if (s2mps11->buck6_normal_on && i == S2MPS15_BUCK6) {
+			struct regulator_desc *buck_desc;
+
+			buck_desc = devm_kmemdup(&pdev->dev, desc,
+						 sizeof(*buck_desc),
+						 GFP_KERNEL);
+			if (!buck_desc) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			buck_desc->ops = &s2mps15_m86_buck14_ops;
+			buck_desc->ramp_delay = s2mps11->buck6_ramp_delay;
+			desc = buck_desc;
+		} else if (s2mps11->buck6_normal_on && i == S2MPS15_LDO10) {
+			struct regulator_desc *ldo_desc;
+
+			ldo_desc = devm_kmemdup(&pdev->dev, desc,
+						sizeof(*ldo_desc),
+						GFP_KERNEL);
+			if (!ldo_desc) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			ldo_desc->ops = &s2mps15_m86_ldo10_ops;
 			desc = ldo_desc;
 		}
 

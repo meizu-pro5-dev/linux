@@ -481,15 +481,11 @@
 		samsung,bus = <&bus_mif>;
 	};
 
-	m86_gpu_buck6_observed: gpu-buck6-observed {
-		compatible = "meizu,m86-gpu-buck6-readonly";
-		regulator-name = "m86-gpu-buck6-encoded-readonly";
-	};
-
 	/* GPU DVFS on the G3D domain and BUCK6. */
 	m86_gpu_dvfs: gpu-dvfs-retained {
 		compatible = "meizu,m86-gpu-dvfs-retained";
 		#clock-cells = <0>;
+		vdd-g3d-supply = <&m86_buck6_g3d>;
 		clocks = <&fin_pll>, <&m86_apollo_clk>,
 			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>,
 			 <&clock_topc CLK_ACLK_MIF_LOGICAL>,
@@ -509,7 +505,6 @@
 		meizu,retained-g3d-ownership;
 		meizu,max-validated-frequency = <700000000>;
 		meizu,validated-buck6-normal-on;
-		meizu,gpu-normal-on-takeover;
 		/*
 		 * Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
 		 * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72).
@@ -939,7 +934,7 @@
 &gpu {
 	/delete-property/ power-domains;
 	status = "okay";
-	mali-supply = <&m86_gpu_buck6_observed>;
+	mali-supply = <&m86_buck6_g3d>;
 	clocks = <&m86_gpu_dvfs>;
 	clock-names = "core";
 	operating-points-v2 = <&m86_gpu_opps>;
@@ -1114,6 +1109,19 @@
 				regulator-always-on;
 				regulator-coupled-with = <&m86_buck4_int &m86_buck5_disp>;
 				regulator-coupled-max-spread = <400000 400000>;
+			};
+			m86_buck6_g3d: BUCK6 {
+				regulator-name = "vdd_g3d";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-always-on;
+				meizu,gpu-normal-on;
+			};
+			m86_ldo10_g3d_m: LDO10 {
+				regulator-name = "vdd_g3d_m";
+				regulator-min-microvolt = <800000>;
+				regulator-max-microvolt = <800000>;
+				regulator-always-on;
 			};
 			/*
 			 * Board LDOs. These constraints can write the voltage

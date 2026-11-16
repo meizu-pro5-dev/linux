@@ -15,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
 #include <asm/barrier.h>
 #include <linux/m86-gpu-dvfs.h>
@@ -45,6 +46,7 @@ struct g3d_cmu_ctx {
 
 struct gpu_dvfs {
  struct device *dev, *pmic;
+ struct regulator *vdd_g3d;
  struct device_node *gpu_node;
  struct clk_hw hw;
  struct clk *clock, *top_g3d_clk, *mif_clk;
@@ -420,6 +422,13 @@ static int set_voltage(struct gpu_dvfs *d,u32 uv,u32 old,u32 ramp)
  if(d->normal_on_voltage && !valid_uv)return -EPERM;
  sel=(uv-300000)/6250; /* r39 trim78/bit5set: normal vendor path, NO OCP+5. */
  if(sel>255)return -ERANGE;
+ if(d->vdd_g3d) {
+  ret = regulator_set_voltage(d->vdd_g3d, uv, uv);
+  if (ret)
+   return ret;
+  d->cur_sel = sel;
+  return 0;
+ }
  device_lock(d->pmic);
  if(!d->normal_on_voltage){ret=check_rail(d,&old,&ramp);if(ret)goto out;}
  map=dev_get_regmap(d->pmic,NULL);
@@ -1178,6 +1187,13 @@ static int gpu_probe(struct platform_device *pdev)
  ret=devm_add_action_or_reset(&pdev->dev,put_pmic,d->pmic);if(ret)return ret;
  if(!device_link_add(&pdev->dev,d->pmic,DL_FLAG_AUTOREMOVE_CONSUMER))return -EINVAL;
  if(!d->pmic->driver || !dev_get_regmap(d->pmic,NULL))return -EPROBE_DEFER;
+ d->vdd_g3d=devm_regulator_get_optional(&pdev->dev,"vdd-g3d");
+ if(IS_ERR(d->vdd_g3d)) {
+  if(PTR_ERR(d->vdd_g3d)==-ENODEV)
+   d->vdd_g3d=NULL;
+  else
+   return PTR_ERR(d->vdd_g3d);
+ }
  ret=validate_asv(d);
  if(ret)return dev_err_probe(&pdev->dev,ret,"GPU ASV handoff validation failed\n");
  if(!domain_on(d) || actual_rate(d)!=266000000 || !(readl(d->cmu+0x800)&1)) {
