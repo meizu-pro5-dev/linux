@@ -33,7 +33,7 @@
 
 #include <linux/atomic.h>
 #include <linux/pm_qos.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 #include "i2s.h"
 #include <linux/mfd/arizona/registers.h>
 #include "../codecs/wm8998.h"

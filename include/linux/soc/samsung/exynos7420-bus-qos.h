@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-#ifndef _LINUX_M86_BUS_QOS_H
-#define _LINUX_M86_BUS_QOS_H
+#ifndef __LINUX_SOC_SAMSUNG_EXYNOS7420_BUS_QOS_H
+#define __LINUX_SOC_SAMSUNG_EXYNOS7420_BUS_QOS_H
 
 #include <linux/device.h>
 #include <linux/pm_qos.h>
@@ -37,4 +37,4 @@ static inline void exynos_bus_qos_remove_request(struct dev_pm_qos_request *req)
 		dev_pm_qos_remove_request(req);
 }
 
-#endif /* _LINUX_M86_BUS_QOS_H */
+#endif /* __LINUX_SOC_SAMSUNG_EXYNOS7420_BUS_QOS_H */

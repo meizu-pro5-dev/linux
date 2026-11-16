@@ -13,7 +13,7 @@
 #include <linux/pm_opp.h>
 #include <linux/seq_file.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
-#include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv-cal.h>
 
 #define EXYNOS7420_CHIPID_BASE		0x10000000
 #define EXYNOS7420_CHIPID_SIZE		0x1000

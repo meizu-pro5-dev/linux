@@ -13,7 +13,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -49,7 +49,7 @@
 #include <linux/pm_qos.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
-#include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
 
 #define EXYNOS7420_NUM_MIF_CH		4

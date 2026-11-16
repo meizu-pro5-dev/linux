@@ -22,7 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/syscore_ops.h>
 #include <linux/workqueue.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 
 #define NUM_DREX_CHANNELS		4
 #define DREX_MAP_SIZE			0x1000

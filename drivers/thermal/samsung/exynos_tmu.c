@@ -15,7 +15,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/interrupt.h>
-#include <linux/m86-tmu-transition.h>
+#include <linux/soc/samsung/exynos7420-tmu.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
 #include <linux/of.h>

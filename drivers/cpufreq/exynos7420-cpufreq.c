@@ -23,14 +23,14 @@
 #include <linux/smp.h>
 #include <linux/thermal.h>
 #include <linux/workqueue.h>
-#include <linux/m86-bus-qos.h>
-#include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
 #include <linux/soc/samsung/exynos7420-cpuidle.h>
-#include <linux/m86-tmu-transition.h>
+#include <linux/soc/samsung/exynos7420-tmu.h>
 
 struct m86_opp { unsigned int khz, uv, bus_qos; };
-#include "m86-opp.h"
+#include "exynos7420-opp.h"
 struct m86_cluster {
 	struct clk *clk;
 	struct regulator *supply;
@@ -677,7 +677,7 @@ static int m86_policy_exit(struct cpufreq_policy *policy)
 
 /*
  * Android M0 IPA-derived per-core dynamic powers in micro-Watts, not measured
- * package/battery power. Same v15/group8 OPPs as m86-opp.h. Native EM models
+ * package/battery power. Same v15/group8 OPPs as exynos7420-opp.h. Native EM models
  * per-CPU cost; the old separate 4% shared-cluster heuristic is not duplicated.
  */
 static const unsigned long atlas_power_uw[] = {

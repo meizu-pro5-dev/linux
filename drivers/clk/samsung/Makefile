@@ -24,5 +24,5 @@ obj-$(CONFIG_EXYNOS_ARM64_COMMON_CLK)	+= clk-exynosautov9.o
 obj-$(CONFIG_S3C64XX_COMMON_CLK)	+= clk-s3c64xx.o
 obj-$(CONFIG_S5PV210_COMMON_CLK)	+= clk-s5pv210.o clk-s5pv210-audss.o
 obj-$(CONFIG_TESLA_FSD_COMMON_CLK)	+= clk-fsd.o
-obj-$(CONFIG_M86_CPU_CLOCKS) += m86-cpu-clocks.o
+obj-$(CONFIG_M86_CPU_CLOCKS) += clk-exynos7420-cpu.o
 

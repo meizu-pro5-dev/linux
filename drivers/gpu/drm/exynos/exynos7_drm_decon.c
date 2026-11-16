@@ -22,7 +22,7 @@
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_qos.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 
 #include <video/of_display_timing.h>
 #include <video/of_videomode.h>

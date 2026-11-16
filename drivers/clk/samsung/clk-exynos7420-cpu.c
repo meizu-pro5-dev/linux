@@ -23,7 +23,8 @@ struct m86_rate {
 	unsigned long hz;
 	u32 div0, div1, pms;
 };
-#include "m86-rate-tables.h"
+
+#include "clk-exynos7420-cpu-tables.h"
 
 struct m86_cpuclk {
 	struct clk_hw hw;

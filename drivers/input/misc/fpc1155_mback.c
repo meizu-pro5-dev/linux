@@ -18,7 +18,7 @@
 #include <linux/init.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>

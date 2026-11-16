@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-#ifndef _LINUX_M86_TMU_TRANSITION_H
-#define _LINUX_M86_TMU_TRANSITION_H
+#ifndef __LINUX_SOC_SAMSUNG_EXYNOS7420_TMU_H
+#define __LINUX_SOC_SAMSUNG_EXYNOS7420_TMU_H
 
 #include <linux/notifier.h>
 /* Cached maximum TMU temperature, live max read, and threshold-IRQ notifications. */

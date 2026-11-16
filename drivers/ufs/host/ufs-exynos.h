@@ -10,7 +10,7 @@
 #define _UFS_EXYNOS_H_
 
 #include <linux/pm_qos.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 
 /*
  * UNIPRO registers

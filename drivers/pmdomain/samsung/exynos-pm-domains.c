@@ -22,7 +22,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
-#include <linux/m86-tmu-transition.h>
+#include <linux/soc/samsung/exynos7420-tmu.h>
 
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */

@@ -12,7 +12,7 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
-#include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv-cal.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
 
 #define SYSREG_APOLLO_EMA_CON		0x0038

@@ -12,7 +12,7 @@ enum exynos7420_asv_domain {
 };
 
 #include <linux/errno.h>
-#include <linux/m86-asv-cal.h>
+#include <linux/soc/samsung/exynos7420-asv-cal.h>
 
 struct device;
 

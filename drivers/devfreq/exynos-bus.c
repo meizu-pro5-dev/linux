@@ -21,7 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_qos.h>
 #include <linux/regulator/consumer.h>
-#include <linux/m86-bus-qos.h>
+#include <linux/soc/samsung/exynos7420-bus-qos.h>
 
 #include <linux/workqueue.h>
 

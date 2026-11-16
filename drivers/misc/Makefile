@@ -67,6 +67,6 @@ obj-$(CONFIG_TMR_MANAGER)      += xilinx_tmr_manager.o
 obj-$(CONFIG_TMR_INJECT)	+= xilinx_tmr_inject.o
 obj-$(CONFIG_TPS6594_ESM)	+= tps6594-esm.o
 obj-$(CONFIG_TPS6594_PFSM)	+= tps6594-pfsm.o
-obj-$(CONFIG_M86_TSU6721)	+= m86_tsu6721.o
+obj-$(CONFIG_M86_TSU6721)	+= tsu6721.o
 obj-$(CONFIG_MIPI_LLI)		+= mipi-lli/
 obj-$(CONFIG_SEC_MODEM_IF_V1)	+= modem_v1/
