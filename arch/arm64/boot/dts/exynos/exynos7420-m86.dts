@@ -481,10 +481,11 @@
 		samsung,bus = <&bus_mif>;
 	};
 
-	/* GPU DVFS on the G3D domain and BUCK6. */
+	/* Disabled during Stage 2 while pd_g3d + cmu_g3d run standalone; deleted in Stage 3. */
 	m86_gpu_dvfs: gpu-dvfs-retained {
 		compatible = "meizu,m86-gpu-dvfs-retained";
 		#clock-cells = <0>;
+		status = "disabled";
 		vdd-g3d-supply = <&m86_buck6_g3d>;
 		clocks = <&fin_pll>, <&m86_apollo_clk>,
 			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>,
@@ -525,21 +526,28 @@
 		 */
 		opp-266000000 {
 			opp-hz = /bits/ 64 <266000000>;
+			opp-microvolt = <762500>;
 		};
+		/* Temporarily disabled during Stage 2 (before opp-microvolt + ASV in Stage 3). */
 		opp-350000000 {
 			opp-hz = /bits/ 64 <350000000>;
+			status = "disabled";
 		};
 		opp-420000000 {
 			opp-hz = /bits/ 64 <420000000>;
+			status = "disabled";
 		};
 		opp-544000000 {
 			opp-hz = /bits/ 64 <544000000>;
+			status = "disabled";
 		};
 		opp-600000000 {
 			opp-hz = /bits/ 64 <600000000>;
+			status = "disabled";
 		};
 		opp-700000000 {
 			opp-hz = /bits/ 64 <700000000>;
+			status = "disabled";
 		};
 		/* Retained for a separately validated 772 MHz experiment. */
 		opp-772000000 {
@@ -831,7 +839,7 @@
 };
 
 &cmu_g3d {
-	status = "disabled";
+	status = "okay";
 };
 
 /*
@@ -930,15 +938,14 @@
 	clock-frequency = <24000000>;
 };
 
-/* G3D power and CMU_G3D are owned exclusively by m86-gpu-dvfs. */
+/* G3D power (pd_g3d) and clocks (cmu_g3d) via standard genpd + CCF. */
 &gpu {
-	/delete-property/ power-domains;
 	status = "okay";
 	mali-supply = <&m86_buck6_g3d>;
-	clocks = <&m86_gpu_dvfs>;
-	clock-names = "core";
+	clocks = <&cmu_g3d CLK_ACLK_G3D>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
+	clock-names = "core", "bus";
+	power-domains = <&pd_g3d>;
 	operating-points-v2 = <&m86_gpu_opps>;
-	meizu,gpu-dvfs-coordinator = <&m86_gpu_dvfs>;
 };
 
 &hsi2c_0 {
@@ -1441,7 +1448,7 @@
 };
 
 &pd_g3d {
-	status = "disabled";
+	status = "okay";
 };
 
 &pdma0 {

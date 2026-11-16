@@ -732,11 +732,12 @@
 			status = "okay";
 		};
 
-		/* G3D PMU block, as in the vendor DT and m86-gpu-dvfs (0x4100). */
+		/* G3D PMU block, with TOPC SCLK gate matching m86-gpu-dvfs (0x4100). */
 		pd_g3d: power-domain@105c4100 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "samsung,exynos7420-pd";
 			reg = <0x105c4100 0x20>;
 			#power-domain-cells = <0>;
+			clocks = <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>;
 			label = "G3D";
 		};
 
@@ -801,6 +802,9 @@
 			compatible = "samsung,exynos7-clock-g3d";
 			reg = <0x14aa0000 0x1000>;
 			#clock-cells = <1>;
+			clocks = <&fin_pll>;
+			clock-names = "fin_pll";
+			power-domains = <&pd_g3d>;
 		};
 
 		cmu_aud: clock-controller@114c0000 {

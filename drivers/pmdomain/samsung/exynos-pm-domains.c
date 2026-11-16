@@ -22,6 +22,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
+#include <linux/m86-tmu-transition.h>
 
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
@@ -46,6 +47,7 @@ struct exynos7420_pd_cfg {
 	const char *name;
 	u32 pmu_off;
 	bool is_aud;
+	bool is_g3d;
 	const struct exynos7420_reg_bits *local_clks;
 	size_t num_local_clks;
 	const struct exynos7420_reg_bits *async_clks;
@@ -266,6 +268,19 @@ static struct exynos7420_sfr exynos7420_save_aud[] = {
 	{ 0x114b0900 }, { 0x114b0904 },
 };
 
+static const struct exynos7420_reg_bits exynos7420_local_clks_g3d[] = {
+	{ 0x14aa0800, BIT(1) },
+};
+
+static const struct exynos7420_reg_bits exynos7420_sys_pwr_g3d[] = {
+	{ 0x105c1460, BIT(0) },
+	{ 0x105c14a0, BIT(0) },
+	{ 0x105c14e0, BIT(0) },
+	{ 0x105c1520, BIT(0) },
+	{ 0x105c1560, BIT(1) | BIT(0) },
+	{ 0x105c15a0, BIT(0) },
+};
+
 static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 	{
 		.name = "pd-aud",
@@ -362,6 +377,15 @@ static const struct exynos7420_pd_cfg exynos7420_pds[] = {
 		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_disp),
 		.cfw_ids = exynos7420_cfw_disp,
 		.num_cfw_ids = ARRAY_SIZE(exynos7420_cfw_disp),
+	},
+	{
+		.name = "pd-g3d",
+		.pmu_off = 0x4100,
+		.is_g3d = true,
+		.local_clks = exynos7420_local_clks_g3d,
+		.num_local_clks = ARRAY_SIZE(exynos7420_local_clks_g3d),
+		.sys_pwr_regs = exynos7420_sys_pwr_g3d,
+		.num_sys_pwr_regs = ARRAY_SIZE(exynos7420_sys_pwr_g3d),
 	},
 };
 
@@ -577,6 +601,33 @@ struct exynos_pm_domain {
 	bool clks_enabled;
 };
 
+static int exynos7420_g3d_tmu_power_off(void)
+{
+	if (IS_ENABLED(CONFIG_EXYNOS_THERMAL))
+		return m86_tmu_gpu_power_off();
+	return 0;
+}
+
+static int exynos7420_g3d_tmu_power_on(void)
+{
+	if (IS_ENABLED(CONFIG_EXYNOS_THERMAL))
+		return m86_tmu_gpu_power_on();
+	return 0;
+}
+
+static int exynos7420_g3d_restore_ema(void)
+{
+	void __iomem *sysreg_page = exynos7420_cached_page(0x10051224);
+
+	if (!sysreg_page)
+		return -ENOMEM;
+
+	writel_relaxed(0x31, sysreg_page + 0x224);
+	if (readl_relaxed(sysreg_page + 0x224) != 0x31)
+		return -EIO;
+	return 0;
+}
+
 static int exynos7420_power_off_one(struct exynos_pm_domain *pd)
 {
 	const struct exynos7420_pd_cfg *cfg = pd->e7420_cfg;
@@ -592,11 +643,21 @@ static int exynos7420_power_off_one(struct exynos_pm_domain *pd)
 		return 0;
 	}
 
-	if (!pd->clks_enabled && pd->num_clks > 0) {
-		int ret = clk_bulk_enable(pd->num_clks, pd->clks);
+	if (cfg->is_g3d) {
+		int ret = exynos7420_g3d_tmu_power_off();
 
 		if (ret)
 			return ret;
+	}
+
+	if (!pd->clks_enabled && pd->num_clks > 0) {
+		int ret = clk_bulk_enable(pd->num_clks, pd->clks);
+
+		if (ret) {
+			if (cfg->is_g3d)
+				(void)exynos7420_g3d_tmu_power_on();
+			return ret;
+		}
 		pd->clks_enabled = true;
 	}
 	udelay(10);
@@ -608,10 +669,12 @@ static int exynos7420_power_off_one(struct exynos_pm_domain *pd)
 	exynos7420_apply_pmu_list(pmu_base, cfg->sys_pwr_regs,
 				  cfg->num_sys_pwr_regs, false);
 
+	if (cfg->is_g3d)
+		writel_relaxed(0xffff00c0, pmu_base + cfg->pmu_off + 0x10);
 	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
 	writel_relaxed(0x0, pmu_base + cfg->pmu_off + 0x0);
 
-	timeout = 200;
+	timeout = cfg->is_g3d ? 1000 : 200;
 	while ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0) {
 		if (--timeout <= 0)
 			break;
@@ -644,8 +707,12 @@ static int exynos7420_power_off_one(struct exynos_pm_domain *pd)
 		clk_bulk_disable(pd->num_clks, pd->clks);
 		pd->clks_enabled = false;
 	}
-	pr_info("exynos-pd: powered off %s (stat=%#x, top_clks gated)\n",
-		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	if (cfg->is_g3d)
+		pr_debug("exynos-pd: powered off %s (stat=%#x, top_clks gated)\n",
+			 cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	else
+		pr_info("exynos-pd: powered off %s (stat=%#x, top_clks gated)\n",
+			cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
 	return 0;
 }
 
@@ -745,10 +812,14 @@ static int exynos7420_power_on_one(struct exynos_pm_domain *pd)
 				  cfg->num_sys_pwr_regs, false);
 
 	/* 3. Write OPTION and PWR_CFG to power on */
+	if (cfg->is_g3d)
+		writel_relaxed(0xffff00c0, pmu_base + cfg->pmu_off + 0x10);
 	writel_relaxed(0x0102, pmu_base + cfg->pmu_off + 0x8);
 	writel_relaxed(0xf, pmu_base + cfg->pmu_off + 0x0);
 
-	/* 4. Poll status == 0xf (up to 2ms) */
+	/* 4. Poll status == 0xf (up to 2ms / 10ms for G3D) */
+	if (cfg->is_g3d)
+		timeout = 1000;
 	while ((readl_relaxed(pmu_base + cfg->pmu_off + 0x4) & 0xf) != 0xf) {
 		if (--timeout <= 0)
 			break;
@@ -776,8 +847,20 @@ static int exynos7420_power_on_one(struct exynos_pm_domain *pd)
 	if (!cfg->async_before_on)
 		exynos7420_apply_async_clks(pmu_base, cfg);
 
-	pr_info("exynos-pd: powered on %s (stat=%#x)\n",
-		cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	if (cfg->is_g3d) {
+		int ret = exynos7420_g3d_restore_ema();
+
+		if (ret)
+			return ret;
+		ret = exynos7420_g3d_tmu_power_on();
+		if (ret)
+			return ret;
+		pr_debug("exynos-pd: powered on %s (stat=%#x)\n",
+			 cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	} else {
+		pr_info("exynos-pd: powered on %s (stat=%#x)\n",
+			cfg->name, readl_relaxed(pmu_base + cfg->pmu_off + 0x4));
+	}
 
 	/*
 	 * 6. The secure world protects the block's content firewall again
@@ -882,15 +965,6 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 	{ },
 };
 
-/*
- * Domains genpd must never power off. Every other Exynos7420 domain (AUD,
- * CAM0, CAM1, DISP, ISP0, ISP1, MFC, MSCL, VPP) is powered on by genpd for its
- * consumers and off when unused, including by genpd_power_off_unused() at
- * late_initcall.
- *  G3D  - GPU power is owned by m86-gpu-dvfs.
- */
-static const char * const exynos_pd_always_on[] = { "G3D" };
-
 static const char *exynos_get_domain_name(struct device *dev,
 					  struct device_node *node)
 {
@@ -927,9 +1001,6 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
-	if (match_string(exynos_pd_always_on, ARRAY_SIZE(exynos_pd_always_on),
-			 pd->pd.name) >= 0)
-		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
 	pd->local_pwr_option = pm_domain_cfg->local_pwr_option;
 

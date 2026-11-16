@@ -6,6 +6,7 @@
 
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/delay.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/io.h>
@@ -2477,6 +2478,8 @@ static void __init exynos7_clk_aud_hw_init(struct device_node *np)
 /* Register Offset definitions for CMU_G3D (0x14AA0000) */
 #define G3D_PLL_LOCK			0x0000
 #define G3D_PLL_CON0			0x0100
+#define G3D_PLL_CON1			0x0104
+#define G3D_PLL_CON2			0x0108
 #define MUX_SEL_G3D			0x0200
 #define MUX_ENABLE_G3D			0x0300
 #define MUX_STAT_G3D			0x0400
@@ -2486,15 +2489,52 @@ static void __init exynos7_clk_aud_hw_init(struct device_node *np)
 #define ENABLE_PCLK_G3D			0x0900
 #define ENABLE_SCLK_G3D			0x0a00
 #define ENABLE_IP_G3D0			0x0b00
+#define G3D_PLL_PMS_MASK		((0x3ffU << 16) | (0x3fU << 8) | 7U)
 
-/* Read inherited PLL settings; no enable, set_rate or voltage operations. */
-static struct clk_hw g3d_pll_ro_hw;
-static void __iomem *g3d_pll_ro_base;
+struct exynos7_g3d_pll_rate {
+	unsigned long rate;
+	u16 m;
+	u8 p;
+	u8 s;
+	u8 hpm;
+};
 
-static unsigned long g3d_pll_ro_recalc_rate(struct clk_hw *hw,
+static const struct exynos7_g3d_pll_rate g3d_pll_tbl[] = {
+	{ 266000000, 133, 6, 1, 2 },
+	{ 350000000, 175, 6, 1, 2 },
+	{ 420000000, 105, 3, 1, 2 },
+	{ 544000000,  68, 3, 0, 3 },
+	{ 600000000,  75, 3, 0, 3 },
+	{ 700000000, 175, 6, 0, 3 },
+	{ 772000000, 193, 6, 0, 3 },
+};
+
+static struct clk_hw g3d_pll_hw;
+static void __iomem *g3d_pll_base;
+static struct device *g3d_cmu_dev;
+
+static int g3d_select_fin_bypass(void __iomem *base, bool fin)
+{
+	u32 val = readl(base + MUX_SEL_G3D);
+	u32 stat;
+
+	if (fin)
+		val |= BIT(8);
+	else
+		val &= ~BIT(8);
+	writel(val, base + MUX_SEL_G3D);
+	if (readl(base + MUX_SEL_G3D) != val)
+		return -EIO;
+	return readl_poll_timeout(base + MUX_STAT_G3D, stat,
+				  !(stat & (BIT(2) | BIT(10))) &&
+				  (stat & 7U) == !!(val & BIT(0)),
+				  1, 10000);
+}
+
+static unsigned long g3d_pll_recalc_rate(struct clk_hw *hw,
 					 unsigned long parent_rate)
 {
-	u32 con = readl(g3d_pll_ro_base + G3D_PLL_CON0);
+	u32 con = readl(g3d_pll_base + G3D_PLL_CON0);
 	u32 m = (con >> 16) & 0x3ff;
 	u32 p = (con >> 8) & 0x3f;
 	u32 s = con & 7;
@@ -2504,13 +2544,92 @@ static unsigned long g3d_pll_ro_recalc_rate(struct clk_hw *hw,
 	return div_u64((u64)parent_rate * m, p << s);
 }
 
-static const struct clk_ops g3d_pll_ro_ops = {
-	.recalc_rate = g3d_pll_ro_recalc_rate,
+static long g3d_pll_round_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long *prate)
+{
+	unsigned int i;
+
+	for (i = ARRAY_SIZE(g3d_pll_tbl); i > 0; i--) {
+		if (g3d_pll_tbl[i - 1].rate <= rate)
+			return g3d_pll_tbl[i - 1].rate;
+	}
+	return g3d_pll_tbl[0].rate;
+}
+
+static int g3d_pll_set_rate(struct clk_hw *hw, unsigned long drate,
+			    unsigned long prate)
+{
+	const struct exynos7_g3d_pll_rate *r = NULL;
+	u32 old, desired, val, div, settle;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(g3d_pll_tbl); i++) {
+		if (g3d_pll_tbl[i].rate == drate) {
+			r = &g3d_pll_tbl[i];
+			break;
+		}
+	}
+	if (!r)
+		return -EINVAL;
+	if (!(readl(g3d_pll_base + MUX_SEL_G3D) & BIT(0)))
+		return -EOPNOTSUPP;
+
+	desired = ((u32)r->m << 16) | ((u32)r->p << 8) | r->s;
+	old = readl(g3d_pll_base + G3D_PLL_CON0);
+	if ((old & (BIT(31) | BIT(29) | G3D_PLL_PMS_MASK)) ==
+	    (BIT(31) | BIT(29) | desired) &&
+	    ((readl(g3d_pll_base + DIV_G3D) >> 8) & 3U) == (r->hpm - 1U))
+		return 0;
+
+	ret = g3d_select_fin_bypass(g3d_pll_base, true);
+	if (ret)
+		return ret;
+
+	old = readl(g3d_pll_base + G3D_PLL_CON0);
+	if (!(old & BIT(31)))
+		return -EIO;
+	desired |= (old & ~G3D_PLL_PMS_MASK);
+	writel((u32)r->p * 150U, g3d_pll_base + G3D_PLL_LOCK);
+	writel(desired, g3d_pll_base + G3D_PLL_CON0);
+	if ((readl(g3d_pll_base + G3D_PLL_CON0) & G3D_PLL_PMS_MASK) !=
+	    (desired & G3D_PLL_PMS_MASK))
+		return -EIO;
+
+	settle = DIV_ROUND_UP((u32)r->p * 150U, 24U) + 10U;
+	usleep_range(settle, settle + 10U);
+	ret = readl_poll_timeout(g3d_pll_base + G3D_PLL_CON0, val,
+				 (val & BIT(29)) &&
+				 (val & G3D_PLL_PMS_MASK) ==
+				 (desired & G3D_PLL_PMS_MASK),
+				 1, 10000);
+	if (ret)
+		return ret;
+	usleep_range(2, 5);
+
+	/* Update HPM divider while core runs safely on 24 MHz fin_pll bypass. */
+	div = readl(g3d_pll_base + DIV_G3D);
+	div = (div & ~(3U << 8)) | ((u32)(r->hpm - 1U) << 8);
+	writel(div, g3d_pll_base + DIV_G3D);
+	if (readl(g3d_pll_base + DIV_G3D) != div)
+		return -EIO;
+	ret = readl_poll_timeout(g3d_pll_base + DIV_STAT_G3D, val,
+				 !(val & BIT(8)), 1, 10000);
+	if (ret)
+		return ret;
+
+	return g3d_select_fin_bypass(g3d_pll_base, false);
+}
+
+static const struct clk_ops g3d_pll_ops = {
+	.recalc_rate = g3d_pll_recalc_rate,
+	.round_rate = g3d_pll_round_rate,
+	.set_rate = g3d_pll_set_rate,
 };
 
-static const struct clk_init_data g3d_pll_ro_init = {
+static const struct clk_init_data g3d_pll_init = {
 	.name = "fout_g3d_pll",
-	.ops = &g3d_pll_ro_ops,
+	.ops = &g3d_pll_ops,
 	.parent_names = (const char * const[]) { "fin_pll" },
 	.num_parents = 1,
 	.flags = CLK_GET_RATE_NOCACHE,
@@ -2519,32 +2638,44 @@ static const struct clk_init_data g3d_pll_ro_init = {
 PNAME(mout_g3d_pll_p) = { "fin_pll", "fout_g3d_pll" };
 PNAME(mout_aclk_g3d_400_p) = { "mout_g3d_pll", "fin_pll" };
 
-static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+static const struct samsung_mux_clock g3d_mux_clks[] = {
 	/* Vendor PLL bypass mux bit 0; preserve the inherited selection. */
 	MUX_F(0, "mout_g3d_pll", mout_g3d_pll_p, MUX_SEL_G3D, 0, 1,
-		CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
-	/* Vendor mout_g3d is bit 8, not the currently unexplained bit 4. */
+		CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT | CLK_GET_RATE_NOCACHE,
+		CLK_MUX_READ_ONLY),
+	/* Vendor mout_g3d is bit 8; toggled around PLL relock in g3d_pll_set_rate. */
 	MUX_F(CLK_MOUT_ACLK_G3D_400, "mout_aclk_g3d_400", mout_aclk_g3d_400_p,
-		MUX_SEL_G3D, 8, 1, CLK_GET_RATE_NOCACHE, CLK_MUX_READ_ONLY),
+		MUX_SEL_G3D, 8, 1,
+		CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT | CLK_GET_RATE_NOCACHE,
+		CLK_MUX_READ_ONLY),
 };
 
-static const struct samsung_div_clock g3d_div_clks[] __initconst = {
-	DIV(CLK_DIV_ACLK_G3D, "div_aclk_g3d", "mout_aclk_g3d_400",
-			DIV_G3D, 0, 3),
+static const struct samsung_div_clock g3d_div_clks[] = {
+	DIV_F(CLK_DIV_ACLK_G3D, "div_aclk_g3d", "mout_aclk_g3d_400",
+	      DIV_G3D, 0, 3, CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE,
+	      CLK_DIVIDER_READ_ONLY),
 	DIV(CLK_DIV_PCLK_G3D, "div_pclk_g3d", "div_aclk_g3d",
 			DIV_G3D, 4, 3),
 };
 
-static const struct samsung_gate_clock g3d_gate_clks[] __initconst = {
+static const struct samsung_gate_clock g3d_gate_clks[] = {
 	GATE(CLK_ACLK_G3D, "aclk_g3d", "div_aclk_g3d",
-			ENABLE_ACLK_G3D, 0, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED, 0),
+			ENABLE_ACLK_G3D, 0,
+			CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE | CLK_IGNORE_UNUSED,
+			0),
 	GATE(CLK_PCLK_SYSREG_G3D, "pclk_sysreg_g3d", "div_pclk_g3d",
-			ENABLE_PCLK_G3D, 0, CLK_IGNORE_UNUSED, 0),
+			ENABLE_PCLK_G3D, 0,
+			CLK_GET_RATE_NOCACHE | CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_PCLK_PMU_G3D, "pclk_pmu_g3d", "div_pclk_g3d",
-			ENABLE_PCLK_G3D, 1, CLK_IGNORE_UNUSED, 0),
+			ENABLE_PCLK_G3D, 1,
+			CLK_GET_RATE_NOCACHE | CLK_IGNORE_UNUSED, 0),
 };
 
-static const unsigned long g3d_clk_regs[] __initconst = {
+static const unsigned long g3d_clk_regs[] = {
+	G3D_PLL_LOCK,
+	G3D_PLL_CON0,
+	G3D_PLL_CON1,
+	G3D_PLL_CON2,
 	MUX_SEL_G3D,
 	DIV_G3D,
 	ENABLE_ACLK_G3D,
@@ -2552,7 +2683,7 @@ static const unsigned long g3d_clk_regs[] __initconst = {
 	ENABLE_SCLK_G3D,
 };
 
-static const struct samsung_cmu_info g3d_cmu_info __initconst = {
+static const struct samsung_cmu_info g3d_cmu_info = {
 	.mux_clks		= g3d_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(g3d_mux_clks),
 	.div_clks		= g3d_div_clks,
@@ -2562,28 +2693,120 @@ static const struct samsung_cmu_info g3d_cmu_info __initconst = {
 	.nr_clk_ids		= G3D_NR_CLK,
 	.clk_regs		= g3d_clk_regs,
 	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
+	.no_pm_smc		= true,
 };
 
-static void __init exynos7_clk_g3d_init(struct device_node *np)
+struct exynos7_g3d_save {
+	bool valid;
+	u32 lock, con0, con1, con2, mux, div, aclk, pclk, sclk;
+};
+
+static struct exynos7_g3d_save g3d_cmu_save;
+
+static int exynos7_g3d_cmu_suspend(struct device *dev)
 {
-	struct samsung_clk_provider *ctx;
+	struct samsung_clk_provider *ctx = exynos_arm64_cmu_ctx(dev);
+	void __iomem *base = ctx ? ctx->reg_base : g3d_pll_base;
+	u32 val;
 	int ret;
 
-	ctx = samsung_cmu_register_one(np, &g3d_cmu_info);
-	if (!ctx)
-		return;
-	g3d_pll_ro_base = ctx->reg_base;
-	g3d_pll_ro_hw.init = &g3d_pll_ro_init;
-	ret = clk_hw_register(NULL, &g3d_pll_ro_hw);
-	if (ret) {
-		pr_err("G3D: read-only PLL registration failed: %d\n", ret);
-		return;
-	}
-	samsung_clk_add_lookup(ctx, &g3d_pll_ro_hw, CLK_FOUT_G3D_PLL);
+	if (!base)
+		return -ENODEV;
+	g3d_pll_base = base;
+
+	ret = readl_poll_timeout(base + MUX_STAT_G3D, val,
+				 !(val & (BIT(2) | BIT(10))), 1, 10000);
+	if (ret)
+		return ret;
+	ret = readl_poll_timeout(base + DIV_STAT_G3D, val,
+				 !(val & (BIT(0) | BIT(4) | BIT(8))), 1, 10000);
+	if (ret)
+		return ret;
+
+	g3d_cmu_save.lock = readl(base + G3D_PLL_LOCK);
+	g3d_cmu_save.con0 = readl(base + G3D_PLL_CON0);
+	g3d_cmu_save.con1 = readl(base + G3D_PLL_CON1);
+	g3d_cmu_save.con2 = readl(base + G3D_PLL_CON2);
+	g3d_cmu_save.mux  = readl(base + MUX_SEL_G3D);
+	g3d_cmu_save.div  = readl(base + DIV_G3D);
+	g3d_cmu_save.aclk = readl(base + ENABLE_ACLK_G3D);
+	g3d_cmu_save.pclk = readl(base + ENABLE_PCLK_G3D);
+	g3d_cmu_save.sclk = readl(base + ENABLE_SCLK_G3D);
+	g3d_cmu_save.valid = true;
+
+	writel(g3d_cmu_save.aclk | BIT(1), base + ENABLE_ACLK_G3D);
+	(void)readl(base + ENABLE_ACLK_G3D);
+	return 0;
 }
 
-CLK_OF_DECLARE(exynos7_clk_g3d, "samsung,exynos7-clock-g3d",
-		exynos7_clk_g3d_init);
+static int exynos7_g3d_cmu_resume(struct device *dev)
+{
+	struct samsung_clk_provider *ctx = exynos_arm64_cmu_ctx(dev);
+	void __iomem *base = ctx ? ctx->reg_base : g3d_pll_base;
+	u32 lock, con0, con1, con2, mux, div, aclk, pclk, sclk, p, delay, val;
+	int ret;
+
+	if (!base)
+		return -ENODEV;
+	g3d_pll_base = base;
+	if (!g3d_cmu_save.valid)
+		return 0;
+
+	lock = g3d_cmu_save.lock;
+	con0 = g3d_cmu_save.con0;
+	con1 = g3d_cmu_save.con1;
+	con2 = g3d_cmu_save.con2;
+	mux  = g3d_cmu_save.mux;
+	div  = g3d_cmu_save.div;
+	aclk = g3d_cmu_save.aclk;
+	pclk = g3d_cmu_save.pclk | BIT(1);
+	sclk = g3d_cmu_save.sclk;
+
+	ret = g3d_select_fin_bypass(base, true);
+	if (ret)
+		return ret;
+
+	writel(con0 & ~(BIT(31) | BIT(29)), base + G3D_PLL_CON0);
+	writel(con1, base + G3D_PLL_CON1);
+	writel(con2, base + G3D_PLL_CON2);
+	writel(lock, base + G3D_PLL_LOCK);
+	writel(con0 & ~BIT(29), base + G3D_PLL_CON0);
+
+	p = (con0 >> 8) & 63U;
+	delay = DIV_ROUND_UP(max(lock, p * 150U), 24U) + 10U;
+	usleep_range(delay, delay + 10U);
+	ret = readl_poll_timeout(base + G3D_PLL_CON0, val,
+				 (val & BIT(29)) &&
+				 (val & ~BIT(29)) == (con0 & ~BIT(29)),
+				 1, 10000);
+	if (ret)
+		return ret;
+
+	writel(div, base + DIV_G3D);
+	ret = readl_poll_timeout(base + DIV_STAT_G3D, val,
+				 !(val & (BIT(0) | BIT(4) | BIT(8))), 1, 10000);
+	if (ret)
+		return ret;
+
+	/* Restore muxes safely with fin_pll bypass active first, then switch back to PLL. */
+	writel(mux | BIT(8), base + MUX_SEL_G3D);
+	ret = readl_poll_timeout(base + MUX_STAT_G3D, val,
+				 !(val & (BIT(2) | BIT(10))), 1, 10000);
+	if (ret)
+		return ret;
+	writel(mux, base + MUX_SEL_G3D);
+	ret = readl_poll_timeout(base + MUX_STAT_G3D, val,
+				 !(val & (BIT(2) | BIT(10))) &&
+				 (val & 7U) == !!(mux & BIT(0)),
+				 1, 10000);
+	if (ret)
+		return ret;
+
+	writel(aclk, base + ENABLE_ACLK_G3D);
+	writel(pclk, base + ENABLE_PCLK_G3D);
+	writel(sclk, base + ENABLE_SCLK_G3D);
+	return 0;
+}
 
 /* Register Offset definitions for CMU_DISP (0x13AD0000) */
 #define DISP_PLL_LOCK			0x0000
@@ -2895,6 +3118,11 @@ static const struct samsung_cmu_info vpp_cmu_info = {
 
 static int __init exynos7_cmu_probe(struct platform_device *pdev)
 {
+	bool is_g3d = of_device_is_compatible(pdev->dev.of_node,
+					      "samsung,exynos7-clock-g3d");
+	struct samsung_clk_provider *ctx;
+	int ret;
+
 	if (of_device_is_compatible(pdev->dev.of_node,
 				    "samsung,exynos7-clock-aud"))
 		exynos7_clk_aud_hw_init(pdev->dev.of_node);
@@ -2902,13 +3130,63 @@ static int __init exynos7_cmu_probe(struct platform_device *pdev)
 					 "samsung,exynos7-clock-cam0"))
 		exynos7_clk_cam0_hw_init(pdev->dev.of_node);
 
-	return exynos_arm64_register_cmu_pm(pdev, false);
+	if (is_g3d)
+		g3d_cmu_dev = &pdev->dev;
+
+	ret = exynos_arm64_register_cmu_pm(pdev, false);
+	if (ret) {
+		if (is_g3d)
+			g3d_cmu_dev = NULL;
+		return ret;
+	}
+
+	if (is_g3d) {
+		ctx = exynos_arm64_cmu_ctx(&pdev->dev);
+		ret = pm_runtime_resume_and_get(&pdev->dev);
+		if (ret) {
+			g3d_cmu_dev = NULL;
+			return ret;
+		}
+		g3d_pll_base = ctx->reg_base;
+		g3d_pll_hw.init = &g3d_pll_init;
+		ret = devm_clk_hw_register(&pdev->dev, &g3d_pll_hw);
+		if (!ret)
+			samsung_clk_add_lookup(ctx, &g3d_pll_hw,
+					       CLK_FOUT_G3D_PLL);
+		else
+			dev_err(&pdev->dev,
+				"G3D PLL registration failed: %d\n", ret);
+		pm_runtime_put(&pdev->dev);
+		if (ret) {
+			g3d_cmu_dev = NULL;
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int exynos7_cmu_runtime_suspend(struct device *dev)
+{
+	if (dev == g3d_cmu_dev)
+		return exynos7_g3d_cmu_suspend(dev);
+	return exynos_arm64_cmu_suspend(dev);
+}
+
+static int exynos7_cmu_runtime_resume(struct device *dev)
+{
+	if (dev == g3d_cmu_dev)
+		return exynos7_g3d_cmu_resume(dev);
+	return exynos_arm64_cmu_resume(dev);
 }
 
 static const struct of_device_id exynos7_cmu_of_match[] = {
 	{
 		.compatible = "samsung,exynos7-clock-aud",
 		.data = &aud_cmu_info,
+	}, {
+		.compatible = "samsung,exynos7-clock-g3d",
+		.data = &g3d_cmu_info,
 	}, {
 		.compatible = "samsung,exynos7-clock-mfc",
 		.data = &mfc_cmu_info,
@@ -2929,8 +3207,8 @@ static const struct of_device_id exynos7_cmu_of_match[] = {
 };
 
 static const struct dev_pm_ops exynos7_cmu_pm_ops = {
-	SET_RUNTIME_PM_OPS(exynos_arm64_cmu_suspend, exynos_arm64_cmu_resume,
-			   NULL)
+	SET_RUNTIME_PM_OPS(exynos7_cmu_runtime_suspend,
+			   exynos7_cmu_runtime_resume, NULL)
 	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
 				      pm_runtime_force_resume)
 };

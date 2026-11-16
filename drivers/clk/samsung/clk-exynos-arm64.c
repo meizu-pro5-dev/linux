@@ -231,6 +231,13 @@ void __init exynos_arm64_register_cmu(struct device *dev,
  *
  * Return: 0 on success, or negative error code on error.
  */
+struct samsung_clk_provider *exynos_arm64_cmu_ctx(struct device *dev)
+{
+	struct exynos_arm64_cmu_data *data = dev_get_drvdata(dev);
+
+	return data ? data->ctx : NULL;
+}
+
 int __init exynos_arm64_register_cmu_pm(struct platform_device *pdev,
 					bool set_manual)
 {

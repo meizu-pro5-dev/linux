@@ -1653,6 +1653,16 @@ int m86_tmu_gpu_power_on(void)
 
 	mutex_lock(&t->lock);
 	clk_enable(t->clk);
+	if (!t->enabled) {
+		/* System resume may power on pd-g3d during resume_noirq before
+		 * exynos_tmu_resume() runs; clear gpu_off so resume enables TMU2.
+		 */
+		spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+		t->gpu_off = false;
+		spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+		clk_disable(t->clk);
+		goto unlock_dev;
+	}
 	if (!t->gpu_off) {
 		if (!(readl(t->base + EXYNOS_TMU_REG_CONTROL) &
 		      BIT(EXYNOS_TMU_CORE_EN_SHIFT)))
@@ -1683,6 +1693,8 @@ int m86_tmu_gpu_power_on(void)
 
 	clk_enable(t->clk);
 	if (ret || temp < 5000 || temp > 105000) {
+		u32 status = readl(t->base + EXYNOS_TMU_REG_STATUS);
+
 		writel(t->saved_control & ~(BIT(EXYNOS_TMU_THERM_TRIP_EN_SHIFT) |
 					    BIT(EXYNOS_TMU_CORE_EN_SHIFT)),
 		       t->base + EXYNOS_TMU_REG_CONTROL);
@@ -1694,7 +1706,7 @@ int m86_tmu_gpu_power_on(void)
 		clk_disable(t->clk);
 		dev_err(&t->tzd->device,
 			"TMU2 power-on settle failed: ret=%d temp=%d status=%#x\n",
-			ret, temp, readl(t->base + EXYNOS_TMU_REG_STATUS));
+			ret, temp, status);
 		ret = ret ?: -ERANGE;
 		goto unlock_dev;
 	}

@@ -422,6 +422,17 @@ static int panfrost_device_resume(struct device *dev)
 #else
 		return -EOPNOTSUPP;
 #endif
+	} else {
+		int ret;
+
+		ret = clk_prepare_enable(pfdev->clock);
+		if (ret)
+			return ret;
+		ret = clk_prepare_enable(pfdev->bus_clock);
+		if (ret) {
+			clk_disable_unprepare(pfdev->clock);
+			return ret;
+		}
 	}
 	panfrost_device_reset(pfdev);
 	panfrost_devfreq_resume(pfdev);
@@ -479,6 +490,9 @@ static int panfrost_device_suspend(struct device *dev)
 #if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
 		m86_gpu_domain_suspend(dev, panfrost_gpu_hw_is_idle(pfdev));
 #endif
+	} else {
+		clk_disable_unprepare(pfdev->bus_clock);
+		clk_disable_unprepare(pfdev->clock);
 	}
 
 	return 0;
