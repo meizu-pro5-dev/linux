@@ -105,7 +105,7 @@ static int exynos_lli_clock_init(struct mipi_lli *lli)
 {
 	struct mipi_lli_clks *clks = &lli->clks;
 
-	if(!clks)
+	if (!clks)
 		return -EINVAL;
 
 	return 0;

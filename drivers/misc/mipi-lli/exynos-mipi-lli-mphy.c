@@ -83,8 +83,7 @@ static int exynos_mphy_cmn_init(struct exynos_mphy *phy)
 		writel(0x00, phy->loc_regs + (0x44*4));
 		writel(0x00, phy->loc_regs + (0x31*4));
 		is_first = false;
-	}
-	else {
+	} else {
 		writel(phy->afc_val, phy->loc_regs + (0x44*4));
 		writel(0x01, phy->loc_regs + (0x31*4));
 	}
@@ -220,8 +219,7 @@ int exynos_mphy_block_powerdown(struct device *lli_mphy, int enable)
 
 	phy_cmn_value = readl(phy->pma_regs + PHY_CMN_POWER_DOWN);
 
-	if(!enable)
-	{
+	if (!enable) {
 		/* Disable MPHY_TRSV_POWER_DOWN (Turn on TRSV block)  */
 		writel(0x80, phy->pma_regs + PHY_TRSV_POWER_DOWN_LOW);
 		writel(0x00, phy->pma_regs + PHY_TRSV_POWER_DOWN_HIGH);
@@ -230,9 +228,7 @@ int exynos_mphy_block_powerdown(struct device *lli_mphy, int enable)
 
 		/* Disable MPHY_CMN_POWER_DOWN (Turn on CMN block) */
 		writel(phy_cmn_value, phy->pma_regs + PHY_CMN_POWER_DOWN);
-	}
-	else
-	{
+	} else {
 		/* Enable MPHY_TRSV_POWER_DOWN (Turn off TRSV block) */
 		writel(0xFF, phy->pma_regs + PHY_TRSV_POWER_DOWN_LOW);
 		writel(0x3F, phy->pma_regs + PHY_TRSV_POWER_DOWN_HIGH);
@@ -308,8 +304,7 @@ static int exynos_mipi_lli_mphy_get_setting(struct exynos_mphy *phy)
 			phy->default_mode |= HS_RATE_B;
 		else
 			phy->default_mode |= HS_RATE_A;
-	}
-	else {
+	} else {
 		phy->default_mode = OPMODE_PWM | GEAR_1 | HS_RATE_A;
 	}
 
@@ -398,7 +393,7 @@ static int exynos_mipi_lli_mphy_probe(struct platform_device *pdev)
 	mphy->pma_regs = pma_regs;
 	mphy->lane = 1;
 	mphy->default_mode = OPMODE_PWM | GEAR_1 | HS_RATE_A;
-	mphy->is_shared_clk= true;
+	mphy->is_shared_clk = true;
 	exynos_mipi_lli_mphy_get_setting(mphy);
 
 	platform_set_drvdata(pdev, mphy);

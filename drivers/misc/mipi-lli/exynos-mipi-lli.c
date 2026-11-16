@@ -168,22 +168,20 @@ static void exynos_lli_print_dump(struct work_struct *work)
 				dump->mphy_std[i]);
 
 	len = ARRAY_SIZE(dump->mphy_cmn) / 8;
-	for (i = 0; i < len; i++)
-	{
+	for (i = 0; i < len; i++) {
 		lli_err(lli->dev, "[MPHY-CMN] 0x%x : 0x%08x\n",
 				0x10F20000 + i,
 				dump->mphy_cmn[i]);
 	}
 
 	len = MPHY_OVTM_DUMP_MAX;
-	for (i = 0; i < len; i++)
-	{
+	for (i = 0; i < len; i++) {
 		lli_err(lli->dev, "[MPHY-OVTM] 0x%x : 0x%08x\n",
 				0x10F20000 + i,
 				dump->mphy_ovtm[i]);
 	}
 
-	if(phy && phy->pma_regs) {
+	if (phy && phy->pma_regs) {
 		len = ARRAY_SIZE(dump->mphy_pma);
 		for (i = 0; i < len; i++)
 			dev_err(lli->dev, "[MPHY-PMA] 0x%x : 0x%08x\n",
@@ -202,14 +200,12 @@ static int exynos_lli_reg_dump(struct mipi_lli *lli)
 	memset(dump, 0, sizeof(struct mipi_lli_dump));
 
 	len = ARRAY_SIZE(lli_debug_info);
-	for (i = 0; i < len; i++){
+	for (i = 0; i < len; i++)
 		dump->lli[i] = readl(lli->regs + lli_debug_info[i]);
-	}
 
 	len = ARRAY_SIZE(phy_std_debug_info);
-	for (i = 0; i < len; i++){
+	for (i = 0; i < len; i++)
 		dump->mphy_std[i] = readl(phy->loc_regs + phy_std_debug_info[i]);
-	}
 
 	len = ARRAY_SIZE(dump->mphy_cmn) / 8;
 	writel(0x1, lli->regs + EXYNOS_PA_MPHY_CMN_ENABLE);
@@ -223,7 +219,7 @@ static int exynos_lli_reg_dump(struct mipi_lli *lli)
 		dump->mphy_ovtm[i] = readl(phy->loc_regs + i*4);
 	writel(0x0, lli->regs + EXYNOS_PA_MPHY_OV_TM_ENABLE);
 
-	if(phy->pma_regs) {
+	if (phy->pma_regs) {
 		len = ARRAY_SIZE(dump->mphy_pma);
 		for (i = 0; i < len; i++)
 			dump->mphy_pma[i] = readl(phy->pma_regs + i*4);
@@ -234,7 +230,7 @@ static int exynos_lli_reg_dump(struct mipi_lli *lli)
 
 static int exynos_lli_debug_info(struct mipi_lli *lli)
 {
-	if(lli->is_debug_possible) {
+	if (lli->is_debug_possible) {
 		exynos_lli_reg_dump(lli);
 		schedule_work(&lli->wq_print_dump);
 	}
@@ -273,7 +269,7 @@ static void exynos_lli_sys_init(struct work_struct *work)
 
 	mutex_unlock(&lli_mutex_lock);
 
-	if(lli->event == LLI_EVENT_RESUME)
+	if (lli->event == LLI_EVENT_RESUME)
 		mipi_lli_event_irq(lli, LLI_EVENT_RESUME);
 }
 
@@ -282,7 +278,7 @@ static int exynos_lli_init(struct mipi_lli *lli)
 	unsigned long irq_flags;
 
 	spin_lock_irqsave(&lli->lock, irq_flags);
-	if(atomic_read(&init_start) == 0) {
+	if (atomic_read(&init_start) == 0) {
 		atomic_set(&init_start, 1);
 		queue_work(lli->wq, &lli->wq_sys_init);
 	}
@@ -499,7 +495,7 @@ static int exynos_lli_intr_enable(struct mipi_lli *lli)
 	if (mipi_lli_suspended())
 		return -1;
 
-	if((atomic_read(&lli->state) != LLI_UNMOUNTED) && lli->is_clk_enabled) {
+	if ((atomic_read(&lli->state) != LLI_UNMOUNTED) && lli->is_clk_enabled) {
 		lli_intr = readl(lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
 
 		if (lli_intr != 0x3FFFF)
@@ -514,7 +510,7 @@ static int exynos_lli_intr_disable(struct mipi_lli *lli)
 	if (mipi_lli_suspended())
 		return -1;
 
-	if((atomic_read(&lli->state) != LLI_UNMOUNTED) && lli->is_clk_enabled)
+	if ((atomic_read(&lli->state) != LLI_UNMOUNTED) && lli->is_clk_enabled)
 		writel(0x0, lli->regs + EXYNOS_DME_LLI_INTR_ENABLE);
 
 	return 0;
@@ -711,7 +707,7 @@ static irqreturn_t exynos_mipi_lli_thread(int irq, void *_dev)
 
 	phy = dev_get_drvdata(lli->mphy);
 
-	if(lli->event == LLI_EVENT_UNMOUNTED) {
+	if (lli->event == LLI_EVENT_UNMOUNTED) {
 		mutex_lock(&lli_mutex_lock);
 
 		if (lli->is_clk_enabled && (atomic_read(&init_start) == 0)) {
@@ -723,7 +719,7 @@ static irqreturn_t exynos_mipi_lli_thread(int irq, void *_dev)
 		mipi_lli_event_irq(lli, LLI_EVENT_UNMOUNTED);
 		dev_err(dev, "Unmounted\n");
 		mutex_unlock(&lli_mutex_lock);
-	 } else if(lli->event == LLI_EVENT_MOUNTED) {
+	} else if (lli->event == LLI_EVENT_MOUNTED) {
 		rx_fsm_state = readl(phy->loc_regs + PHY_RX_FSM_STATE(0));
 		tx_fsm_state = readl(phy->loc_regs + PHY_TX_FSM_STATE(0));
 		csa_status = readl(lli->regs + EXYNOS_DME_CSA_SYSTEM_STATUS);

@@ -54,11 +54,11 @@ static inline void in_set_log_info(const char *str)
 {
 	log_info.debug_log = true;
 	log_info.fmt_msg = strstr(str, "fmt") ? 1 : 0;
-	log_info.boot_msg = strstr(str, "boot") ? 1: 0;
+	log_info.boot_msg = strstr(str, "boot") ? 1 : 0;
 	log_info.dump_msg = strstr(str, "dump") ? 1 : 0;
 	log_info.rfs_msg = strstr(str, "rfs") ? 1 : 0;
 	log_info.log_msg = strstr(str, "log") ? 1 : 0;
-	log_info.ps_msg = strstr(str, "ps") ? 1: 0;
+	log_info.ps_msg = strstr(str, "ps") ? 1 : 0;
 	log_info.router_msg = strstr(str, "router") ? 1 : 0;
 
 	mif_err("modemIF log info: %s\n", str);

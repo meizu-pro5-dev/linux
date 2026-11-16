@@ -167,7 +167,7 @@ exit:
 static inline int queue_skb_to_iod(struct sk_buff *skb, struct io_device *iod)
 {
 	struct sk_buff_head *rxq = &iod->sk_rx_q;
-	static u32 buf_full_err = 0;
+	static u32 buf_full_err;
 
 	skb_queue_tail(rxq, skb);
 

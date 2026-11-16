@@ -270,7 +270,7 @@ static int modem_spi_boot_probe(struct spi_device *spi)
 		goto err_setup;
 	}
 
-	mif_err("%s:---\n",__func__);
+	mif_err("%s:---\n", __func__);
 	return 0;
 
 err_setup:

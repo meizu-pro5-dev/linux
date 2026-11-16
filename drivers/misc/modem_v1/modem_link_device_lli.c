@@ -418,8 +418,8 @@ static void lli_link_ready(struct link_device *ld)
     mif_err("%s: PM %s <%pf>\n", ld->name, __func__, CALLER);
     stop_pm(mld);
 
-    if (mld->forced_cp_crash)
-        mld->forced_cp_crash = false;
+	if (mld->forced_cp_crash)
+		mld->forced_cp_crash = false;
 }
 
 static void lli_link_reset(struct link_device *ld)
@@ -541,7 +541,9 @@ static void start_pm(struct lli_link_device *mld)
 		mif_enable_irq(&mld->irq_cp_status);
 
 		lli_mark_last_busy();
-	} else wake_lock(&mld->ap_wlock);
+	} else {
+		wake_lock(&mld->ap_wlock);
+	}
 }
 
 static void stop_pm(struct lli_link_device *mld)
@@ -1394,7 +1396,7 @@ static int rx_udl_frames(struct lli_link_device *mld, int dev,
 		}
 
 		/* Allocate an skb */
-		while(true) {
+		while (true) {
 			skb = alloc_skb(tot + NET_SKB_PAD, GFP_KERNEL);
 			if (!skb) {
 				if (alloc_cnt++ < MAX_ALLOC_CNT) {
@@ -1600,7 +1602,7 @@ static int xmit_ipc_msg(struct lli_link_device *mld, int dev)
 	int space;
 	int copied = 0;
 	bool chk_nospc = false;
-	int lli_mount_cnt=0;
+	int lli_mount_cnt = 0;
 
 	while (!(mipi_lli_get_link_status() & LLI_MOUNTED)) {
 		udelay(50);
@@ -1694,7 +1696,7 @@ static int __maybe_unused wait_for_res_ack(struct lli_link_device *mld, int dev)
 	struct link_device *ld = &mld->ld;
 	struct completion *cmpl = &mld->req_ack_cmpl[dev];
 	unsigned long timeout = msecs_to_jiffies(RES_ACK_WAIT_TIMEOUT);
-	static int timeout_cnt=0;
+	static int timeout_cnt;
 	int ret;
 	u16 mask;
 
@@ -2435,7 +2437,7 @@ static int shmem_xmit_bin(struct link_device *ld, struct io_device *iod,
 		goto exit;
 	}
 
-	if ( di.stage == BOOT) {
+	if (di.stage == BOOT) {
 
 		size = di.len;
 		mif_info("Get cp bootloader(size : %d bytes)\n", di.total_size);
@@ -2461,8 +2463,7 @@ static int shmem_xmit_bin(struct link_device *ld, struct io_device *iod,
 		** change magic code for boot
 		*/
 		shmem_dload_start(ld, iod);
-	}
-	else if (di.stage == MAIN) {
+	} else if (di.stage == MAIN) {
 		size = di.len;
 
 		err = copy_from_user(modem->modem_base + di.m_offset - 0xebe0, (void __user *)di.buff, size);
@@ -2471,8 +2472,7 @@ static int shmem_xmit_bin(struct link_device *ld, struct io_device *iod,
 			err = -EFAULT;
 			goto exit;
 		}
-	}
-	else if (di.stage == NV) {
+	} else if (di.stage == NV) {
 		size = di.len;
 
 		err = copy_from_user(modem->modem_base + di.m_offset, (void __user *)di.buff, size);
@@ -2481,8 +2481,7 @@ static int shmem_xmit_bin(struct link_device *ld, struct io_device *iod,
 			err = -EFAULT;
 			goto exit;
 		}
-	}
-	else if (di.stage == NV_PROT) {
+	} else if (di.stage == NV_PROT) {
 		size = di.len;
 
 		err = copy_from_user(modem->modem_base + di.m_offset, (void __user *)di.buff, size);
@@ -2491,8 +2490,7 @@ static int shmem_xmit_bin(struct link_device *ld, struct io_device *iod,
 			err = -EFAULT;
 			goto exit;
 		}
-	}
-	else {
+	} else {
 		goto exit;
 	}
 
@@ -2532,9 +2530,8 @@ int shmem_security_check(struct link_device *ld, struct io_device *iod,
 	mif_err("%s: call requeset_security_check(mode: %d, boot_size: %d, main_size: %d\n",
 		ld->name, info.mode, info.boot_size, info.main_size);
 
-	if (mc->phone_state == STATE_CRASH_EXIT) {
+	if (mc->phone_state == STATE_CRASH_EXIT)
 		err = exynos_smc(SMC_ID, info.mode, info.boot_size, modem->dump_addr);
-	}
 	else
 		err = exynos_smc(SMC_ID, info.mode, info.boot_size, info.main_size);
 

@@ -645,12 +645,10 @@ static irqreturn_t cp2ap_wakeup_handler(int irq, void *data)
 	int cp2ap_wakeup = gpio_get_value(pm->gpio_cp2ap_wakeup);
 
 	mif_debug("%s: cp2ap_wakeup[%d]\n", __func__, cp2ap_wakeup);
-	if (cp2ap_wakeup) {
+	if (cp2ap_wakeup)
 		run_pm_fsm(pm, PM_EVENT_CP2AP_WAKEUP_HIGH);
-	}
-	else {
+	else
 		run_pm_fsm(pm, PM_EVENT_CP2AP_WAKEUP_LOW);
-	}
 
 	change_irq_level(irq, cp2ap_wakeup);
 

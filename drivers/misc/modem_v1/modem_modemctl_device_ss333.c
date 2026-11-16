@@ -70,9 +70,9 @@ static void ss333_mc_state_fsm(struct modem_ctl *mc)
 			new_state = STATE_CRASH_EXIT;
 			if (!wake_lock_active(&mc->mc_wake_lock))
 				wake_lock(&mc->mc_wake_lock);
-		}
-		else
+		} else {
 			mif_err("don't care!!!\n");
+		}
 	}
 
 	if (old_state != new_state) {
