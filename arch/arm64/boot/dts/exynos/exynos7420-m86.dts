@@ -176,24 +176,6 @@
 		compatible = "samsung,exynos7420-trng", "samsung,exynos850-trng";
 	};
 
-	/*
-	 * Replaces the inherited Exynos7 TMU, which stays disabled; this monitor
-	 * owns all four windows. The driver enables clocks and sensing; no
-	 * threshold or trim writes. A 95 C software critical zone polls the
-	 * maximum of all four P0 sensors.
-	 */
-	m86_tmu_monitor: tmu-monitor@10060000 {
-		compatible = "meizu,m86-tmu-monitor";
-		reg = <0 0x10060000 0 0x200>, <0 0x10064000 0 0x200>,
-		      <0 0x10068000 0 0x200>, <0 0x1006c000 0 0x200>;
-		interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&clock_peris PCLK_TMU>, <&clock_peris SCLK_TMU>;
-		clock-names = "tmu_apbif", "tmu_sclk";
-	};
-
 	m86_dsim_phy: dsim-phy {
 		compatible = "samsung,exynos7420-mipi-video-phy";
 		samsung,pmu-syscon = <&pmu_system_controller>;
@@ -492,7 +474,7 @@
 		clock-names = "atlas", "apollo", "fin", "mif";
 		atlas-supply = <&m86_buck2_cpu>;
 		apollo-supply = <&m86_buck3_cpu>;
-		meizu,thermal-monitor = <&m86_tmu_monitor>;
+		samsung,tmu = <&tmuctrl_0 &tmuctrl_1 &tmuctrl_2 &tmuctrl_3>;
 		meizu,max-validated-khz = <2100000 1500000>;
 		status = "okay";
 		meizu,cpu-dvfs-active;
@@ -532,7 +514,7 @@
 		 * Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
 		 * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72).
 		 */
-		meizu,thermal-monitor = <&m86_tmu_monitor>;
+		samsung,tmu = <&tmuctrl_0 &tmuctrl_1 &tmuctrl_2 &tmuctrl_3>;
 
 		m86_g3d_experiment: g3d-domain {
 			#power-domain-cells = <0>;
@@ -714,6 +696,95 @@
 	};
 };
 
+&{/thermal-zones} {
+	apollo_thermal: cluster1-thermal {
+		polling-delay-passive = <1000>;
+		polling-delay = <0>;
+		thermal-sensors = <&tmuctrl_1>;
+
+		trips {
+			apollo_alert_0: alert-0 {
+				temperature = <65000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			apollo_alert_1: alert-1 {
+				temperature = <75000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			apollo_hot_0: hot-0 {
+				temperature = <85000>;
+				hysteresis = <5000>;
+				type = "hot";
+			};
+			apollo_crit_0: crit-0 {
+				temperature = <95000>;
+				hysteresis = <5000>;
+				type = "critical";
+			};
+		};
+	};
+
+	gpu_thermal: gpu-thermal {
+		polling-delay-passive = <1000>;
+		polling-delay = <0>;
+		thermal-sensors = <&tmuctrl_2>;
+
+		trips {
+			gpu_alert_0: alert-0 {
+				temperature = <65000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			gpu_alert_1: alert-1 {
+				temperature = <75000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			gpu_hot_0: hot-0 {
+				temperature = <85000>;
+				hysteresis = <5000>;
+				type = "hot";
+			};
+			gpu_crit_0: crit-0 {
+				temperature = <95000>;
+				hysteresis = <5000>;
+				type = "critical";
+			};
+		};
+	};
+
+	isp_thermal: isp-thermal {
+		polling-delay-passive = <1000>;
+		polling-delay = <0>;
+		thermal-sensors = <&tmuctrl_3>;
+
+		trips {
+			isp_alert_0: alert-0 {
+				temperature = <65000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			isp_alert_1: alert-1 {
+				temperature = <75000>;
+				hysteresis = <5000>;
+				type = "passive";
+			};
+			isp_hot_0: hot-0 {
+				temperature = <85000>;
+				hysteresis = <5000>;
+				type = "hot";
+			};
+			isp_crit_0: crit-0 {
+				temperature = <95000>;
+				hysteresis = <5000>;
+				type = "critical";
+			};
+		};
+	};
+};
+
 /* 24 MHz arch timer; the virtual timer PPI is not listed. */
 &{/timer} {
 	clock-frequency = <24000000>;
@@ -728,7 +799,32 @@
 };
 
 &atlas_thermal {
-	status = "disabled";
+	polling-delay-passive = <1000>;
+	polling-delay = <0>;
+	/delete-node/ trips;
+
+	trips {
+		atlas_alert_0: alert-0 {
+			temperature = <65000>;
+			hysteresis = <5000>;
+			type = "passive";
+		};
+		atlas_alert_1: alert-1 {
+			temperature = <75000>;
+			hysteresis = <5000>;
+			type = "passive";
+		};
+		atlas_hot_0: hot-0 {
+			temperature = <85000>;
+			hysteresis = <5000>;
+			type = "hot";
+		};
+		atlas_crit_0: crit-0 {
+			temperature = <95000>;
+			hysteresis = <5000>;
+			type = "critical";
+		};
+	};
 };
 
 &cmu_aud {
@@ -1764,23 +1860,6 @@
 
 &sysmmu_cam0 {
 	status = "okay";
-};
-
-/* Replaced by m86_tmu_monitor. */
-&tmuctrl_0 {
-	status = "disabled";
-};
-
-&tmuctrl_1 {
-	status = "disabled";
-};
-
-&tmuctrl_2 {
-	status = "disabled";
-};
-
-&tmuctrl_3 {
-	status = "disabled";
 };
 
 &ufs {

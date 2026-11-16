@@ -13,13 +13,17 @@
 
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/interrupt.h>
+#include <linux/m86-tmu-transition.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/spinlock.h>
 #include <linux/thermal.h>
 
 #include <dt-bindings/thermal/thermal_exynos.h>
@@ -104,6 +108,7 @@
 #define EXYNOS5433_G3D_BASE			0x10070000
 
 /* Exynos7 specific registers */
+#define EXYNOS7_TMU_REG_SAMPLING_INTERVAL	0x2c
 #define EXYNOS7_THD_TEMP_RISE7_6		0x50
 #define EXYNOS7_THD_TEMP_FALL7_6		0x60
 #define EXYNOS7_TMU_REG_INTEN			0x110
@@ -111,10 +116,20 @@
 #define EXYNOS7_TMU_REG_EMUL_CON		0x160
 
 #define EXYNOS7_TMU_TEMP_MASK			0x1ff
+#define EXYNOS7_TMU_SAMPLING_DEFAULT		0xe10
+#define EXYNOS7_TMU_CLEAR_ALL_INT		0x00ff00ff
+#define EXYNOS7_TMU_STATUS_IDLE			BIT(0)
+#define EXYNOS7_TMU_STATUS_TRIM_BUSY_MASK	(0x7 << 8)
+#define EXYNOS7_TMU_STATUS_VALID_P0		BIT(12)
+#define EXYNOS7_TMU_TRIMINFO_85_SHIFT		9
+#define EXYNOS7_TMU_TRIMINFO_VREF_SHIFT		18
+#define EXYNOS7_TMU_TRIMINFO_VREF_MASK		0x1f
+#define EXYNOS7_TMU_TRIMINFO_CALIB_SEL_MASK	BIT(23)
 #define EXYNOS7_PD_DET_EN_SHIFT			23
 #define EXYNOS7_TMU_INTEN_RISE0_SHIFT		0
 #define EXYNOS7_EMUL_DATA_SHIFT			7
 #define EXYNOS7_EMUL_DATA_MASK			0x1ff
+#define EXYNOS7_NUM_BANKS			4
 
 #define EXYNOS_FIRST_POINT_TRIM			25
 #define EXYNOS_SECOND_POINT_TRIM		85
@@ -192,6 +207,12 @@ struct exynos_tmu_data {
 	struct thermal_zone_device *tzd;
 	unsigned int ntrip;
 	bool enabled;
+	u32 saved_control;
+	u32 irq_en;
+	int last_temp;
+	bool temp_valid;
+	bool gpu_off;
+	bool init_failed;
 
 	void (*tmu_set_trip_temp)(struct exynos_tmu_data *data, int trip,
 				 u8 temp);
@@ -205,18 +226,33 @@ struct exynos_tmu_data {
 };
 
 /*
+ * Exynos7420 consumer coordination across tmuctrl_0..3:
+ * Lock hierarchy: exynos7_tmu_access -> data->lock -> exynos7_tmu_cache_lock.
+ */
+static DEFINE_MUTEX(exynos7_tmu_access);
+static DEFINE_SPINLOCK(exynos7_tmu_cache_lock);
+static struct exynos_tmu_data *exynos7_tmu_banks[EXYNOS7_NUM_BANKS];
+static BLOCKING_NOTIFIER_HEAD(exynos7_tmu_chain);
+
+/*
  * TMU treats temperature as a mapped temperature code.
  * The temperature is converted differently depending on the calibration type.
  */
 static int temp_to_code(struct exynos_tmu_data *data, u8 temp)
 {
-	if (data->cal_type == TYPE_ONE_POINT_TRIMMING)
-		return temp + data->temp_error1 - EXYNOS_FIRST_POINT_TRIM;
+	int code;
 
-	return (temp - EXYNOS_FIRST_POINT_TRIM) *
-		(data->temp_error2 - data->temp_error1) /
-		(EXYNOS_SECOND_POINT_TRIM - EXYNOS_FIRST_POINT_TRIM) +
-		data->temp_error1;
+	if (data->cal_type == TYPE_ONE_POINT_TRIMMING)
+		code = temp + data->temp_error1 - EXYNOS_FIRST_POINT_TRIM;
+	else
+		code = (temp - EXYNOS_FIRST_POINT_TRIM) *
+			(data->temp_error2 - data->temp_error1) /
+			(EXYNOS_SECOND_POINT_TRIM - EXYNOS_FIRST_POINT_TRIM) +
+			data->temp_error1;
+
+	if (data->soc == SOC_ARCH_EXYNOS7)
+		return clamp_val(code, 0, EXYNOS7_TMU_TEMP_MASK);
+	return code;
 }
 
 /*
@@ -232,6 +268,16 @@ static int code_to_temp(struct exynos_tmu_data *data, u16 temp_code)
 		(EXYNOS_SECOND_POINT_TRIM - EXYNOS_FIRST_POINT_TRIM) /
 		(data->temp_error2 - data->temp_error1) +
 		EXYNOS_FIRST_POINT_TRIM;
+}
+
+static int code_to_mcelsius(struct exynos_tmu_data *data, u16 temp_code)
+{
+	if (data->soc == SOC_ARCH_EXYNOS7 &&
+	    data->cal_type == TYPE_TWO_POINT_TRIMMING)
+		return ((int)temp_code - data->temp_error1) * 60000 /
+			(data->temp_error2 - data->temp_error1) + 25000;
+
+	return code_to_temp(data, temp_code) * MCELSIUS;
 }
 
 static void sanitize_temp_error(struct exynos_tmu_data *data, u32 trim_info)
@@ -282,6 +328,43 @@ static int exynos_tmu_initialize(struct platform_device *pdev)
 	clk_enable(data->clk);
 	if (!IS_ERR(data->clk_sec))
 		clk_enable(data->clk_sec);
+
+	if (data->soc == SOC_ARCH_EXYNOS7) {
+		int i, ntrips = min_t(int, num_trips, data->ntrip);
+		u32 r7, f7, th;
+
+		data->init_failed = false;
+		data->tmu_initialize(pdev);
+		if (data->init_failed) {
+			ret = -ENODATA;
+			goto err;
+		}
+
+		for (i = 0; i < ntrips; i++) {
+			struct thermal_trip trip;
+
+			ret = thermal_zone_get_trip(tzd, i, &trip);
+			if (ret)
+				goto err;
+
+			data->tmu_set_trip_temp(data, i, trip.temperature / MCELSIUS);
+			data->tmu_set_trip_hyst(data, i, trip.temperature / MCELSIUS,
+						trip.hysteresis / MCELSIUS);
+		}
+
+		/* Preserve firmware level-6 nibble and ensure level-7 emergency shutdown trip. */
+		if (ntrips < 8) {
+			r7 = temp_to_code(data, 115);
+			f7 = temp_to_code(data, 110);
+			th = readl(data->base + EXYNOS7_THD_TEMP_RISE7_6) & 0xffff;
+			writel((r7 << 16) | th, data->base + EXYNOS7_THD_TEMP_RISE7_6);
+			th = readl(data->base + EXYNOS7_THD_TEMP_FALL7_6) & 0xffff;
+			writel((f7 << 16) | th, data->base + EXYNOS7_THD_TEMP_FALL7_6);
+		}
+
+		data->tmu_clear_irqs(data);
+		goto err;
+	}
 
 	status = readb(data->base + EXYNOS_TMU_REG_STATUS);
 	if (!status) {
@@ -542,10 +625,66 @@ static void exynos7_tmu_set_trip_hyst(struct exynos_tmu_data *data,
 static void exynos7_tmu_initialize(struct platform_device *pdev)
 {
 	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
-	unsigned int trim_info;
+	u32 control, status, trim_info, vref;
+	int ret;
+
+	/* Stop sensing before waiting for the banked P0 trim selection. */
+	control = readl(data->base + EXYNOS_TMU_REG_CONTROL);
+	writel(control & ~BIT(EXYNOS_TMU_CORE_EN_SHIFT),
+	       data->base + EXYNOS_TMU_REG_CONTROL);
+	ret = readl_poll_timeout(data->base + EXYNOS_TMU_REG_STATUS, status,
+				 status & EXYNOS7_TMU_STATUS_IDLE, 10, 20000);
+	if (ret) {
+		data->init_failed = true;
+		return;
+	}
+
+	writel(EXYNOS7_TMU_SAMPLING_DEFAULT,
+	       data->base + EXYNOS7_TMU_REG_SAMPLING_INTERVAL);
+	writel(control | BIT(EXYNOS_TMU_CORE_EN_SHIFT),
+	       data->base + EXYNOS_TMU_REG_CONTROL);
+	ret = readl_poll_timeout(data->base + EXYNOS_TMU_REG_STATUS, status,
+				 !(status & EXYNOS7_TMU_STATUS_TRIM_BUSY_MASK),
+				 1, 20000);
+	if (ret) {
+		data->init_failed = true;
+		return;
+	}
 
 	trim_info = readl(data->base + EXYNOS_TMU_REG_TRIMINFO);
-	sanitize_temp_error(data, trim_info);
+	if (readl(data->base + EXYNOS_TMU_REG_STATUS) &
+	    EXYNOS7_TMU_STATUS_TRIM_BUSY_MASK) {
+		data->init_failed = true;
+		return;
+	}
+
+	data->temp_error1 = trim_info & EXYNOS7_TMU_TEMP_MASK;
+	data->temp_error2 = (trim_info >> EXYNOS7_TMU_TRIMINFO_85_SHIFT) &
+			    EXYNOS7_TMU_TEMP_MASK;
+	if (!data->temp_error1) {
+		data->init_failed = true;
+		return;
+	}
+
+	if (trim_info & EXYNOS7_TMU_TRIMINFO_CALIB_SEL_MASK) {
+		if (data->temp_error2 <= data->temp_error1) {
+			data->init_failed = true;
+			return;
+		}
+		data->cal_type = TYPE_TWO_POINT_TRIMMING;
+	} else {
+		data->cal_type = TYPE_ONE_POINT_TRIMMING;
+	}
+
+	if (data->id == 1) {
+		data->gain = 8;
+		data->reference_voltage = 16;
+	} else {
+		data->gain = 9;
+		vref = (trim_info >> EXYNOS7_TMU_TRIMINFO_VREF_SHIFT) &
+		       EXYNOS7_TMU_TRIMINFO_VREF_MASK;
+		data->reference_voltage = vref ?: 17;
+	}
 }
 
 static void exynos4210_tmu_control(struct platform_device *pdev, bool on)
@@ -611,14 +750,36 @@ static void exynos5433_tmu_control(struct platform_device *pdev, bool on)
 	writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
 }
 
+static void exynos7_mask_all_irqs(struct exynos_tmu_data *data)
+{
+	int j;
+
+	/*
+	 * Only probe 0 (0x110) is wired to this bank's GIC SPI. Keep remote
+	 * probe INTEN registers masked so their INTPEND bits do not storm.
+	 */
+	for (j = 0; j < 5; j++)
+		writel(0, data->base + EXYNOS7_TMU_REG_INTEN + j * 0x10);
+	writel(EXYNOS7_TMU_CLEAR_ALL_INT, data->base + EXYNOS7_TMU_REG_INTPEND);
+}
+
 static void exynos7_tmu_control(struct platform_device *pdev, bool on)
 {
 	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
 	struct thermal_zone_device *tz = data->tzd;
 	struct thermal_trip trip;
-	unsigned int con, interrupt_en = 0, i;
+	u32 con, status, interrupt_en = 0;
+	int i, ret;
 
-	con = get_con_reg(data, readl(data->base + EXYNOS_TMU_REG_CONTROL));
+	exynos7_mask_all_irqs(data);
+
+	con = readl(data->base + EXYNOS_TMU_REG_CONTROL);
+	writel(con & ~BIT(EXYNOS_TMU_CORE_EN_SHIFT),
+	       data->base + EXYNOS_TMU_REG_CONTROL);
+	readl_poll_timeout(data->base + EXYNOS_TMU_REG_STATUS, status,
+			   status & EXYNOS7_TMU_STATUS_IDLE, 10, 20000);
+
+	con = get_con_reg(data, con);
 
 	if (on) {
 		for (i = 0; i < data->ntrip; i++) {
@@ -632,25 +793,77 @@ static void exynos7_tmu_control(struct platform_device *pdev, bool on)
 		interrupt_en |=
 			interrupt_en << EXYNOS_TMU_INTEN_FALL0_SHIFT;
 
-		con |= (1 << EXYNOS_TMU_CORE_EN_SHIFT);
-		con |= (1 << EXYNOS7_PD_DET_EN_SHIFT);
+		con |= BIT(EXYNOS7_PD_DET_EN_SHIFT);
+		con &= ~BIT(EXYNOS_TMU_CORE_EN_SHIFT);
+		data->saved_control = con | BIT(EXYNOS_TMU_CORE_EN_SHIFT);
+		data->irq_en = interrupt_en;
+
+		writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
+		writel(EXYNOS7_TMU_SAMPLING_DEFAULT,
+		       data->base + EXYNOS7_TMU_REG_SAMPLING_INTERVAL);
+		writel(data->saved_control, data->base + EXYNOS_TMU_REG_CONTROL);
+
+		ret = readl_poll_timeout(data->base + EXYNOS_TMU_REG_STATUS,
+					 status,
+					 status & EXYNOS7_TMU_STATUS_VALID_P0,
+					 100, 20000);
+		if (ret)
+			dev_warn(&pdev->dev,
+				 "TMU%d VALID_P0 timeout on enable: status=%#x\n",
+				 data->id, status);
+
+		writel(EXYNOS7_TMU_CLEAR_ALL_INT,
+		       data->base + EXYNOS7_TMU_REG_INTPEND);
+		writel(interrupt_en, data->base + EXYNOS7_TMU_REG_INTEN);
 	} else {
-		con &= ~(1 << EXYNOS_TMU_CORE_EN_SHIFT);
-		con &= ~(1 << EXYNOS7_PD_DET_EN_SHIFT);
+		con &= ~(BIT(EXYNOS_TMU_CORE_EN_SHIFT) |
+			 BIT(EXYNOS7_PD_DET_EN_SHIFT));
+		writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
+	}
+}
+
+static int exynos7_tmu_read(struct exynos_tmu_data *data);
+
+static int exynos_get_temp_locked(struct exynos_tmu_data *data, int *temp)
+{
+	int value, ret = 0;
+
+	if (!data || !data->tmu_read)
+		return -EINVAL;
+	if (!data->enabled)
+		return -EAGAIN;
+	if (data->soc == SOC_ARCH_EXYNOS7 && data->gpu_off)
+		return -EAGAIN;
+
+	clk_enable(data->clk);
+	value = data->tmu_read(data);
+	clk_disable(data->clk);
+
+	if (value < 0) {
+		ret = value;
+	} else {
+		*temp = code_to_mcelsius(data, value);
+		if (data->soc == SOC_ARCH_EXYNOS7) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+			data->last_temp = *temp;
+			data->temp_valid = true;
+			spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+		}
 	}
 
-	writel(interrupt_en, data->base + EXYNOS7_TMU_REG_INTEN);
-	writel(con, data->base + EXYNOS_TMU_REG_CONTROL);
+	return ret;
 }
 
 static int exynos_get_temp(struct thermal_zone_device *tz, int *temp)
 {
 	struct exynos_tmu_data *data = thermal_zone_device_priv(tz);
-	int value, ret = 0;
+	int ret;
 
 	if (!data || !data->tmu_read)
 		return -EINVAL;
-	else if (!data->enabled)
+	if (!data->enabled)
 		/*
 		 * Called too early, probably
 		 * from thermal_zone_of_sensor_register().
@@ -658,15 +871,7 @@ static int exynos_get_temp(struct thermal_zone_device *tz, int *temp)
 		return -EAGAIN;
 
 	mutex_lock(&data->lock);
-	clk_enable(data->clk);
-
-	value = data->tmu_read(data);
-	if (value < 0)
-		ret = value;
-	else
-		*temp = code_to_temp(data, value) * MCELSIUS;
-
-	clk_disable(data->clk);
+	ret = exynos_get_temp_locked(data, temp);
 	mutex_unlock(&data->lock);
 
 	return ret;
@@ -762,8 +967,30 @@ static int exynos4412_tmu_read(struct exynos_tmu_data *data)
 
 static int exynos7_tmu_read(struct exynos_tmu_data *data)
 {
-	return readw(data->base + EXYNOS_TMU_REG_CURRENT_TEMP) &
-		EXYNOS7_TMU_TEMP_MASK;
+	u32 status, code;
+	int attempt, ret;
+
+	if (data->gpu_off ||
+	    !(readl(data->base + EXYNOS_TMU_REG_CONTROL) & BIT(EXYNOS_TMU_CORE_EN_SHIFT)))
+		return -EAGAIN;
+
+	for (attempt = 0; attempt < 2; attempt++) {
+		ret = readl_poll_timeout(data->base + EXYNOS_TMU_REG_STATUS, status,
+					 status & EXYNOS7_TMU_STATUS_VALID_P0,
+					 100, 20000);
+		if (ret)
+			return ret;
+
+		code = readl(data->base + EXYNOS_TMU_REG_CURRENT_TEMP) &
+		       EXYNOS7_TMU_TEMP_MASK;
+		if ((readl(data->base + EXYNOS_TMU_REG_STATUS) &
+		     EXYNOS7_TMU_STATUS_VALID_P0) &&
+		    (readl(data->base + EXYNOS_TMU_REG_CONTROL) &
+		     BIT(EXYNOS_TMU_CORE_EN_SHIFT)))
+			return (int)code;
+	}
+
+	return -EAGAIN;
 }
 
 static void exynos_tmu_work(struct work_struct *work)
@@ -782,6 +1009,14 @@ static void exynos_tmu_work(struct work_struct *work)
 	clk_disable(data->clk);
 	mutex_unlock(&data->lock);
 	enable_irq(data->irq);
+
+	if (data->soc == SOC_ARCH_EXYNOS7) {
+		int temp;
+
+		if (!m86_tmu_get_cached_temp(&temp))
+			blocking_notifier_call_chain(&exynos7_tmu_chain,
+						     (unsigned long)temp, NULL);
+	}
 }
 
 static void exynos4210_tmu_clear_irqs(struct exynos_tmu_data *data)
@@ -793,8 +1028,9 @@ static void exynos4210_tmu_clear_irqs(struct exynos_tmu_data *data)
 		tmu_intstat = EXYNOS5260_TMU_REG_INTSTAT;
 		tmu_intclear = EXYNOS5260_TMU_REG_INTCLEAR;
 	} else if (data->soc == SOC_ARCH_EXYNOS7) {
-		tmu_intstat = EXYNOS7_TMU_REG_INTPEND;
-		tmu_intclear = EXYNOS7_TMU_REG_INTPEND;
+		writel(EXYNOS7_TMU_CLEAR_ALL_INT,
+		       data->base + EXYNOS7_TMU_REG_INTPEND);
+		return;
 	} else if (data->soc == SOC_ARCH_EXYNOS5433) {
 		tmu_intstat = EXYNOS5433_TMU_REG_INTPEND;
 		tmu_intclear = EXYNOS5433_TMU_REG_INTPEND;
@@ -1101,13 +1337,48 @@ static int exynos_tmu_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_request_irq(&pdev->dev, data->irq, exynos_tmu_irq,
-		IRQF_TRIGGER_RISING | IRQF_SHARED, dev_name(&pdev->dev), data);
+		data->soc == SOC_ARCH_EXYNOS7 ? 0 :
+		(IRQF_TRIGGER_RISING | IRQF_SHARED),
+		dev_name(&pdev->dev), data);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to request irq: %d\n", data->irq);
 		goto err_sclk;
 	}
 
 	exynos_tmu_control(pdev, true);
+
+	if (data->soc == SOC_ARCH_EXYNOS7) {
+		int init_temp;
+
+		if (data->id < 0 || data->id >= EXYNOS7_NUM_BANKS) {
+			ret = -EINVAL;
+			goto err_sclk;
+		}
+
+		mutex_lock(&data->lock);
+		ret = exynos_get_temp_locked(data, &init_temp);
+		mutex_unlock(&data->lock);
+		if (ret) {
+			dev_err(&pdev->dev, "TMU%d initial sample failed: %d\n",
+				data->id, ret);
+			goto err_sclk;
+		}
+
+		mutex_lock(&exynos7_tmu_access);
+		if (exynos7_tmu_banks[data->id]) {
+			mutex_unlock(&exynos7_tmu_access);
+			ret = -EBUSY;
+			goto err_sclk;
+		}
+		exynos7_tmu_banks[data->id] = data;
+		mutex_unlock(&exynos7_tmu_access);
+
+		dev_info(&pdev->dev,
+			 "TMU%d registered (cal=%d gain=%u vref=%u init=%d mC)\n",
+			 data->id, data->cal_type, data->gain,
+			 data->reference_voltage, init_temp);
+	}
+
 	return 0;
 
 err_sclk:
@@ -1128,7 +1399,16 @@ static int exynos_tmu_remove(struct platform_device *pdev)
 {
 	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
 
+	if (data->soc == SOC_ARCH_EXYNOS7 &&
+	    data->id >= 0 && data->id < EXYNOS7_NUM_BANKS) {
+		mutex_lock(&exynos7_tmu_access);
+		if (exynos7_tmu_banks[data->id] == data)
+			exynos7_tmu_banks[data->id] = NULL;
+		mutex_unlock(&exynos7_tmu_access);
+	}
+
 	exynos_tmu_control(pdev, false);
+	cancel_work_sync(&data->irq_work);
 
 	clk_disable_unprepare(data->sclk);
 	clk_unprepare(data->clk);
@@ -1149,9 +1429,64 @@ static int exynos_tmu_suspend(struct device *dev)
 	return 0;
 }
 
+static int exynos7_tmu_resume_gpu_off(struct exynos_tmu_data *data)
+{
+	int num_trips = thermal_zone_get_num_trips(data->tzd);
+	int i, ntrips = min_t(int, num_trips, data->ntrip);
+	int ret = 0;
+
+	clk_enable(data->clk);
+	writel(data->saved_control & ~(BIT(EXYNOS_TMU_THERM_TRIP_EN_SHIFT) |
+				       BIT(EXYNOS_TMU_CORE_EN_SHIFT)),
+	       data->base + EXYNOS_TMU_REG_CONTROL);
+	writel(EXYNOS7_TMU_SAMPLING_DEFAULT,
+	       data->base + EXYNOS7_TMU_REG_SAMPLING_INTERVAL);
+
+	for (i = 0; i < ntrips; i++) {
+		struct thermal_trip trip;
+
+		ret = thermal_zone_get_trip(data->tzd, i, &trip);
+		if (ret)
+			break;
+
+		data->tmu_set_trip_temp(data, i, trip.temperature / MCELSIUS);
+		data->tmu_set_trip_hyst(data, i, trip.temperature / MCELSIUS,
+					trip.hysteresis / MCELSIUS);
+	}
+
+	if (!ret && ntrips < 8) {
+		u32 r7 = temp_to_code(data, 115);
+		u32 f7 = temp_to_code(data, 110);
+		u32 th = readl(data->base + EXYNOS7_THD_TEMP_RISE7_6) & 0xffff;
+
+		writel((r7 << 16) | th, data->base + EXYNOS7_THD_TEMP_RISE7_6);
+		th = readl(data->base + EXYNOS7_THD_TEMP_FALL7_6) & 0xffff;
+		writel((f7 << 16) | th, data->base + EXYNOS7_THD_TEMP_FALL7_6);
+	}
+
+	exynos7_mask_all_irqs(data);
+	data->enabled = true;
+	clk_disable(data->clk);
+
+	return ret;
+}
+
 static int exynos_tmu_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
+	struct exynos_tmu_data *data = platform_get_drvdata(pdev);
+
+	if (data->soc == SOC_ARCH_EXYNOS7 && data->id == 2) {
+		int ret;
+
+		mutex_lock(&data->lock);
+		if (data->gpu_off) {
+			ret = exynos7_tmu_resume_gpu_off(data);
+			mutex_unlock(&data->lock);
+			return ret;
+		}
+		mutex_unlock(&data->lock);
+	}
 
 	exynos_tmu_initialize(pdev);
 	exynos_tmu_control(pdev, true);
@@ -1165,6 +1500,218 @@ static SIMPLE_DEV_PM_OPS(exynos_tmu_pm,
 #else
 #define EXYNOS_TMU_PM	NULL
 #endif
+
+int m86_tmu_get_cached_temp(int *temp)
+{
+	unsigned long flags;
+	int i, maximum = INT_MIN;
+	bool found = false, have_valid = false;
+
+	spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+	for (i = 0; i < EXYNOS7_NUM_BANKS; i++) {
+		struct exynos_tmu_data *b = READ_ONCE(exynos7_tmu_banks[i]);
+
+		if (!b)
+			continue;
+		found = true;
+		if (i == 2 && b->gpu_off)
+			continue;
+		if (b->temp_valid) {
+			maximum = max(maximum, b->last_temp);
+			have_valid = true;
+		}
+	}
+	spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+
+	if (!found)
+		return -EPROBE_DEFER;
+	if (!have_valid)
+		return -ENODATA;
+	*temp = maximum;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_get_cached_temp);
+
+int m86_tmu_read_max_temp(int *temp)
+{
+	int i, val, ret = 0, maximum = INT_MIN;
+
+	mutex_lock(&exynos7_tmu_access);
+	for (i = 0; i < EXYNOS7_NUM_BANKS; i++) {
+		if (!exynos7_tmu_banks[i]) {
+			ret = -EPROBE_DEFER;
+			goto unlock;
+		}
+	}
+
+	for (i = 0; i < EXYNOS7_NUM_BANKS; i++) {
+		struct exynos_tmu_data *b = exynos7_tmu_banks[i];
+
+		mutex_lock(&b->lock);
+		if (i == 2 && b->gpu_off) {
+			mutex_unlock(&b->lock);
+			continue;
+		}
+		ret = exynos_get_temp_locked(b, &val);
+		mutex_unlock(&b->lock);
+
+		if (ret == -EAGAIN && i == 2 && READ_ONCE(b->gpu_off))
+			continue;
+		if (ret)
+			goto unlock;
+		maximum = max(maximum, val);
+	}
+
+	if (maximum == INT_MIN) {
+		ret = -ENODATA;
+		goto unlock;
+	}
+	*temp = maximum;
+unlock:
+	mutex_unlock(&exynos7_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_read_max_temp);
+
+int m86_tmu_register_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&exynos7_tmu_chain, nb);
+}
+EXPORT_SYMBOL_GPL(m86_tmu_register_notifier);
+
+int m86_tmu_unregister_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&exynos7_tmu_chain, nb);
+}
+EXPORT_SYMBOL_GPL(m86_tmu_unregister_notifier);
+
+int m86_tmu_gpu_power_off(void)
+{
+	struct exynos_tmu_data *t;
+	u32 control, status;
+	unsigned long flags;
+	int ret = 0;
+
+	mutex_lock(&exynos7_tmu_access);
+	t = exynos7_tmu_banks[2];
+	if (!t) {
+		ret = -EPROBE_DEFER;
+		goto unlock;
+	}
+
+	mutex_lock(&t->lock);
+	if (t->gpu_off)
+		goto unlock_dev;
+
+	clk_enable(t->clk);
+	control = readl(t->base + EXYNOS_TMU_REG_CONTROL);
+	if (control & BIT(EXYNOS_TMU_CORE_EN_SHIFT))
+		t->saved_control = control;
+
+	exynos7_mask_all_irqs(t);
+	writel(control & ~(BIT(EXYNOS_TMU_THERM_TRIP_EN_SHIFT) |
+			   BIT(EXYNOS_TMU_CORE_EN_SHIFT)),
+	       t->base + EXYNOS_TMU_REG_CONTROL);
+	ret = readl_poll_timeout(t->base + EXYNOS_TMU_REG_STATUS, status,
+				 status & EXYNOS7_TMU_STATUS_IDLE, 10, 20000);
+	if (ret) {
+		writel(t->saved_control, t->base + EXYNOS_TMU_REG_CONTROL);
+		writel(t->irq_en, t->base + EXYNOS7_TMU_REG_INTEN);
+		clk_disable(t->clk);
+		dev_err(&t->tzd->device,
+			"TMU2 power-off idle timeout: status=%#x\n", status);
+		goto unlock_dev;
+	}
+
+	writel(EXYNOS7_TMU_CLEAR_ALL_INT, t->base + EXYNOS7_TMU_REG_INTPEND);
+	clk_disable(t->clk);
+
+	spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+	t->gpu_off = true;
+	spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+
+unlock_dev:
+	mutex_unlock(&t->lock);
+unlock:
+	mutex_unlock(&exynos7_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_gpu_power_off);
+
+int m86_tmu_gpu_power_on(void)
+{
+	struct exynos_tmu_data *t;
+	unsigned long flags;
+	int attempt, temp = 0, ret = 0;
+
+	mutex_lock(&exynos7_tmu_access);
+	t = exynos7_tmu_banks[2];
+	if (!t) {
+		ret = -EPROBE_DEFER;
+		goto unlock;
+	}
+
+	mutex_lock(&t->lock);
+	clk_enable(t->clk);
+	if (!t->gpu_off) {
+		if (!(readl(t->base + EXYNOS_TMU_REG_CONTROL) &
+		      BIT(EXYNOS_TMU_CORE_EN_SHIFT)))
+			ret = -EIO;
+		clk_disable(t->clk);
+		goto unlock_dev;
+	}
+
+	exynos7_mask_all_irqs(t);
+	writel((t->saved_control & ~BIT(EXYNOS_TMU_THERM_TRIP_EN_SHIFT)) |
+	       BIT(EXYNOS_TMU_CORE_EN_SHIFT),
+	       t->base + EXYNOS_TMU_REG_CONTROL);
+
+	spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+	t->gpu_off = false;
+	spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+
+	clk_disable(t->clk);
+
+	for (attempt = 0; attempt < 20; attempt++) {
+		ret = exynos_get_temp_locked(t, &temp);
+		if (!ret && temp >= 5000 && temp <= 105000)
+			break;
+		if (ret && ret != -EAGAIN)
+			break;
+		usleep_range(150, 250);
+	}
+
+	clk_enable(t->clk);
+	if (ret || temp < 5000 || temp > 105000) {
+		writel(t->saved_control & ~(BIT(EXYNOS_TMU_THERM_TRIP_EN_SHIFT) |
+					    BIT(EXYNOS_TMU_CORE_EN_SHIFT)),
+		       t->base + EXYNOS_TMU_REG_CONTROL);
+		writel(EXYNOS7_TMU_CLEAR_ALL_INT,
+		       t->base + EXYNOS7_TMU_REG_INTPEND);
+		spin_lock_irqsave(&exynos7_tmu_cache_lock, flags);
+		t->gpu_off = true;
+		spin_unlock_irqrestore(&exynos7_tmu_cache_lock, flags);
+		clk_disable(t->clk);
+		dev_err(&t->tzd->device,
+			"TMU2 power-on settle failed: ret=%d temp=%d status=%#x\n",
+			ret, temp, readl(t->base + EXYNOS_TMU_REG_STATUS));
+		ret = ret ?: -ERANGE;
+		goto unlock_dev;
+	}
+
+	writel(EXYNOS7_TMU_CLEAR_ALL_INT, t->base + EXYNOS7_TMU_REG_INTPEND);
+	writel(t->saved_control | BIT(EXYNOS_TMU_CORE_EN_SHIFT),
+	       t->base + EXYNOS_TMU_REG_CONTROL);
+	writel(t->irq_en, t->base + EXYNOS7_TMU_REG_INTEN);
+	clk_disable(t->clk);
+
+unlock_dev:
+	mutex_unlock(&t->lock);
+unlock:
+	mutex_unlock(&exynos7_tmu_access);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(m86_tmu_gpu_power_on);
 
 static struct platform_driver exynos_tmu_driver = {
 	.driver = {

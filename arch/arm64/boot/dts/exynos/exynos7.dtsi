@@ -31,6 +31,9 @@
 		spi3 = &spi_3;
 		spi4 = &spi_4;
 		tmuctrl0 = &tmuctrl_0;
+		tmuctrl1 = &tmuctrl_1;
+		tmuctrl2 = &tmuctrl_2;
+		tmuctrl3 = &tmuctrl_3;
 	};
 
 	/*

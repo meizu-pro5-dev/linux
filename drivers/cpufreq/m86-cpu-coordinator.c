@@ -53,7 +53,6 @@ struct m86_coord {
 	struct m86_asv_cal_info asv_cal;
 	struct regmap *ema; /* Existing shared SYSREG regmap. */
 	struct clk *fin, *mif;
-	struct thermal_zone_device *zone;
 	struct notifier_block tmu_nb;
 	struct delayed_work thermal_work;
 	bool faulted, registered;
@@ -271,14 +270,14 @@ static int temperature(struct m86_coord *d, int *temp, bool refresh)
 	/*
 	 * Prefer the TMU driver's cached sample: no synchronous four-bank MMIO
 	 * transaction on every CPU frequency transition. Cold start falls back
-	 * to one thermal-zone read, which refreshes the same cache.
+	 * to reading active Exynos7 TMU controllers, which refreshes the cache.
 	 */
 	if (refresh)
-		ret = thermal_zone_get_temp(d->zone, temp);
+		ret = m86_tmu_read_max_temp(temp);
 	else {
 		ret = m86_tmu_get_cached_temp(temp);
 		if (ret == -ENODATA || ret == -EPROBE_DEFER)
-			ret = thermal_zone_get_temp(d->zone, temp);
+			ret = m86_tmu_read_max_temp(temp);
 	}
 	if (ret)
 		dev_err_ratelimited(d->dev, "temperature guard: TMU read failed ret=%d\n", ret);
@@ -891,12 +890,6 @@ static void m86_tmu_notifier_release(void *data)
 	cancel_delayed_work_sync(&d->thermal_work);
 }
 
-static void put_zone(void *data)
-{
-	struct thermal_zone_device *zone = data;
-
-	put_device(&zone->device);
-}
 static void release_clock_exclusive(void *data)
 {
 	clk_rate_exclusive_put(data);
@@ -991,26 +984,23 @@ static int m86_probe(struct platform_device *pdev)
 		d->bus_dev = exynos_bus_get_dev(NULL);
 	if (!d->bus_dev && has_fixed_floor && bus_floor < 828000)
 		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap static bus floor too low without bus QoS at source line %u\n", __LINE__);
-	/* Supplier link ensures consumer removal precedes TMU resource teardown. */
-	node = of_parse_phandle(pdev->dev.of_node, "meizu,thermal-monitor", 0);
-	if (!node)
-		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap thermal monitor phandle at source line %u\n", __LINE__);
-	supplier = of_find_device_by_node(node);
-	of_node_put(node);
-	if (!supplier)
-		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap thermal supplier at source line %u\n", __LINE__);
-	if (!device_link_add(&pdev->dev, &supplier->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+	/* Supplier links ensure consumer removal precedes TMU resource teardown. */
+	for (i = 0;; i++) {
+		node = of_parse_phandle(pdev->dev.of_node, "samsung,tmu", i);
+		if (!node)
+			break;
+		supplier = of_find_device_by_node(node);
+		of_node_put(node);
+		if (!supplier)
+			return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap thermal supplier at source line %u\n", __LINE__);
+		if (!device_link_add(&pdev->dev, &supplier->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+			put_device(&supplier->dev);
+			return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap thermal device link at source line %u\n", __LINE__);
+		}
 		put_device(&supplier->dev);
-		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap thermal device link at source line %u\n", __LINE__);
 	}
-	put_device(&supplier->dev);
-	d->zone = thermal_zone_get_zone_by_name("m86-tmu-max");
-	if (IS_ERR(d->zone))
-		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "bootstrap thermal zone at source line %u\n", __LINE__);
-	get_device(&d->zone->device);
-	ret = devm_add_action_or_reset(&pdev->dev, put_zone, d->zone);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "bootstrap gate at source line %u\n", __LINE__);
+	if (!i)
+		return dev_err_probe(&pdev->dev, -EINVAL, "bootstrap thermal monitor phandle at source line %u\n", __LINE__);
 	d->tmu_nb.notifier_call = m86_tmu_notify;
 	ret = m86_tmu_register_notifier(&d->tmu_nb);
 	if (ret)

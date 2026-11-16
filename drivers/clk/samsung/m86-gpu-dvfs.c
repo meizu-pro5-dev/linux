@@ -15,7 +15,6 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
-#include <linux/thermal.h>
 #include <linux/workqueue.h>
 #include <asm/barrier.h>
 #include <linux/m86-gpu-dvfs.h>
@@ -52,7 +51,6 @@ struct gpu_dvfs {
  struct clk *int_bus0_clk, *int_bus1_clk, *int_bus1_low_clk;
  struct clk *int_pclk_clk, *int_pclk_mux_clk, *int_imem_clk, *int_imem_low_clk;
  struct regmap *pmu, *sysreg;
- struct thermal_zone_device *zone;
  void __iomem *cmu, *dvs, *gpio;
  struct mutex transaction, hardware;
  unsigned long cap, current_rate;
@@ -904,8 +902,8 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
   }
   stage="thermal";
   ret=m86_tmu_get_cached_temp(&temp);
-  if((ret==-ENODATA || ret==-EPROBE_DEFER) && d->zone)
-   ret=thermal_zone_get_temp(d->zone,&temp);
+  if(ret==-ENODATA || ret==-EPROBE_DEFER)
+   ret=m86_tmu_read_max_temp(&temp);
   if(ret || temp < -20000) {ret=ret ?: -ERANGE;goto fault;}
   /* 50ms Panfrost governor invokes target even for unchanged frequency.
    * Fresh TMU measurement precedes the same-rate fast path when >266MHz.
@@ -1065,7 +1063,6 @@ int m86_gpu_devfreq_target(struct device *gpu,unsigned long *freq)
 
   return 0;
  }
- static void put_zone(void *data){put_device(&((struct thermal_zone_device *)data)->device);}
  static void put_pmic(void *data){put_device(data);}
  static void put_node(void *data){of_node_put(data);}
  static void put_clock(void *data){clk_put(data);}
@@ -1208,19 +1205,29 @@ static int gpu_probe(struct platform_device *pdev)
   struct pro5_int_always_on_rates int_rates;
   ret=read_int_rates(d,&int_rates);if(ret)return ret;
   ret=pro5_topc_int_always_on_floor(&int_rates,200000);if(ret)return ret;
-  node=of_parse_phandle(pdev->dev.of_node,"meizu,thermal-monitor",0);
-  if(!node)return -EINVAL;
-  supplier=of_find_device_by_node(node);of_node_put(node);
-  if(!supplier)return -EPROBE_DEFER;
-  if(!device_link_add(&pdev->dev,&supplier->dev,DL_FLAG_AUTOREMOVE_CONSUMER)) {
-   put_device(&supplier->dev);return -EINVAL;
+  {
+   unsigned int tmu_idx;
+
+   for (tmu_idx = 0;; tmu_idx++) {
+    node = of_parse_phandle(pdev->dev.of_node, "samsung,tmu", tmu_idx);
+    if (!node)
+     break;
+    supplier = of_find_device_by_node(node);
+    of_node_put(node);
+    if (!supplier)
+     return -EPROBE_DEFER;
+    if (!device_link_add(&pdev->dev, &supplier->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+     put_device(&supplier->dev);
+     return -EINVAL;
+    }
+    put_device(&supplier->dev);
+   }
+   if (!tmu_idx)
+    return -EINVAL;
   }
-  put_device(&supplier->dev);
-  d->zone=thermal_zone_get_zone_by_name("m86-tmu-max");
-  if(IS_ERR(d->zone))return -EPROBE_DEFER;
-  get_device(&d->zone->device);
-  ret=devm_add_action_or_reset(&pdev->dev,put_zone,d->zone);if(ret)return ret;
-  ret=thermal_zone_get_temp(d->zone,&temp);if(ret)return ret;
+  ret = m86_tmu_read_max_temp(&temp);
+  if (ret)
+   return ret;
   if(temp < -20000)return -ERANGE;
   /* Probe stays at 266MHz, the runtime thermal cap level. */
   if(temp>=75000)dev_warn(&pdev->dev,"GPU handoff at %d mC, held at 266MHz until it cools\n",temp);
