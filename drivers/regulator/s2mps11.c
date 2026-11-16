@@ -24,7 +24,6 @@
 #include <linux/mfd/samsung/s2mps11.h>
 #include <linux/mfd/samsung/s2mps13.h>
 #include <linux/mfd/samsung/s2mps14.h>
-#include <linux/arm-smccc.h>
 #include <linux/mfd/samsung/s2mps15.h>
 #include <linux/mfd/samsung/s2mpu02.h>
 
@@ -32,7 +31,6 @@
 #define S2MPS_REGULATOR_MAX		S2MPS13_REGULATOR_MAX
 struct s2mps11_info {
 	struct mutex m86_cpu_lock;
-	struct mutex m86_int_lock;
 	u32 m86_cpu_ctrl[2];
 	bool m86_cpu_faulted;
 	bool m86_cpu_authorized;
@@ -40,11 +38,6 @@ struct s2mps11_info {
 	struct task_struct *m86_cpu_authorized_task;
 	struct clk *m86_cpu_authorized_clock;
 	unsigned int m86_cpu_authorized_uv;
-	unsigned int buck_int;
-	unsigned int buck_disp;
-	int int_max;
-	int int_vthr;
-	int int_delta;
 	int buck1_sel_cache;
 	int buck4_sel_cache;
 	int ldo8_ctrl_cache;
@@ -754,164 +747,51 @@ static int s2mps15_m86_buck14_get_voltage_sel(struct regulator_dev *rdev)
 {
 	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
 	unsigned int val = 0;
-	int id = rdev_get_id(rdev), ret;
+	int id = rdev_get_id(rdev), *cache, cached, ret;
 
-	if (id == S2MPS15_BUCK1) {
-		int cached = READ_ONCE(s2mps11->buck1_sel_cache);
+	if (id == S2MPS15_BUCK1)
+		cache = &s2mps11->buck1_sel_cache;
+	else if (id == S2MPS15_BUCK4)
+		cache = &s2mps11->buck4_sel_cache;
+	else
+		return regulator_get_voltage_sel_regmap(rdev);
 
-		if (cached >= 0)
-			return cached;
-		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &val);
-		if (ret)
-			return ret;
-		val &= rdev->desc->vsel_mask;
-		WRITE_ONCE(s2mps11->buck1_sel_cache, (int)val);
-		return val;
-	}
-
-	if (id == S2MPS15_BUCK4) {
-		int cached;
-
-		mutex_lock(&s2mps11->m86_int_lock);
-		if (s2mps11->buck4_sel_cache < 0) {
-			ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &val);
-			if (ret) {
-				mutex_unlock(&s2mps11->m86_int_lock);
-				return ret;
-			}
-			s2mps11->buck4_sel_cache = val & rdev->desc->vsel_mask;
-		}
-		cached = s2mps11->buck4_sel_cache;
-		mutex_unlock(&s2mps11->m86_int_lock);
+	cached = READ_ONCE(*cache);
+	if (cached >= 0)
 		return cached;
-	}
 
-	return regulator_get_voltage_sel_regmap(rdev);
-}
-
-/* Must hold s2mps11->m86_int_lock */
-static int s2mps15_m86_sync_int_m(struct s2mps11_info *s2mps11,
-				  struct regmap *regmap, unsigned int ldo_sel)
-{
-	unsigned int ctrl;
-	int ret;
-
-	ldo_sel &= 0x3f;
-	if (s2mps11->ldo8_ctrl_cache < 0) {
-		ret = regmap_read(regmap, S2MPS15_REG_L8CTRL, &ctrl);
-		if (ret)
-			return ret;
-		s2mps11->ldo8_ctrl_cache = ctrl & 0xff;
-	}
-	if ((s2mps11->ldo8_ctrl_cache & 0x3f) == ldo_sel)
-		return 0;
-
-	ctrl = (s2mps11->ldo8_ctrl_cache & ~0x3fU) | ldo_sel;
-	ret = regmap_write(regmap, S2MPS15_REG_L8CTRL, ctrl);
-	if (ret) {
-		s2mps11->ldo8_ctrl_cache = -1;
+	ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &val);
+	if (ret)
 		return ret;
-	}
-	s2mps11->ldo8_ctrl_cache = ctrl;
-	return 0;
+	val &= rdev->desc->vsel_mask;
+	WRITE_ONCE(*cache, (int)val);
+	return val;
 }
 
 static int s2mps15_m86_buck14_set_voltage_sel(struct regulator_dev *rdev,
 					      unsigned int sel)
 {
 	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
-	unsigned int old_sel = 0, buck_val, buck_max, ldo_sel;
-	int old_val_buck, old_val_ldo, ret;
+	int id = rdev_get_id(rdev), *cache, ret;
 
 	sel &= rdev->desc->vsel_mask;
-
-	if (rdev_get_id(rdev) == S2MPS15_BUCK1) {
-		if (READ_ONCE(s2mps11->buck1_sel_cache) == (int)sel)
-			return 0;
-		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
-		if (ret) {
-			WRITE_ONCE(s2mps11->buck1_sel_cache, -1);
-			return ret;
-		}
-		WRITE_ONCE(s2mps11->buck1_sel_cache, (int)sel);
-		return 0;
-	}
-
-	if (rdev_get_id(rdev) != S2MPS15_BUCK4)
+	if (id == S2MPS15_BUCK1)
+		cache = &s2mps11->buck1_sel_cache;
+	else if (id == S2MPS15_BUCK4)
+		cache = &s2mps11->buck4_sel_cache;
+	else
 		return -EINVAL;
 
-	mutex_lock(&s2mps11->m86_int_lock);
-	if (s2mps11->buck4_sel_cache < 0) {
-		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &old_sel);
-		if (ret)
-			goto out;
-		s2mps11->buck4_sel_cache = old_sel & rdev->desc->vsel_mask;
-	}
-	old_sel = s2mps11->buck4_sel_cache;
-	if (sel == old_sel) {
-		ret = 0;
-		goto out;
-	}
-
-	old_val_buck = 300000 + old_sel * 6250;
-	buck_val = 300000 + sel * 6250;
-
-	old_val_ldo = s2mps11->int_max;
-	if ((int)buck_val + s2mps11->int_delta > s2mps11->int_max) {
-		u32 target_int_max = buck_val + s2mps11->int_delta;
-		ldo_sel = DIV_ROUND_UP(target_int_max - 300000, 25000);
-		ret = s2mps15_m86_sync_int_m(s2mps11, rdev->regmap, ldo_sel);
-		if (ret)
-			goto out;
-		s2mps11->int_max = target_int_max;
-		udelay(DIV_ROUND_UP(s2mps11->int_max - old_val_ldo, 12000));
-
-		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
-		if (ret) {
-			s2mps11->buck4_sel_cache = -1;
-			goto out;
-		}
-		s2mps11->buck4_sel_cache = sel;
-		udelay(DIV_ROUND_UP(abs((int)buck_val - old_val_buck), 12000));
-		s2mps11->buck_int = buck_val;
-	} else {
-		ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
-		if (ret) {
-			s2mps11->buck4_sel_cache = -1;
-			goto out;
-		}
-		s2mps11->buck4_sel_cache = sel;
-		udelay(DIV_ROUND_UP(abs((int)buck_val - old_val_buck), 12000));
-		s2mps11->buck_int = buck_val;
-
-		buck_max = max(s2mps11->buck_int, s2mps11->buck_disp);
-		{
-			u32 target_int_max = max((int)buck_max + s2mps11->int_delta,
-						 s2mps11->int_vthr);
-			if (target_int_max != old_val_ldo) {
-				ldo_sel = DIV_ROUND_UP(target_int_max - 300000, 25000);
-				ret = s2mps15_m86_sync_int_m(s2mps11, rdev->regmap,
-							     ldo_sel);
-				if (ret)
-					goto out;
-				s2mps11->int_max = target_int_max;
-				udelay(DIV_ROUND_UP(abs((int)old_val_ldo - (int)s2mps11->int_max),
-						    12000));
-			}
-		}
-	}
-out:
-	mutex_unlock(&s2mps11->m86_int_lock);
-	return ret;
-}
-
-static int s2mps15_m86_buck14_set_voltage_time_sel(struct regulator_dev *rdev,
-						   unsigned int old_selector,
-						   unsigned int new_selector)
-{
-	if (rdev_get_id(rdev) == S2MPS15_BUCK4)
+	if (READ_ONCE(*cache) == (int)sel)
 		return 0;
-	return regulator_set_voltage_time_sel(rdev, old_selector, new_selector);
+
+	ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, sel);
+	if (ret) {
+		WRITE_ONCE(*cache, -1);
+		return ret;
+	}
+	WRITE_ONCE(*cache, (int)sel);
+	return 0;
 }
 
 static const struct regulator_ops s2mps15_m86_buck14_ops = {
@@ -920,7 +800,61 @@ static const struct regulator_ops s2mps15_m86_buck14_ops = {
 	.is_enabled		= regulator_is_enabled_regmap,
 	.get_voltage_sel	= s2mps15_m86_buck14_get_voltage_sel,
 	.set_voltage_sel	= s2mps15_m86_buck14_set_voltage_sel,
-	.set_voltage_time_sel	= s2mps15_m86_buck14_set_voltage_time_sel,
+	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
+};
+
+static int s2mps15_m86_ldo8_get_voltage_sel(struct regulator_dev *rdev)
+{
+	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
+	unsigned int ctrl = 0;
+	int cached = READ_ONCE(s2mps11->ldo8_ctrl_cache), ret;
+
+	if (cached < 0) {
+		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &ctrl);
+		if (ret)
+			return ret;
+		cached = ctrl & 0xff;
+		WRITE_ONCE(s2mps11->ldo8_ctrl_cache, cached);
+	}
+	return cached & rdev->desc->vsel_mask;
+}
+
+static int s2mps15_m86_ldo8_set_voltage_sel(struct regulator_dev *rdev,
+					    unsigned int sel)
+{
+	struct s2mps11_info *s2mps11 = rdev_get_drvdata(rdev);
+	unsigned int ctrl;
+	int cached = READ_ONCE(s2mps11->ldo8_ctrl_cache), ret;
+
+	sel &= rdev->desc->vsel_mask;
+	if (cached < 0) {
+		ret = regmap_read(rdev->regmap, rdev->desc->vsel_reg, &ctrl);
+		if (ret)
+			return ret;
+		cached = ctrl & 0xff;
+	}
+	if ((cached & rdev->desc->vsel_mask) == sel) {
+		WRITE_ONCE(s2mps11->ldo8_ctrl_cache, cached);
+		return 0;
+	}
+
+	ctrl = ((unsigned int)cached & ~rdev->desc->vsel_mask) | sel;
+	ret = regmap_write(rdev->regmap, rdev->desc->vsel_reg, ctrl);
+	if (ret) {
+		WRITE_ONCE(s2mps11->ldo8_ctrl_cache, -1);
+		return ret;
+	}
+	WRITE_ONCE(s2mps11->ldo8_ctrl_cache, (int)(ctrl & 0xff));
+	return 0;
+}
+
+static const struct regulator_ops s2mps15_m86_ldo8_ops = {
+	.list_voltage		= regulator_list_voltage_linear_range,
+	.map_voltage		= regulator_map_voltage_linear_range,
+	.is_enabled		= regulator_is_enabled_regmap,
+	.get_voltage_sel	= s2mps15_m86_ldo8_get_voltage_sel,
+	.set_voltage_sel	= s2mps15_m86_ldo8_set_voltage_sel,
+	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
 };
 
 #define regulator_desc_s2mps15_ldo(num, range) {	\
@@ -1339,7 +1273,6 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	mutex_init(&s2mps11->m86_cpu_lock);
-	mutex_init(&s2mps11->m86_int_lock);
 	s2mps11->buck1_sel_cache = -1;
 	s2mps11->buck4_sel_cache = -1;
 	s2mps11->ldo8_ctrl_cache = -1;
@@ -1394,61 +1327,6 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, s2mps11);
 
-	if (iodev->device_type == S2MPS15X &&
-	    of_machine_is_compatible("meizu,m86")) {
-		static const int vthr_table[4] = {
-			750000, 800000, 700000, 850000
-		};
-		unsigned int b4_sel = 0, b5_sel = 0, vthr_idx, delta_idx;
-		struct arm_smccc_res res = { 0 };
-
-		ret = regmap_read(iodev->regmap_pmic, S2MPS15_REG_B4CTRL2,
-				  &b4_sel);
-		if (ret)
-			goto out;
-		ret = regmap_read(iodev->regmap_pmic, S2MPS15_REG_B5CTRL2,
-				  &b5_sel);
-		if (ret)
-			goto out;
-
-		s2mps11->buck4_sel_cache = b4_sel & 0xff;
-		s2mps11->buck_int = 300000 + (b4_sel & 0xff) * 6250;
-		s2mps11->buck_disp = 300000 + (b5_sel & 0xff) * 6250;
-
-		arm_smccc_smc((u32)-101,
-			      (3U << 30) | (0x101e0198U >> 2),
-			      0, 0, 0, 0, 0, 0, &res);
-		if ((int)res.a0 == 0) {
-			vthr_idx = (res.a2 >> 12) & 0x3;
-			delta_idx = (res.a2 >> 14) & 0x3;
-		} else {
-			vthr_idx = 0;
-			delta_idx = 0;
-		}
-		s2mps11->int_vthr = vthr_table[vthr_idx];
-		s2mps11->int_delta = delta_idx ? (delta_idx * 25000 + 25000) : 0;
-		s2mps11->int_max = max((int)max(s2mps11->buck_int,
-						s2mps11->buck_disp) +
-				       s2mps11->int_delta,
-				       s2mps11->int_vthr);
-
-		{
-			unsigned int l8_sel = 0;
-			if (!regmap_read(iodev->regmap_pmic, S2MPS15_REG_L8CTRL, &l8_sel)) {
-				u32 physical_ldo = 300000 + (l8_sel & 0x3f) * 25000;
-				s2mps11->ldo8_ctrl_cache = l8_sel & 0xff;
-				if (physical_ldo > s2mps11->int_max)
-					s2mps11->int_max = physical_ldo;
-			}
-		}
-
-		dev_info(&pdev->dev,
-			 "m86 INT LDO8 tracking initialized: buck_int=%u buck_disp=%u vthr=%d delta=%d int_max=%d\n",
-			 s2mps11->buck_int, s2mps11->buck_disp,
-			 s2mps11->int_vthr, s2mps11->int_delta,
-			 s2mps11->int_max);
-	}
-
 	config.dev = &pdev->dev;
 	config.regmap = iodev->regmap_pmic;
 	config.driver_data = s2mps11;
@@ -1476,6 +1354,21 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 			}
 			buck_desc->ops = &s2mps15_m86_buck14_ops;
 			desc = buck_desc;
+		} else if (iodev->device_type == S2MPS15X &&
+			   of_machine_is_compatible("meizu,m86") &&
+			   i == S2MPS15_LDO8) {
+			struct regulator_desc *ldo_desc;
+
+			ldo_desc = devm_kmemdup(&pdev->dev, desc,
+						sizeof(*ldo_desc),
+						GFP_KERNEL);
+			if (!ldo_desc) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			ldo_desc->ops = &s2mps15_m86_ldo8_ops;
+			ldo_desc->ramp_delay = 12000;
+			desc = ldo_desc;
 		}
 
 		if (iodev->device_type == S2MPS15X &&

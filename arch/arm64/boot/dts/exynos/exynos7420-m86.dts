@@ -998,6 +998,26 @@
 				regulator-min-microvolt = <500000>;
 				regulator-max-microvolt = <1000000>;
 				regulator-always-on;
+				regulator-coupled-with = <&m86_ldo8_int_m &m86_buck5_disp>;
+				regulator-coupled-max-spread = <400000 500000>;
+			};
+			m86_buck5_disp: BUCK5 {
+				regulator-name = "vdd_disp";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-boot-on;
+				regulator-always-on;
+				regulator-coupled-with = <&m86_buck4_int &m86_ldo8_int_m>;
+				regulator-coupled-max-spread = <500000 400000>;
+			};
+			m86_ldo8_int_m: LDO8 {
+				regulator-name = "vdd_int_m";
+				regulator-min-microvolt = <700000>;
+				regulator-max-microvolt = <1100000>;
+				regulator-boot-on;
+				regulator-always-on;
+				regulator-coupled-with = <&m86_buck4_int &m86_buck5_disp>;
+				regulator-coupled-max-spread = <400000 400000>;
 			};
 			/*
 			 * Board LDOs. These constraints can write the voltage

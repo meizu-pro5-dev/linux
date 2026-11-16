@@ -79,4 +79,10 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
 config EXYNOS_REGULATOR_COUPLER
 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
 	depends on ARCH_EXYNOS || COMPILE_TEST
+
+config EXYNOS7420_REGULATOR_COUPLER
+	bool "Exynos7420 INT/SRAM Regulator Coupler"
+	default y if ARCH_EXYNOS && ARM64
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on REGULATOR
 endif
