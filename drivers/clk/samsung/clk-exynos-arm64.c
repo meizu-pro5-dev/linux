@@ -121,7 +121,7 @@ static int __init exynos_arm64_enable_bus_clk(struct device *dev,
 
 		parent_clk = clk_get(dev, cmu->clk_name);
 		data = dev_get_drvdata(dev);
-		if (data)
+		if (data && !IS_ERR(parent_clk))
 			data->clk = parent_clk;
 	} else {
 		parent_clk = of_clk_get_by_name(np, cmu->clk_name);
@@ -160,12 +160,25 @@ static int __init exynos_arm64_cmu_prepare_pm(struct device *dev,
 
 	for (i = 0; i < data->nr_pclks; i++) {
 		struct clk *clk = of_clk_get(dev->of_node, i);
+		int ret;
 
 		if (IS_ERR(clk)) {
 			kfree(data->clk_save);
-			while (--i >= 0)
+			while (--i >= 0) {
+				clk_unprepare(data->pclks[i]);
 				clk_put(data->pclks[i]);
+			}
 			return PTR_ERR(clk);
+		}
+		ret = clk_prepare(clk);
+		if (ret) {
+			clk_put(clk);
+			kfree(data->clk_save);
+			while (--i >= 0) {
+				clk_unprepare(data->pclks[i]);
+				clk_put(data->pclks[i]);
+			}
+			return ret;
 		}
 		data->pclks[i] = clk;
 	}
@@ -306,21 +319,32 @@ int exynos_arm64_cmu_suspend(struct device *dev)
 	samsung_clk_save(data->ctx->reg_base, data->clk_save,
 			 data->nr_clk_save);
 
-	for (i = 0; i < data->nr_pclks; i++)
-		clk_prepare_enable(data->pclks[i]);
+	/*
+	 * Parent clocks stay prepared from probe so runtime PM under genpd->mlock
+	 * never acquires clk_prepare_lock (avoiding AB-BA deadlock with CCF).
+	 */
+	for (i = 0; i < data->nr_pclks; i++) {
+		ret = clk_enable(data->pclks[i]);
+		if (ret) {
+			while (--i >= 0)
+				clk_disable(data->pclks[i]);
+			return ret;
+		}
+	}
 
 	/* For suspend some registers have to be set to certain values */
 	samsung_clk_restore(data->ctx->reg_base, data->clk_suspend,
 			    data->nr_clk_suspend);
 
 	ret = exynos_arm64_pm_smc(dev, false);
+
+	for (i = 0; i < data->nr_pclks; i++)
+		clk_disable(data->pclks[i]);
+
 	if (ret)
 		return ret;
 
-	for (i = 0; i < data->nr_pclks; i++)
-		clk_disable_unprepare(data->pclks[i]);
-
-	clk_disable_unprepare(data->clk);
+	clk_disable(data->clk);
 
 	return 0;
 }
@@ -330,20 +354,33 @@ int exynos_arm64_cmu_resume(struct device *dev)
 	struct exynos_arm64_cmu_data *data = dev_get_drvdata(dev);
 	int i, ret;
 
-	clk_prepare_enable(data->clk);
-
-	for (i = 0; i < data->nr_pclks; i++)
-		clk_prepare_enable(data->pclks[i]);
-
-	ret = exynos_arm64_pm_smc(dev, true);
+	ret = clk_enable(data->clk);
 	if (ret)
 		return ret;
+
+	for (i = 0; i < data->nr_pclks; i++) {
+		ret = clk_enable(data->pclks[i]);
+		if (ret) {
+			while (--i >= 0)
+				clk_disable(data->pclks[i]);
+			clk_disable(data->clk);
+			return ret;
+		}
+	}
+
+	ret = exynos_arm64_pm_smc(dev, true);
+	if (ret) {
+		for (i = 0; i < data->nr_pclks; i++)
+			clk_disable(data->pclks[i]);
+		clk_disable(data->clk);
+		return ret;
+	}
 
 	samsung_clk_restore(data->ctx->reg_base, data->clk_save,
 			    data->nr_clk_save);
 
 	for (i = 0; i < data->nr_pclks; i++)
-		clk_disable_unprepare(data->pclks[i]);
+		clk_disable(data->pclks[i]);
 
 	return 0;
 }

@@ -3328,6 +3328,11 @@ static int clk_summary_show(struct seq_file *s, void *data)
 {
 	struct clk_core *c;
 	struct hlist_head **lists = s->private;
+	int ret;
+
+	ret = clk_pm_runtime_get_all();
+	if (ret)
+		return ret;
 
 	seq_puts(s, "                                 enable  prepare  protect                                duty  hardware\n");
 	seq_puts(s, "   clock                          count    count    count        rate   accuracy phase  cycle    enable\n");
@@ -3340,6 +3345,8 @@ static int clk_summary_show(struct seq_file *s, void *data)
 			clk_summary_show_subtree(s, c, 0);
 
 	clk_prepare_unlock();
+
+	clk_pm_runtime_put_all();
 
 	return 0;
 }
@@ -3387,6 +3394,11 @@ static int clk_dump_show(struct seq_file *s, void *data)
 	struct clk_core *c;
 	bool first_node = true;
 	struct hlist_head **lists = s->private;
+	int ret;
+
+	ret = clk_pm_runtime_get_all();
+	if (ret)
+		return ret;
 
 	seq_putc(s, '{');
 	clk_prepare_lock();
@@ -3401,6 +3413,8 @@ static int clk_dump_show(struct seq_file *s, void *data)
 	}
 
 	clk_prepare_unlock();
+
+	clk_pm_runtime_put_all();
 
 	seq_puts(s, "}\n");
 	return 0;
