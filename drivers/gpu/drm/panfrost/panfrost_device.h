@@ -82,6 +82,9 @@ struct panfrost_compatible {
 
 	/* Vendor implementation quirks callback */
 	void (*vendor_quirk)(struct panfrost_device *pfdev);
+
+	/* SoC requires inner-shareable Mali LPAE page tables */
+	bool inner_share_pgtbl;
 };
 
 struct panfrost_device {

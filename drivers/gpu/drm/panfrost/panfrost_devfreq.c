@@ -5,9 +5,11 @@
 #include <linux/devfreq.h>
 #include <linux/devfreq_cooling.h>
 #include <linux/nvmem-consumer.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
-#include <linux/m86-gpu-dvfs.h>
+#include <linux/pm_runtime.h>
+#include <linux/soc/samsung/exynos7420-asv.h>
 
 #include "panfrost_device.h"
 #include "panfrost_devfreq.h"
@@ -32,26 +34,40 @@ static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
 {
 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
+	int pmref = 0;
 	int err;
 
-	opp = devfreq_recommended_opp(dev, freq, flags);
-	if (IS_ERR(opp))
-		return PTR_ERR(opp);
-	dev_pm_opp_put(opp);
-
-	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
-#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
-		err = m86_gpu_devfreq_target(dev, freq);
-#else
-		err = -EOPNOTSUPP;
-#endif
-	} else {
-		err = dev_pm_opp_set_rate(dev, *freq);
+	if (pm_runtime_enabled(dev)) {
+		/*
+		 * Never touch OPPs/clocks while the GPU is runtime-suspended:
+		 * clk_round_rate() does not runtime-resume clock providers,
+		 * and devfreq QoS/cooling updates must not wake pd_g3d or hold
+		 * non-zero interconnect bandwidth votes while idle.
+		 */
+		pmref = pm_runtime_get_if_active(dev, true);
+		if (pmref <= 0) {
+			if (pfdev->pfdevfreq.current_frequency)
+				*freq = pfdev->pfdevfreq.current_frequency;
+			return pmref < 0 ? pmref : 0;
+		}
 	}
 
+	opp = devfreq_recommended_opp(dev, freq, flags);
+	if (IS_ERR(opp)) {
+		err = PTR_ERR(opp);
+		goto out_put;
+	}
+	dev_pm_opp_put(opp);
+
+	err = dev_pm_opp_set_rate(dev, *freq);
 	if (!err)
 		pfdev->pfdevfreq.current_frequency = *freq;
 
+out_put:
+	if (pmref > 0) {
+		pm_runtime_mark_last_busy(dev);
+		pm_runtime_put_autosuspend(dev);
+	}
 	return err;
 }
 
@@ -148,12 +164,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	if (ret)
 		return ret;
 
-	/* Retained PRO5 coordination owns the complete transaction. Generic OPP
-  * regulator setters would bypass calibrated MCS and sticky-error rules. */
- if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
-  ret = 0;
- else
-  ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
+	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
 	if (ret) {
 		/* Continue if the optional regulator is missing */
 		if (ret != -ENODEV) {
@@ -171,6 +182,12 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 		return ret;
 	}
 	pfdevfreq->opp_of_table_added = true;
+
+	if (of_device_is_compatible(dev->of_node, "samsung,exynos7420-mali")) {
+		ret = exynos7420_asv_adjust_g3d_opps(dev);
+		if (ret)
+			return ret;
+	}
 
 	spin_lock_init(&pfdevfreq->lock);
 
@@ -196,10 +213,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	 * Set the recommend OPP this will enable and configure the regulator
 	 * if any and will avoid a switch off by regulator_late_cleanup()
 	 */
-	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
-		ret = cur_freq == clk_get_rate(pfdev->clock) ? 0 : -EOPNOTSUPP;
-	else
-		ret = dev_pm_opp_set_opp(dev, opp);
+	ret = dev_pm_opp_set_opp(dev, opp);
 	dev_pm_opp_put(opp);
 	if (ret) {
 		DRM_DEV_ERROR(dev, "Couldn't set recommended OPP\n");
@@ -230,10 +244,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	}
 	pfdevfreq->devfreq = devfreq;
 
-	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator"))
-  cooling = devfreq_cooling_register(devfreq);
- else
-  cooling = devfreq_cooling_em_register(devfreq, NULL);
+	cooling = devfreq_cooling_em_register(devfreq, NULL);
 	if (IS_ERR(cooling))
 		DRM_DEV_INFO(dev, "Failed to register cooling device\n");
 	else

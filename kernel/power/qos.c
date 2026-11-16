@@ -95,8 +95,10 @@ static void pm_qos_set_value(struct pm_qos_constraints *c, s32 value)
  *
  * Return: 1 if the aggregate constraint value has changed, 0  otherwise.
  */
-int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
-			 enum pm_qos_req_action action, int value)
+int pm_qos_update_target_nonotify(struct pm_qos_constraints *c,
+				  struct plist_node *node,
+				  enum pm_qos_req_action action, int value,
+				  int *curr_out)
 {
 	int prev_value, curr_value, new_value;
 	unsigned long flags;
@@ -137,6 +139,22 @@ int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 	trace_pm_qos_update_target(action, prev_value, curr_value);
 
 	if (prev_value == curr_value)
+		return 0;
+
+	if (curr_out)
+		*curr_out = curr_value;
+
+	return 1;
+}
+
+int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
+			 enum pm_qos_req_action action, int value)
+{
+	int curr_value = 0;
+	int ret;
+
+	ret = pm_qos_update_target_nonotify(c, node, action, value, &curr_value);
+	if (!ret)
 		return 0;
 
 	if (c->notifiers)

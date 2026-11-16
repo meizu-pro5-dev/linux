@@ -26,5 +26,3 @@ obj-$(CONFIG_S5PV210_COMMON_CLK)	+= clk-s5pv210.o clk-s5pv210-audss.o
 obj-$(CONFIG_TESLA_FSD_COMMON_CLK)	+= clk-fsd.o
 obj-$(CONFIG_M86_CPU_CLOCKS) += m86-cpu-clocks.o
 
-obj-$(CONFIG_M86_GPU_DVFS) += m86-gpu-dvfs.o
-

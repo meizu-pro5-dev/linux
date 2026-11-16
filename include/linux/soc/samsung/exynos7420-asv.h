@@ -11,9 +11,21 @@ enum exynos7420_asv_domain {
 	EXYNOS7420_ASV_DOMAINS_NR,
 };
 
+#include <linux/errno.h>
 #include <linux/m86-asv-cal.h>
+
+struct device;
 
 int exynos7420_asv_get_group(enum exynos7420_asv_domain dom, unsigned int level);
 int exynos7420_asv_get_cal(struct m86_asv_cal_info *cal);
+
+#if IS_REACHABLE(CONFIG_EXYNOS_CHIPID)
+int exynos7420_asv_adjust_g3d_opps(struct device *dev);
+#else
+static inline int exynos7420_asv_adjust_g3d_opps(struct device *dev)
+{
+	return 0;
+}
+#endif
 
 #endif /* __LINUX_SOC_SAMSUNG_EXYNOS7420_ASV_H */

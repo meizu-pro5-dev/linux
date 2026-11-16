@@ -201,6 +201,8 @@ static int dev_pm_qos_constraints_allocate(struct device *dev)
 	if (!qos)
 		return -ENOMEM;
 
+	kref_init(&qos->kref);
+
 	n = kzalloc(3 * sizeof(*n), GFP_KERNEL);
 	if (!n) {
 		kfree(qos);
@@ -237,6 +239,14 @@ static int dev_pm_qos_constraints_allocate(struct device *dev)
 static void __dev_pm_qos_hide_latency_limit(struct device *dev);
 static void __dev_pm_qos_hide_flags(struct device *dev);
 
+static void dev_pm_qos_release(struct kref *kref)
+{
+	struct dev_pm_qos *qos = container_of(kref, struct dev_pm_qos, kref);
+
+	kfree(qos->resume_latency.notifiers);
+	kfree(qos);
+}
+
 /**
  * dev_pm_qos_constraints_destroy
  * @dev: target device
@@ -265,8 +275,10 @@ void dev_pm_qos_constraints_destroy(struct device *dev)
 	__dev_pm_qos_hide_flags(dev);
 
 	qos = dev->power.qos;
-	if (!qos)
+	if (IS_ERR_OR_NULL(qos)) {
+		qos = NULL;
 		goto out;
+	}
 
 	/* Flush the constraints lists for the device. */
 	c = &qos->resume_latency;
@@ -309,13 +321,13 @@ void dev_pm_qos_constraints_destroy(struct device *dev)
 	dev->power.qos = ERR_PTR(-ENODEV);
 	spin_unlock_irq(&dev->power.lock);
 
-	kfree(qos->resume_latency.notifiers);
-	kfree(qos);
-
  out:
 	mutex_unlock(&dev_pm_qos_mtx);
 
 	mutex_unlock(&dev_pm_qos_sysfs_mtx);
+
+	if (qos)
+		kref_put(&qos->kref, dev_pm_qos_release);
 }
 
 static bool dev_pm_qos_invalid_req_type(struct device *dev,
@@ -325,9 +337,72 @@ static bool dev_pm_qos_invalid_req_type(struct device *dev,
 	       !dev->power.set_latency_tolerance;
 }
 
-static int __dev_pm_qos_add_request(struct device *dev,
-				    struct dev_pm_qos_request *req,
-				    enum dev_pm_qos_req_type type, s32 value)
+struct dev_pm_qos_freq_notify {
+	struct dev_pm_qos *qos;
+	struct blocking_notifier_head *notifiers;
+	int value;
+};
+
+static bool dev_pm_qos_is_freq(enum dev_pm_qos_req_type type)
+{
+	return type == DEV_PM_QOS_MIN_FREQUENCY ||
+	       type == DEV_PM_QOS_MAX_FREQUENCY;
+}
+
+static int dev_pm_qos_update_freq(struct dev_pm_qos_request *req,
+				  enum pm_qos_req_action action, s32 value,
+				  struct dev_pm_qos_freq_notify *notify)
+{
+	struct dev_pm_qos *qos = req->dev->power.qos;
+	struct pm_qos_constraints *c;
+	int curr_value = 0;
+	int ret;
+
+	if (action != PM_QOS_REMOVE_REQ && value < 0 &&
+	    value != PM_QOS_DEFAULT_VALUE)
+		return -EINVAL;
+
+	if (action == PM_QOS_ADD_REQ) {
+		req->data.freq.qos = &qos->freq;
+		req->data.freq.type = req->type == DEV_PM_QOS_MIN_FREQUENCY ?
+				      FREQ_QOS_MIN : FREQ_QOS_MAX;
+	}
+
+	c = req->type == DEV_PM_QOS_MIN_FREQUENCY ?
+	    &qos->freq.min_freq : &qos->freq.max_freq;
+
+	ret = pm_qos_update_target_nonotify(c, &req->data.freq.pnode,
+					    action, value, &curr_value);
+	if (ret < 0 && action == PM_QOS_ADD_REQ) {
+		req->data.freq.qos = NULL;
+		req->data.freq.type = 0;
+		return ret;
+	}
+
+	if (ret > 0 && c->notifiers) {
+		kref_get(&qos->kref);
+		notify->qos = qos;
+		notify->notifiers = c->notifiers;
+		notify->value = curr_value;
+	}
+
+	return ret;
+}
+
+static void dev_pm_qos_finish_freq_notify(struct dev_pm_qos_freq_notify *notify)
+{
+	if (!notify->notifiers)
+		return;
+
+	blocking_notifier_call_chain(notify->notifiers, notify->value, NULL);
+	kref_put(&notify->qos->kref, dev_pm_qos_release);
+}
+
+static int __dev_pm_qos_add_request_notify(struct device *dev,
+					   struct dev_pm_qos_request *req,
+					   enum dev_pm_qos_req_type type,
+					   s32 value,
+					   struct dev_pm_qos_freq_notify *notify)
 {
 	int ret = 0;
 
@@ -349,18 +424,32 @@ static int __dev_pm_qos_add_request(struct device *dev,
 
 	req->dev = dev;
 	req->type = type;
-	if (req->type == DEV_PM_QOS_MIN_FREQUENCY)
+	if (notify && dev_pm_qos_is_freq(type)) {
+		ret = dev_pm_qos_update_freq(req, PM_QOS_ADD_REQ, value, notify);
+		if (ret < 0) {
+			req->dev = NULL;
+			req->type = 0;
+		}
+	} else if (req->type == DEV_PM_QOS_MIN_FREQUENCY) {
 		ret = freq_qos_add_request(&dev->power.qos->freq,
 					   &req->data.freq,
 					   FREQ_QOS_MIN, value);
-	else if (req->type == DEV_PM_QOS_MAX_FREQUENCY)
+	} else if (req->type == DEV_PM_QOS_MAX_FREQUENCY) {
 		ret = freq_qos_add_request(&dev->power.qos->freq,
 					   &req->data.freq,
 					   FREQ_QOS_MAX, value);
-	else
+	} else {
 		ret = apply_constraint(req, PM_QOS_ADD_REQ, value);
+	}
 
 	return ret;
+}
+
+static int __dev_pm_qos_add_request(struct device *dev,
+				    struct dev_pm_qos_request *req,
+				    enum dev_pm_qos_req_type type, s32 value)
+{
+	return __dev_pm_qos_add_request_notify(dev, req, type, value, NULL);
 }
 
 /**
@@ -388,22 +477,26 @@ static int __dev_pm_qos_add_request(struct device *dev,
 int dev_pm_qos_add_request(struct device *dev, struct dev_pm_qos_request *req,
 			   enum dev_pm_qos_req_type type, s32 value)
 {
+	struct dev_pm_qos_freq_notify notify = {};
 	int ret;
 
 	mutex_lock(&dev_pm_qos_mtx);
-	ret = __dev_pm_qos_add_request(dev, req, type, value);
+	ret = __dev_pm_qos_add_request_notify(dev, req, type, value, &notify);
 	mutex_unlock(&dev_pm_qos_mtx);
+	dev_pm_qos_finish_freq_notify(&notify);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dev_pm_qos_add_request);
 
 /**
- * __dev_pm_qos_update_request - Modify an existing device PM QoS request.
+ * __dev_pm_qos_update_request_notify - Modify an existing device PM QoS request.
  * @req : PM QoS request to modify.
  * @new_value: New value to request.
+ * @notify: Optional deferred frequency QoS notification state.
  */
-static int __dev_pm_qos_update_request(struct dev_pm_qos_request *req,
-				       s32 new_value)
+static int __dev_pm_qos_update_request_notify(struct dev_pm_qos_request *req,
+					      s32 new_value,
+					      struct dev_pm_qos_freq_notify *notify)
 {
 	s32 curr_value;
 	int ret = 0;
@@ -436,10 +529,22 @@ static int __dev_pm_qos_update_request(struct dev_pm_qos_request *req,
 
 	trace_dev_pm_qos_update_request(dev_name(req->dev), req->type,
 					new_value);
-	if (curr_value != new_value)
-		ret = apply_constraint(req, PM_QOS_UPDATE_REQ, new_value);
+	if (curr_value != new_value) {
+		if (notify && dev_pm_qos_is_freq(req->type))
+			ret = dev_pm_qos_update_freq(req, PM_QOS_UPDATE_REQ,
+						     new_value, notify);
+		else
+			ret = apply_constraint(req, PM_QOS_UPDATE_REQ,
+					       new_value);
+	}
 
 	return ret;
+}
+
+static int __dev_pm_qos_update_request(struct dev_pm_qos_request *req,
+				       s32 new_value)
+{
+	return __dev_pm_qos_update_request_notify(req, new_value, NULL);
 }
 
 /**
@@ -462,16 +567,19 @@ static int __dev_pm_qos_update_request(struct dev_pm_qos_request *req,
  */
 int dev_pm_qos_update_request(struct dev_pm_qos_request *req, s32 new_value)
 {
+	struct dev_pm_qos_freq_notify notify = {};
 	int ret;
 
 	mutex_lock(&dev_pm_qos_mtx);
-	ret = __dev_pm_qos_update_request(req, new_value);
+	ret = __dev_pm_qos_update_request_notify(req, new_value, &notify);
 	mutex_unlock(&dev_pm_qos_mtx);
+	dev_pm_qos_finish_freq_notify(&notify);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dev_pm_qos_update_request);
 
-static int __dev_pm_qos_remove_request(struct dev_pm_qos_request *req)
+static int __dev_pm_qos_remove_request_notify(struct dev_pm_qos_request *req,
+					      struct dev_pm_qos_freq_notify *notify)
 {
 	int ret;
 
@@ -487,9 +595,19 @@ static int __dev_pm_qos_remove_request(struct dev_pm_qos_request *req)
 
 	trace_dev_pm_qos_remove_request(dev_name(req->dev), req->type,
 					PM_QOS_DEFAULT_VALUE);
-	ret = apply_constraint(req, PM_QOS_REMOVE_REQ, PM_QOS_DEFAULT_VALUE);
+	if (notify && dev_pm_qos_is_freq(req->type))
+		ret = dev_pm_qos_update_freq(req, PM_QOS_REMOVE_REQ,
+					     PM_QOS_DEFAULT_VALUE, notify);
+	else
+		ret = apply_constraint(req, PM_QOS_REMOVE_REQ,
+				       PM_QOS_DEFAULT_VALUE);
 	memset(req, 0, sizeof(*req));
 	return ret;
+}
+
+static int __dev_pm_qos_remove_request(struct dev_pm_qos_request *req)
+{
+	return __dev_pm_qos_remove_request_notify(req, NULL);
 }
 
 /**
@@ -509,11 +627,13 @@ static int __dev_pm_qos_remove_request(struct dev_pm_qos_request *req)
  */
 int dev_pm_qos_remove_request(struct dev_pm_qos_request *req)
 {
+	struct dev_pm_qos_freq_notify notify = {};
 	int ret;
 
 	mutex_lock(&dev_pm_qos_mtx);
-	ret = __dev_pm_qos_remove_request(req);
+	ret = __dev_pm_qos_remove_request_notify(req, &notify);
 	mutex_unlock(&dev_pm_qos_mtx);
+	dev_pm_qos_finish_freq_notify(&notify);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dev_pm_qos_remove_request);

@@ -706,6 +706,14 @@ static const struct panfrost_compatible default_data = {
 	.pm_domain_names = NULL,
 };
 
+static const struct panfrost_compatible exynos7420_data = {
+	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
+	.supply_names = default_supplies,
+	.num_pm_domains = 1, /* optional */
+	.pm_domain_names = NULL,
+	.inner_share_pgtbl = true,
+};
+
 static const struct panfrost_compatible amlogic_data = {
 	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
 	.supply_names = default_supplies,
@@ -757,6 +765,8 @@ static const struct panfrost_compatible mediatek_mt8192_data = {
 
 static const struct of_device_id dt_match[] = {
 	/* Set first to probe before the generic compatibles */
+	{ .compatible = "samsung,exynos7420-mali",
+	  .data = &exynos7420_data, },
 	{ .compatible = "amlogic,meson-gxm-mali",
 	  .data = &amlogic_data, },
 	{ .compatible = "amlogic,meson-g12a-mali",

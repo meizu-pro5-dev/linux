@@ -645,8 +645,7 @@ struct panfrost_mmu *panfrost_mmu_ctx_create(struct panfrost_device *pfdev)
 		.iommu_dev	= pfdev->dev,
 	};
 
-	if (of_machine_is_compatible("meizu,m86") &&
-	    pfdev->features.id == 0x750 && !pfdev->coherent)
+	if (pfdev->comp->inner_share_pgtbl && !pfdev->coherent)
 		mmu->pgtbl_cfg.quirks |= IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE;
 
 	mmu->pgtbl_ops = alloc_io_pgtable_ops(ARM_MALI_LPAE, &mmu->pgtbl_cfg,
@@ -657,7 +656,8 @@ struct panfrost_mmu *panfrost_mmu_ctx_create(struct panfrost_device *pfdev)
 	}
 
 	if (mmu->pgtbl_cfg.quirks & IO_PGTABLE_QUIRK_ARM_MALI_INNER_SHARE)
-		dev_info_once(pfdev->dev, "m86 inner-shareable workaround enabled\n");
+		dev_info_once(pfdev->dev,
+			      "inner-shareable page table quirk enabled\n");
 
 	kref_init(&mmu->refcount);
 

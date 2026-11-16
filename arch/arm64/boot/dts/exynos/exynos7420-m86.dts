@@ -14,6 +14,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/usb/pd.h>
 
 / {
@@ -481,77 +482,48 @@
 		samsung,bus = <&bus_mif>;
 	};
 
-	/* Disabled during Stage 2 while pd_g3d + cmu_g3d run standalone; deleted in Stage 3. */
-	m86_gpu_dvfs: gpu-dvfs-retained {
-		compatible = "meizu,m86-gpu-dvfs-retained";
-		#clock-cells = <0>;
-		status = "disabled";
-		vdd-g3d-supply = <&m86_buck6_g3d>;
-		clocks = <&fin_pll>, <&m86_apollo_clk>,
-			 <&clock_topc CLK_TOP_SCLK_BUS_PLL_G3D>,
-			 <&clock_topc CLK_ACLK_MIF_LOGICAL>,
-			 <&clock_topc CLK_ACLK_BUS0_532>,
-			 <&clock_topc CLK_ACLK_BUS1_532>,
-			 <&clock_topc CLK_ACLK_BUS1_200>,
-			 <&clock_topc CLK_PCLK_BUS0_133>,
-			 <&clock_topc CLK_MOUT_PCLK_BUS01_133>,
-			 <&clock_topc CLK_ACLK_IMEM_266>,
-			 <&clock_topc CLK_ACLK_IMEM_200>;
-		clock-names = "fin", "apollo", "top_g3d", "mif",
-			      "int_bus0", "int_bus1", "int_bus1_low",
-			      "int_pclk", "int_pclk_mux", "int_imem", "int_imem_low";
-		samsung,bus = <&bus_mif>;
-		meizu,gpu = <&gpu>;
-		meizu,sysreg = <&sysreg>;
-		meizu,retained-g3d-ownership;
-		meizu,max-validated-frequency = <700000000>;
-		meizu,validated-buck6-normal-on;
-		/*
-		 * Retained external G3D domain (0x4100=0xf) + Panfrost 50ms internal
-		 * shader/tiler/L2 power-off and devfreq suspend (validated in r62d/r62e/r71/r72).
-		 */
-		samsung,tmu = <&tmuctrl_0 &tmuctrl_1 &tmuctrl_2 &tmuctrl_3>;
-
-		m86_g3d_experiment: g3d-domain {
-			#power-domain-cells = <0>;
-		};
-	};
-
 	m86_gpu_opps: gpu-opps {
 		compatible = "operating-points-v2";
 		/*
-		 * Frequency-only governor/cooling table: coordinator owns voltage/MCS.
-		 * Full hardware table remains in C source. Enable next OPPs only together
-		 * with validation flag+clockcap; governor must not request unvalidated rates.
+		 * Group 0 nominal voltages; exynos7420-asv adjusts per-chip ASV
+		 * voltages at devfreq init. Pairwise opp-peak-kBps scales
+		 * <&bus_int &bus_mif> (INT) and <&bus_mif &bus_mif> (MIF).
 		 */
 		opp-266000000 {
 			opp-hz = /bits/ 64 <266000000>;
 			opp-microvolt = <762500>;
+			opp-peak-kBps = <1280000 3328000>;
 		};
-		/* Temporarily disabled during Stage 2 (before opp-microvolt + ASV in Stage 3). */
 		opp-350000000 {
 			opp-hz = /bits/ 64 <350000000>;
-			status = "disabled";
+			opp-microvolt = <768750>;
+			opp-peak-kBps = <1600000 4344000>;
 		};
 		opp-420000000 {
 			opp-hz = /bits/ 64 <420000000>;
-			status = "disabled";
+			opp-microvolt = <775000>;
+			opp-peak-kBps = <2136000 8208000>;
 		};
 		opp-544000000 {
 			opp-hz = /bits/ 64 <544000000>;
-			status = "disabled";
+			opp-microvolt = <812500>;
+			opp-peak-kBps = <3304000 8208000>;
 		};
 		opp-600000000 {
 			opp-hz = /bits/ 64 <600000000>;
-			status = "disabled";
+			opp-microvolt = <850000>;
+			opp-peak-kBps = <3304000 12416000>;
 		};
 		opp-700000000 {
 			opp-hz = /bits/ 64 <700000000>;
-			status = "disabled";
+			opp-microvolt = <893750>;
+			opp-peak-kBps = <3200000 12416000>;
 		};
 		/* Retained for a separately validated 772 MHz experiment. */
 		opp-772000000 {
 			opp-hz = /bits/ 64 <772000000>;
+			opp-microvolt = <931250>;
+			opp-peak-kBps = <3200000 12416000>;
 			status = "disabled";
 		};
 	};
@@ -727,6 +699,13 @@
 				type = "critical";
 			};
 		};
+
+		cooling-maps {
+			map0 {
+				trip = <&apollo_alert_1>;
+				cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+			};
+		};
 	};
 
 	gpu_thermal: gpu-thermal {
@@ -756,6 +735,13 @@
 				type = "critical";
 			};
 		};
+
+		cooling-maps {
+			map0 {
+				trip = <&gpu_alert_1>;
+				cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+			};
+		};
 	};
 
 	isp_thermal: isp-thermal {
@@ -783,6 +769,13 @@
 				temperature = <95000>;
 				hysteresis = <5000>;
 				type = "critical";
+			};
+		};
+
+		cooling-maps {
+			map0 {
+				trip = <&isp_alert_1>;
+				cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 			};
 		};
 	};
@@ -826,6 +819,13 @@
 			temperature = <95000>;
 			hysteresis = <5000>;
 			type = "critical";
+		};
+	};
+
+	cooling-maps {
+		map0 {
+			trip = <&atlas_alert_1>;
+			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 		};
 	};
 };
@@ -945,7 +945,9 @@
 	clocks = <&cmu_g3d CLK_ACLK_G3D>, <&cmu_g3d CLK_PCLK_SYSREG_G3D>;
 	clock-names = "core", "bus";
 	power-domains = <&pd_g3d>;
+	interconnects = <&bus_int &bus_mif>, <&bus_mif &bus_mif>;
 	operating-points-v2 = <&m86_gpu_opps>;
+	#cooling-cells = <2>;
 };
 
 &hsi2c_0 {

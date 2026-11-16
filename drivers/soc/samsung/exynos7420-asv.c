@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pm_opp.h>
 #include <linux/seq_file.h>
 #include <linux/soc/samsung/exynos7420-asv.h>
 #include <linux/m86-asv-cal.h>
@@ -89,6 +90,53 @@ int exynos7420_asv_get_cal(struct m86_asv_cal_info *cal)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(exynos7420_asv_get_cal);
+
+int exynos7420_asv_adjust_g3d_opps(struct device *dev)
+{
+	static const struct {
+		unsigned long hz;
+		u8 cal_lvl;
+	} g3d_levels[] = {
+		{ 266000000UL, 7 },
+		{ 350000000UL, 6 },
+		{ 420000000UL, 5 },
+		{ 544000000UL, 4 },
+		{ 600000000UL, 3 },
+		{ 700000000UL, 2 },
+		{ 772000000UL, 1 },
+	};
+	unsigned int i;
+	u32 min_uv = U32_MAX, max_uv = 0;
+
+	if (!asv_data.initialized)
+		return -EPROBE_DEFER;
+
+	for (i = 0; i < ARRAY_SIZE(g3d_levels); i++) {
+		u32 lvl = g3d_levels[i].cal_lvl;
+		u32 volt = m86_asv_lookup_volt(&asv_data.cal, M86_ASV_G3D, lvl,
+					       m86_g3d_asv_volt_v15[lvl - 1]);
+		int ret;
+
+		ret = dev_pm_opp_adjust_voltage(dev, g3d_levels[i].hz,
+						volt, volt, volt);
+		if (ret == -ENODEV)
+			continue;
+		if (ret)
+			return ret;
+
+		if (volt < min_uv)
+			min_uv = volt;
+		if (volt > max_uv)
+			max_uv = volt;
+	}
+
+	if (min_uv <= max_uv)
+		dev_info(dev, "exynos7420-asv: G3D group=0x%03x OPPs adjusted (%u..%u uV)\n",
+			 m86_asv_domain_group_raw(&asv_data.cal, M86_ASV_G3D),
+			 min_uv, max_uv);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos7420_asv_adjust_g3d_opps);
 
 static const char * const domain_names[] = {
 	[EXYNOS7420_ASV_BIG] = "BIG (ATLAS)",

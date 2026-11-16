@@ -109,13 +109,3 @@ config M86_CPU_CLOCKS
 	help
 	  Explicit CPU clock transitions for the two Exynos7420 clusters.
 
-config M86_GPU_DVFS
-	tristate "PRO5 retained GPU clock/MCS coordination (experimental)"
-	depends on ARCH_EXYNOS && PM && PM_OPP && THERMAL && I2C && CPU_FREQ && REGULATOR && MFD_SEC_CORE
-	depends on MFD_SYSCON
-	select REGULATOR_M86_GPU_READONLY
-	help
-	  Explicit retained-domain PRO5 GPU CCF and Panfrost target transactions.
-	  No probe voltage/clock writes; active voltage requires separately validated
-	  BUCK6 ownership and an explicit DT flag. Keep the first ceiling266MHz.
-

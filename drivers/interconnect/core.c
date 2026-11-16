@@ -302,6 +302,16 @@ static int apply_constraints(struct icc_path *path)
 	int ret = -EINVAL;
 	int i;
 
+	/*
+	 * Single-node paths (src == dst in path_find()) still carry a
+	 * bandwidth vote for that provider node and cannot be skipped.
+	 */
+	if (path->num_nodes == 1) {
+		next = path->reqs[0].node;
+		p = next->provider;
+		return p->set(next, next);
+	}
+
 	for (i = 0; i < path->num_nodes; i++) {
 		next = path->reqs[i].node;
 		p = next->provider;

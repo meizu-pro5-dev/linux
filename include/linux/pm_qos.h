@@ -15,6 +15,7 @@
 #include <linux/plist.h>
 #include <linux/notifier.h>
 #include <linux/device.h>
+#include <linux/kref.h>
 
 enum pm_qos_flags_status {
 	PM_QOS_FLAGS_UNDEFINED = -1,
@@ -115,6 +116,7 @@ struct dev_pm_qos_request {
 };
 
 struct dev_pm_qos {
+	struct kref kref;
 	struct pm_qos_constraints resume_latency;
 	struct pm_qos_constraints latency_tolerance;
 	struct freq_constraints freq;
@@ -137,6 +139,10 @@ static inline int dev_pm_qos_request_active(struct dev_pm_qos_request *req)
 }
 
 s32 pm_qos_read_value(struct pm_qos_constraints *c);
+int pm_qos_update_target_nonotify(struct pm_qos_constraints *c,
+				  struct plist_node *node,
+				  enum pm_qos_req_action action, int value,
+				  int *curr_out);
 int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 			 enum pm_qos_req_action action, int value);
 bool pm_qos_update_flags(struct pm_qos_flags *pqf,

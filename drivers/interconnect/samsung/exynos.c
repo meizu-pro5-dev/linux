@@ -72,6 +72,9 @@ static int exynos_generic_icc_set(struct icc_node *src, struct icc_node *dst)
 		return ret;
 	}
 
+	if (dst_priv == src_priv)
+		return 0;
+
 	ret = dev_pm_qos_update_request(&dst_priv->qos_req, dst_freq);
 	if (ret < 0) {
 		dev_err(dst_priv->dev, "failed to update PM QoS of %s (dst)\n",

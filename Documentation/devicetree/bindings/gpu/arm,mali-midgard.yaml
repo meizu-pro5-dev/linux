@@ -39,6 +39,7 @@ properties:
           - enum:
               - rockchip,rk3288-mali
               - samsung,exynos5433-mali
+              - samsung,exynos7420-mali
           - const: arm,mali-t760
       - items:
           - enum:
@@ -79,6 +80,10 @@ properties:
 
   power-domains:
     maxItems: 1
+
+  interconnects:
+    minItems: 1
+    maxItems: 2
 
   resets:
     minItems: 1

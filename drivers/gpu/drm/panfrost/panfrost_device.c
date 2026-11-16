@@ -4,10 +4,8 @@
 
 #include <linux/clk.h>
 #include <linux/export.h>
-#include <linux/mfd/syscon.h>
 #include <linux/of.h>
-#include <linux/regmap.h>
-#include <linux/m86-gpu-dvfs.h>
+#include <linux/pm_opp.h>
 #include <linux/reset.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
@@ -412,88 +410,64 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
 static int panfrost_device_resume(struct device *dev)
 {
 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
+	int ret;
 
-	if (of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator")) {
-#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
-		int ret = m86_gpu_resume_validate(dev);
+	ret = clk_prepare_enable(pfdev->clock);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(pfdev->bus_clock);
+	if (ret) {
+		clk_disable_unprepare(pfdev->clock);
+		return ret;
+	}
 
-		if (ret)
-			return ret;
-#else
-		return -EOPNOTSUPP;
-#endif
-	} else {
-		int ret;
+	panfrost_device_reset(pfdev);
 
-		ret = clk_prepare_enable(pfdev->clock);
-		if (ret)
-			return ret;
-		ret = clk_prepare_enable(pfdev->bus_clock);
-		if (ret) {
-			clk_disable_unprepare(pfdev->clock);
-			return ret;
+	if (pfdev->pfdevfreq.opp_of_table_added) {
+		unsigned long rate = clk_get_rate(pfdev->clock);
+
+		if (rate) {
+			ret = dev_pm_opp_set_rate(dev, rate);
+			if (ret)
+				dev_warn(dev, "Failed to restore GPU OPP: %d\n",
+					 ret);
+			else
+				pfdev->pfdevfreq.current_frequency = rate;
 		}
 	}
-	panfrost_device_reset(pfdev);
+
 	panfrost_devfreq_resume(pfdev);
 
 	return 0;
 }
 
-static bool panfrost_gpu_hw_is_idle(struct panfrost_device *pfdev)
-{
-	static const u32 regs[] = {
-		SHADER_READY_LO, SHADER_READY_HI,
-		TILER_READY_LO, TILER_READY_HI,
-		L2_READY_LO, L2_READY_HI,
-		SHADER_PWRTRANS_LO, SHADER_PWRTRANS_HI,
-		TILER_PWRTRANS_LO, TILER_PWRTRANS_HI,
-		L2_PWRTRANS_LO, L2_PWRTRANS_HI,
-	};
-	unsigned int i;
-
-	if (!test_bit(PANFROST_COMP_BIT_JOB, pfdev->is_suspended) ||
-	    !test_bit(PANFROST_COMP_BIT_MMU, pfdev->is_suspended) ||
-	    !test_bit(PANFROST_COMP_BIT_GPU, pfdev->is_suspended) ||
-	    atomic_read(&pfdev->reset.pending) ||
-	    !panfrost_job_is_idle(pfdev))
-		return false;
-
-	for (i = 0; i < ARRAY_SIZE(regs); i++) {
-		if (readl(pfdev->iomem + regs[i]))
-			return false;
-	}
-
-	return !atomic_read(&pfdev->reset.pending) &&
-	       panfrost_job_is_idle(pfdev);
-}
-
 static int panfrost_device_suspend(struct device *dev)
 {
 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
-	bool coord = of_property_read_bool(dev->of_node, "meizu,gpu-dvfs-coordinator");
 
 	if (!panfrost_job_is_idle(pfdev))
 		return -EBUSY;
 
 	panfrost_devfreq_suspend(pfdev);
-	if (coord) {
-#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
-		m86_gpu_suspend_notify(dev);
-#endif
+
+	if (pfdev->pfdevfreq.opp_of_table_added) {
+		unsigned long min_freq = 0;
+		struct dev_pm_opp *opp;
+
+		opp = dev_pm_opp_find_freq_ceil(dev, &min_freq);
+		if (!IS_ERR(opp)) {
+			dev_pm_opp_put(opp);
+			(void)dev_pm_opp_set_rate(dev, min_freq);
+		}
+		(void)dev_pm_opp_set_rate(dev, 0);
 	}
+
 	panfrost_job_suspend_irq(pfdev);
 	panfrost_mmu_suspend_irq(pfdev);
 	panfrost_gpu_suspend_irq(pfdev);
 	panfrost_gpu_power_off(pfdev);
-	if (coord) {
-#if IS_REACHABLE(CONFIG_M86_GPU_DVFS)
-		m86_gpu_domain_suspend(dev, panfrost_gpu_hw_is_idle(pfdev));
-#endif
-	} else {
-		clk_disable_unprepare(pfdev->bus_clock);
-		clk_disable_unprepare(pfdev->clock);
-	}
+	clk_disable_unprepare(pfdev->bus_clock);
+	clk_disable_unprepare(pfdev->clock);
 
 	return 0;
 }
