@@ -61,7 +61,7 @@ struct s2mps11_info {
 	struct gpio_desc **ext_control_gpiod;
 };
 
-#include "m86-cpu-buck-active.h"
+#include "s2mps15-cpu-buck.h"
 
 static int get_ramp_delay(int ramp_delay)
 {

@@ -25,8 +25,8 @@ static int m86_cpu_read_register(struct regulator_dev *rdev,
 
 	if (ret)
 		dev_err_ratelimited(&rdev->dev,
-			"CPU rail read failed regulator_id=%u reg=%#x ret=%d\n",
-			rdev_get_id(rdev), reg, ret);
+				    "CPU rail read failed regulator_id=%u reg=%#x ret=%d\n",
+				    rdev_get_id(rdev), reg, ret);
 	return ret;
 }
 
@@ -47,8 +47,8 @@ static int m86_cpu_read_state(struct regulator_dev *rdev,
 	/* This candidate is bounded to the measured ID12 Rev1-range device. */
 	if (revision != 0x12) {
 		dev_err_ratelimited(&rdev->dev,
-			"CPU rail ID rejected cluster=%u revision=%#x expected=0x12\n",
-			index, revision);
+				    "CPU rail ID rejected cluster=%u revision=%#x expected=0x12\n",
+				    index, revision);
 		return -EOPNOTSUPP;
 	}
 	ret = m86_cpu_read_register(rdev, rdev->desc->enable_reg, &s->ctrl);
@@ -71,9 +71,10 @@ static int m86_cpu_read_state(struct regulator_dev *rdev,
 	if ((s->ctrl & 0x7e) != (info->m86_cpu_ctrl[index] & 0x7e) ||
 	    (s->dvs & 0xe3) != 0x80 || s->selector > 255) {
 		dev_err_ratelimited(&rdev->dev,
-			"CPU rail state rejected cluster=%u revision=%#x ctrl=%#x expected_ctrl=%#x dvs=%#x dvs_masked=%#x selector=%#x ramp=%#x\n",
-			index, revision, s->ctrl, info->m86_cpu_ctrl[index],
-			s->dvs, s->dvs & 0xe3, s->selector, s->ramp);
+				    "CPU rail state rejected cluster=%u revision=%#x ctrl=%#x expected_ctrl=%#x dvs=%#x dvs_masked=%#x selector=%#x ramp=%#x\n",
+				    index, revision, s->ctrl,
+				    info->m86_cpu_ctrl[index], s->dvs,
+				    s->dvs & 0xe3, s->selector, s->ramp);
 		return -EOPNOTSUPP;
 	}
 	if ((s->ctrl & (BIT(7) | BIT(0))) && !ctx->bit0_observed) {
@@ -106,7 +107,7 @@ static void m86_cpu_wait(unsigned int from_uv, unsigned int to_uv,
 }
 
 static int m86_cpu_write_selector(struct regulator_dev *rdev, unsigned int sel,
-				 unsigned int old_uv, unsigned int ramp)
+				  unsigned int old_uv, unsigned int ramp)
 {
 	int ret;
 
@@ -185,8 +186,8 @@ static int m86_cpu_set_selector(struct regulator_dev *rdev, unsigned int sel)
 		 * only sync bit2, then set requested selector. Do not replay
 		 * probe's LDO7/LDO9 or delta/vthr initialization.
 		 */
-		if (1075000 < rdev->constraints->min_uV ||
-		    1075000 > rdev->constraints->max_uV) {
+		if (rdev->constraints->min_uV > 1075000 ||
+		    rdev->constraints->max_uV < 1075000) {
 			ret = -EINVAL;
 			goto unlock;
 		}
@@ -217,7 +218,8 @@ fault:
 	 */
 	ctx->state_valid = false;
 	dev_err_ratelimited(&rdev->dev,
-		"CPU rail write failed %d; transaction aborted, state invalidated for retry\n", ret);
+			    "CPU rail write failed %d; transaction aborted, state invalidated for retry\n",
+			    ret);
 unlock:
 	mutex_unlock(&info->m86_cpu_lock);
 	return ret;
