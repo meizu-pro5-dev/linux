@@ -24,6 +24,8 @@ static void __init m86_import_firmware_memory(void *builtin, const void *firmwar
 	const fdt64_t *fw_reg;
 	fdt64_t *bi_reg;
 	int node, bi_mem, fw_len, bi_len, i, count;
+	int low_banks = 0;
+	u64 low_start = 0, low_end = 0, low_total = 0;
 	u64 high_end = M86_HIGH_DRAM_START;
 	u64 high_size = 0;
 
@@ -35,6 +37,7 @@ static void __init m86_import_firmware_memory(void *builtin, const void *firmwar
 	 */
 	fdt_for_each_subnode(node, firmware, 0) {
 		const char *name = fdt_get_name(firmware, node, NULL);
+		bool high_done = false;
 
 		if (!name || (strcmp(name, "memory") != 0 &&
 			      strncmp(name, "memory@", 7) != 0))
@@ -44,24 +47,53 @@ static void __init m86_import_firmware_memory(void *builtin, const void *firmwar
 		if (!fw_reg || fw_len < 16 || (fw_len % 16) != 0)
 			continue;
 
+		low_banks = 0;
+		low_start = 0;
+		low_end = 0;
+		low_total = 0;
 		high_end = M86_HIGH_DRAM_START;
 		count = fw_len / 16;
 		for (i = 0; i < count; i++) {
 			u64 base = fdt64_ld(&fw_reg[i * 2]);
 			u64 size = fdt64_ld(&fw_reg[i * 2 + 1]);
 
-			if (!size || base < M86_HIGH_DRAM_START)
+			if (!size)
+				continue;
+			if (base < M86_HIGH_DRAM_START) {
+				if (size > M86_HIGH_DRAM_START - base)
+					size = M86_HIGH_DRAM_START - base;
+				if (!low_banks) {
+					low_start = base;
+					low_end = base + size;
+				} else if (base == low_end) {
+					low_end += size;
+				} else {
+					pr_notice("firmware low DRAM bank[%d]=[%#llx,%#llx) after %#llx\n",
+						  i, base, base + size, low_end);
+					low_end = base + size;
+				}
+				low_total += size;
+				low_banks++;
+				continue;
+			}
+			if (high_done)
 				continue;
 			if (base != high_end ||
-			    size > (M86_HIGH_DRAM_START + M86_HIGH_DRAM_MAX) - high_end)
-				break;
+			    size > (M86_HIGH_DRAM_START + M86_HIGH_DRAM_MAX) - high_end) {
+				high_done = true;
+				continue;
+			}
 			high_end += size;
 		}
-		if (high_end > M86_HIGH_DRAM_START) {
+		if (low_banks || high_end > M86_HIGH_DRAM_START) {
 			high_size = high_end - M86_HIGH_DRAM_START;
 			break;
 		}
 	}
+
+	if (low_banks)
+		pr_notice("firmware low DRAM=[%#llx,%#llx) banks=%d total=%llu MiB\n",
+			  low_start, low_end, low_banks, low_total >> 20);
 
 	if (!high_size) {
 		pr_notice("firmware FDT reports 3 GiB SKU (no high DRAM banks)\n");

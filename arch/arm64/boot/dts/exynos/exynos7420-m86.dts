@@ -69,15 +69,6 @@
 		};
 
 		/*
-		 * Preserves only the bootloader display handoff buffer (through 0xe4800000).
-		 * Reclaimed: vendor-log (32 MiB) and legacy media/video (335.5 MiB).
-		 */
-		vendor-reserved@e1800000 {
-			reg = <0x0 0xe1800000 0x0 0x03000000>;
-			no-map;
-		};
-
-		/*
 		 * Stock 3.10 allocates seclog (512 KiB), reset_reason (1 MiB) and
 		 * ramoops (2 MiB) top-down below 0xf9800000; seclog was observed
 		 * at 0xf9780000, which places the stock ramoops at 0xf9480000.
