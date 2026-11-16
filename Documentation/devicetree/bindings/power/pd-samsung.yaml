@@ -21,17 +21,20 @@ properties:
     enum:
       - samsung,exynos4210-pd
       - samsung,exynos5433-pd
+      - samsung,exynos7420-pd
 
   reg:
     maxItems: 1
 
   clocks:
     deprecated: true
-    maxItems: 1
+    minItems: 1
+    maxItems: 12
 
   clock-names:
     deprecated: true
-    maxItems: 1
+    minItems: 1
+    maxItems: 12
 
   label:
     description:
@@ -42,7 +45,8 @@ properties:
     const: 0
 
   power-domains:
-    maxItems: 1
+    minItems: 1
+    maxItems: 4
 
 required:
   - compatible

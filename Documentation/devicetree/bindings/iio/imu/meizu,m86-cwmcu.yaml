@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iio/imu/meizu,m86-cwmcu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: CyWee CWMCU Sensor Hub on Meizu PRO 5
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    items:
+      - const: meizu,m86-cwmcu
+      - const: st,sensor_hub
+
+  reg:
+    maxItems: 1
+
+  vdd-supply: true
+
+  interrupts:
+    maxItems: 1
+
+  wakeup-gpios:
+    maxItems: 1
+
+  sleep-gpios:
+    maxItems: 1
+
+  busy-gpios:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+
+  boot0-gpios:
+    maxItems: 1
+
+  wakeup-source: true
+
+  mount-matrix: true
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false

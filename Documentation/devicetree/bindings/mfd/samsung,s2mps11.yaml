@@ -59,6 +59,16 @@ properties:
 
   wakeup-source: true
 
+  meizu,skip-undescribed-rails:
+    description:
+      Skip registering S2MPS15 regulators without a DT child node.
+    type: boolean
+
+  meizu,int-ldo8-coupler:
+    description:
+      Opt-in for Exynos7420 INT/DISP/LDO8 coupled regulator handling.
+    type: boolean
+
 required:
   - compatible
   - reg

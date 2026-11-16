@@ -24,6 +24,10 @@ properties:
               - ti,bq25895
               - ti,bq25896
           - const: ti,bq25890
+      - items:
+          - const: meizu,m86-bq25892
+          - const: ti,bq25892
+          - const: ti,bq25890
 
   reg:
     maxItems: 1
@@ -84,6 +88,35 @@ properties:
 
   ti,ibatcomp-clamp-microvolt:
     description: max. charging voltage adjustment due to expected voltage drop on in-series resistor
+
+  enable-gpios:
+    maxItems: 1
+
+  linux,skip-reset:
+    type: boolean
+    description: Skip resetting charger registers on probe.
+
+  linux,secondary-charger-name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: Name of the secondary coordinated charger power supply.
+
+  meizu,secondary-charger:
+    type: boolean
+    description: Marks this instance as the secondary parallel charger.
+
+  meizu,battery:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the fuel-gauge battery power supply node.
+
+  meizu,usb-source:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the USB Type-C / MUIC source power supply node.
+
+  usb-otg-vbus:
+    type: object
+    $ref: /schemas/regulator/regulator.yaml#
+    unevaluatedProperties: false
+    description: OTG 5V VBUS boost regulator child node.
 
 required:
   - compatible

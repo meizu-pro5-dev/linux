@@ -163,11 +163,16 @@ properties:
       - samsung,exynos-bus
 
   clocks:
-    maxItems: 1
+    minItems: 1
+    maxItems: 24
 
   clock-names:
-    items:
-      - const: bus
+    minItems: 1
+    maxItems: 24
+
+  samsung,sysreg:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description: Phandle and offset pair to the SYSREG syscon.
 
   devfreq:
     $ref: /schemas/types.yaml#/definitions/phandle

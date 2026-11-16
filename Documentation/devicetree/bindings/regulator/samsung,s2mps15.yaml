@@ -27,6 +27,11 @@ patternProperties:
     description:
       Properties for single LDO regulator.
 
+    properties:
+      meizu,cached-voltage-rail:
+        type: boolean
+        description: Cache voltage selector reads and keep rail immutable-enable.
+
     required:
       - regulator-name
 
@@ -37,6 +42,23 @@ patternProperties:
     unevaluatedProperties: false
     description:
       Properties for single BUCK regulator.
+
+    properties:
+      meizu,cached-voltage-rail:
+        type: boolean
+        description: Cache voltage selector reads and keep rail immutable-enable.
+
+      meizu,cpu-read-only:
+        type: boolean
+        description: Expose S2MPS15 CPU rail as read-only selector.
+
+      meizu,cpu-dvfs-active:
+        type: boolean
+        description: Expose S2MPS15 CPU rail with active cached DVFS ops.
+
+      meizu,gpu-normal-on:
+        type: boolean
+        description: Perform one-shot GPIO-to-Normal-ON takeover for G3D rail.
 
     required:
       - regulator-name

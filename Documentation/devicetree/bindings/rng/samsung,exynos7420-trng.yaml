@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/rng/samsung,exynos7420-trng.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos7420 True Random Number Generator
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    items:
+      - const: samsung,exynos7420-trng
+      - const: samsung,exynos850-trng
+
+required:
+  - compatible
+
+additionalProperties: false

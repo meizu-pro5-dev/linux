@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/meizu,m86-s6e3fa3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung S6E3FA3 1080p AMOLED DSI Panel on Meizu PRO 5
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+allOf:
+  - $ref: panel-common.yaml#
+
+properties:
+  compatible:
+    const: meizu,m86-s6e3fa3
+
+  reg:
+    maxItems: 1
+
+  vci-supply: true
+  vdd3-supply: true
+  reset-gpios: true
+  port: true
+
+required:
+  - compatible
+  - reg
+  - port
+
+unevaluatedProperties: false

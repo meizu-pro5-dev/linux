@@ -29,6 +29,7 @@ properties:
       - samsung,s5pv210-mipi-video-phy
       - samsung,exynos5420-mipi-video-phy
       - samsung,exynos5433-mipi-video-phy
+      - samsung,exynos7420-mipi-video-phy
 
   "#phy-cells":
     const: 1
@@ -89,6 +90,14 @@ allOf:
         syscon: false
       required:
         - samsung,disp-sysreg
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos5433-mipi-video-phy
+    then:
+      required:
         - samsung,cam0-sysreg
         - samsung,cam1-sysreg
 

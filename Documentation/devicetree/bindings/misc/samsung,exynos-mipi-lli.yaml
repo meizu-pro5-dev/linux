@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/samsung,exynos-mipi-lli.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos MIPI LLI Host & MPHY
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    const: samsung,exynos-mipi-lli
+
+  reg:
+    minItems: 1
+    maxItems: 3
+
+  samsung,sysreg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the SYSREG syscon.
+
+  memory-region:
+    maxItems: 1
+
+  modem-name:
+    $ref: /schemas/types.yaml#/definitions/string
+
+  modems:
+    type: object
+    additionalProperties: true
+
+  interrupts:
+    minItems: 1
+    maxItems: 2
+
+  clocks:
+    minItems: 1
+    maxItems: 24
+
+  clock-names:
+    minItems: 1
+    maxItems: 24
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 1
+
+  ranges: true
+
+patternProperties:
+  "^mphy@":
+    type: object
+    additionalProperties: false
+    properties:
+      compatible:
+        enum:
+          - samsung,exynos-mipi-lli-mphy
+          - samsung,exynos-mipi-lli-combo-mphy
+      reg:
+        minItems: 1
+        maxItems: 2
+      has_pma:
+        type: boolean
+      modem-name:
+        $ref: /schemas/types.yaml#/definitions/string
+      modems:
+        type: object
+        additionalProperties: true
+    required:
+      - compatible
+      - reg
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false

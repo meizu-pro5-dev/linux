@@ -64,6 +64,10 @@ properties:
   power-domains:
     maxItems: 1
 
+  samsung,pdma-ctrl-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the Exynos7 PDMA control syscon node.
+
   resets:
     minItems: 1
     maxItems: 2

@@ -34,6 +34,12 @@ properties:
       - samsung,exynos7-clock-fsys1
       - samsung,exynos7-clock-mscl
       - samsung,exynos7-clock-aud
+      - samsung,exynos7-clock-g3d
+      - samsung,exynos7-clock-mfc
+      - samsung,exynos7-clock-cam0
+      - samsung,exynos7-clock-disp
+      - samsung,exynos7-clock-vpp
+      - samsung,exynos7-clock-bus0
 
   clocks:
     minItems: 1
@@ -42,6 +48,9 @@ properties:
   clock-names:
     minItems: 1
     maxItems: 13
+
+  power-domains:
+    maxItems: 1
 
   "#clock-cells":
     const: 1
@@ -232,9 +241,10 @@ allOf:
     then:
       properties:
         clocks:
-          minItems: 2
+          minItems: 1
           maxItems: 2
         clock-names:
+          minItems: 1
           items:
             - const: fin_pll
             - const: fout_aud_pll

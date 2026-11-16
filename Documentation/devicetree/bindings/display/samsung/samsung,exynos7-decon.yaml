@@ -70,16 +70,43 @@ properties:
         default: 0
 
   interrupts:
+    minItems: 2
     items:
-      - description: FIFO level
-      - description: VSYNC
+      - description: FIFO level or VSYNC
+      - description: VSYNC or LCD system
       - description: LCD system
 
   interrupt-names:
-    items:
-      - const: fifo
-      - const: vsync
-      - const: lcd_sys
+    oneOf:
+      - items:
+          - const: fifo
+          - const: vsync
+          - const: lcd_sys
+      - items:
+          - const: vsync
+          - const: lcd_sys
+
+  iommus:
+    minItems: 1
+    maxItems: 4
+
+  interconnects:
+    minItems: 1
+    maxItems: 2
+
+  interconnect-names:
+    minItems: 1
+    maxItems: 2
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+
+  samsung,bus:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the Exynos bus devfreq device for QoS voting.
+
+  te-gpios:
+    maxItems: 1
 
   power-domains:
     maxItems: 1

@@ -212,6 +212,13 @@ properties:
               - samsung,exynos7-espresso        # Samsung Exynos7 Espresso
           - const: samsung,exynos7
 
+      - description: Exynos7420 based boards
+        items:
+          - enum:
+              - meizu,m86                       # Meizu PRO 5
+          - const: samsung,exynos7420
+          - const: samsung,exynos7
+
       - description: Exynos7885 based boards
         items:
           - enum:

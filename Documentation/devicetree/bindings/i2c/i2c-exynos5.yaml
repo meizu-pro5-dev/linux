@@ -57,6 +57,10 @@ properties:
       - const: hsi2c
       - const: hsi2c_pclk
 
+  meizu,pmu:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the PMU syscon for APM reset verification.
+
 required:
   - compatible
   - reg

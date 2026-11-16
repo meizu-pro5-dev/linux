@@ -25,6 +25,15 @@ properties:
     description: System clock. From 6 to 27 MHz.
     maxItems: 1
 
+  clock-frequency:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+  orientation:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
+  rotation:
+    $ref: /schemas/types.yaml#/definitions/uint32
+
   powerdown-gpios:
     description: Reference to the GPIO connected to the PWDNB pin. Active low.
 
@@ -40,6 +49,9 @@ properties:
 
   dovdd-supply:
     description: Digital I/O circuit power. Typically 2.8V or 1.8V.
+
+  vcm-supply: true
+  vdrv-supply: true
 
   port:
     $ref: /schemas/graph.yaml#/$defs/port-base
@@ -57,6 +69,7 @@ properties:
             items:
               enum: [1, 2]
 
+          link-frequencies: true
           clock-noncontinuous: true
           remote-endpoint: true
 

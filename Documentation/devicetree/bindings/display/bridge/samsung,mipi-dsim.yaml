@@ -24,6 +24,7 @@ properties:
           - samsung,exynos5410-mipi-dsi
           - samsung,exynos5422-mipi-dsi
           - samsung,exynos5433-mipi-dsi
+          - samsung,exynos7420-mipi-dsi
           - fsl,imx8mm-mipi-dsim
           - fsl,imx8mp-mipi-dsim
       - items:
@@ -84,6 +85,10 @@ properties:
     description:
       DSIM oscillator clock frequency. If absent, the clock frequency
       of sclk_mipi will be used instead.
+
+  samsung,mic-enabled:
+    type: boolean
+    description: Enable Exynos7420 MIPI DSIM MIC compression support.
 
   phys:
     maxItems: 1
@@ -169,6 +174,32 @@ allOf:
         - ports
         - vddcore-supply
         - vddio-supply
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos7420-mipi-dsi
+
+    then:
+      properties:
+        clocks:
+          minItems: 5
+
+        clock-names:
+          items:
+            - const: bus_clk
+            - const: sclk_mipi
+            - const: phyclk_mipidphy0_bitclkdiv8
+            - const: phyclk_mipidphy0_rxclkesc0
+            - const: sclk_rgb_vclk_to_dsim0
+
+        ports:
+          required:
+            - port@0
+
+      required:
+        - ports
 
   - if:
       properties:

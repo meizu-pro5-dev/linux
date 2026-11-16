@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/sec_modem,modem_pdata.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos7420 Shannon 333 Modem Interface
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    const: sec_modem,modem_pdata
+
+  iodevs:
+    type: object
+    additionalProperties: true
+
+required:
+  - compatible
+
+additionalProperties: true

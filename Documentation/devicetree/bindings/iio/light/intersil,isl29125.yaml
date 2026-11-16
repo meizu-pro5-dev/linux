@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iio/light/intersil,isl29125.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Intersil ISL29125 RGB Color Light Sensor
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    const: intersil,isl29125
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  vdd-supply: true
+
+  meizu,lux-coef:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Panel-specific illuminance calibration coefficient.
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false

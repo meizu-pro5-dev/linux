@@ -24,6 +24,15 @@ properties:
   interrupts:
     maxItems: 1
 
+  enable-gpios:
+    maxItems: 1
+
+  st,disable-als:
+    type: boolean
+    description: Disable ambient light sensing on the VL6180 device.
+
+  vdd-supply: true
+
 additionalProperties: false
 
 required:

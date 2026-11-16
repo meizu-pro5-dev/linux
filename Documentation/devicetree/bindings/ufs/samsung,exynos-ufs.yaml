@@ -59,6 +59,18 @@ properties:
                  which indicates the FSYSx sysreg interface and the offset of
                  the control register for UFS io coherency setting.
 
+  interconnects:
+    minItems: 1
+    maxItems: 2
+
+  interconnect-names:
+    minItems: 1
+    maxItems: 2
+
+  samsung,bus:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the Exynos bus devfreq device for QoS voting.
+
   dma-coherent: true
 
 required:

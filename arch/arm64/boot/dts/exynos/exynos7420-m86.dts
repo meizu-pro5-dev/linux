@@ -124,26 +124,26 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&m86_keys_pins>;
 
-		power {
+		key-power {
 			label = "Power";
 			linux,code = <KEY_POWER>;
 			gpios = <&gpa2 4 GPIO_ACTIVE_LOW>;
 			debounce-interval = <25>;
 			wakeup-source;
 		};
-		volume-down {
+		key-volume-down {
 			label = "Volume down";
 			linux,code = <KEY_VOLUMEDOWN>;
 			gpios = <&gpa1 2 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
 		};
-		volume-up {
+		key-volume-up {
 			label = "Volume up";
 			linux,code = <KEY_VOLUMEUP>;
 			gpios = <&gpa0 7 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
 		};
-		home {
+		key-home {
 			label = "Home";
 			linux,code = <KEY_LEFTMETA>;
 			gpios = <&gpa3 2 GPIO_ACTIVE_LOW>;
@@ -279,7 +279,7 @@
 		meizu,max-validated-frequency = <1500000000>;
 	};
 
-	bus_mif_opp_table: bus-mif-opp-table {
+	bus_mif_opp_table: opp-table-mif {
 		compatible = "operating-points-v2";
 
 		opp-100000000 {
@@ -349,7 +349,7 @@
 		};
 	};
 
-	bus_int_opp_table: bus-int-opp-table {
+	bus_int_opp_table: opp-table-int {
 		compatible = "operating-points-v2";
 
 		int_opp_100: opp-100000000 {
@@ -482,7 +482,7 @@
 		samsung,bus = <&bus_mif>;
 	};
 
-	m86_gpu_opps: gpu-opps {
+	m86_gpu_opps: opp-table-gpu {
 		compatible = "operating-points-v2";
 		/*
 		 * Group 0 nominal voltages; exynos7420-asv adjusts per-chip ASV
@@ -1467,13 +1467,13 @@
 };
 
 &pinctrl_alive {
-	ccd_int: ccd-int-pin {
+	ccd_int: ccd-int-pins {
 		samsung,pins = "gpa1-5";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <0>;
 	};
 
-	m86_touch_irq_pin: m86-touch-irq-pin {
+	m86_touch_irq_pin: m86-touch-irq-pins {
 		samsung,pins = "gpa1-1";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <3>;
@@ -1505,13 +1505,13 @@
 		samsung,pin-pud = <0>;
 	};
 
-	m86_sd2_cd: sd2-cd-pin {
+	m86_sd2_cd: sd2-cd-pins {
 		samsung,pins = "gpa1-3";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <3>;
 	};
 
-	nfc_int_pin: nfc-int-pin {
+	nfc_int_pin: nfc-int-pins {
 		samsung,pins = "gpa2-1";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <1>;
@@ -1536,7 +1536,7 @@
 		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
 	};
 
-	cwmcu_irq_pin: cwmcu-irq-pin {
+	cwmcu_irq_pin: cwmcu-irq-pins {
 		samsung,pins = "gpa1-7";
 		samsung,pin-function = <0xf>;
 		samsung,pin-pud = <3>;
@@ -1554,7 +1554,7 @@
 	 * Not selected: DECON triggers from the gpc0-1 TE EINT, as during the
 	 * bootloader handoff.
 	 */
-	m86_hw_te_on: m86-hw-te-on {
+	m86_hw_te_on: m86-hw-te-on-pins {
 		samsung,pins = "gpg0-1";
 		samsung,pin-function = <2>;
 	};
@@ -1573,14 +1573,14 @@
 		samsung,pin-drv = <0>;
 	};
 
-	vl6180_en_pin: vl6180-en-pin {
+	vl6180_en_pin: vl6180-en-pins {
 		samsung,pins = "gpd7-2";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
 		samsung,pin-drv = <0>;
 	};
 
-	vl6180_irq_pin: vl6180-irq-pin {
+	vl6180_irq_pin: vl6180-irq-pins {
 		samsung,pins = "gpc3-6";
 		samsung,pin-function = <0>;
 		samsung,pin-pud = <3>;
@@ -1629,7 +1629,7 @@
 		samsung,pin-drv = <EXYNOS7_PIN_DRV_LV1>;
 	};
 
-	cwmcu_wkup_pin: cwmcu-wkup-pin {
+	cwmcu_wkup_pin: cwmcu-wkup-pins {
 		samsung,pins = "gpf3-3";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <1>;
@@ -1643,7 +1643,7 @@
 		samsung,pin-drv = <0>;
 	};
 
-	motor_en_pin: motor-en-pin {
+	motor_en_pin: motor-en-pins {
 		samsung,pins = "gpf1-1";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
@@ -1657,7 +1657,7 @@
 		samsung,pin-drv = <0>;
 	};
 
-	lp5562_en_pin: lp5562-en-pin {
+	lp5562_en_pin: lp5562-en-pins {
 		samsung,pins = "gpf5-4";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;
@@ -2034,14 +2034,14 @@
 		samsung,pin-drv = <0>;
 	};
 
-	bcam_mclk_pin: bcam-mclk-pin {
+	bcam_mclk_pin: bcam-mclk-pins {
 		samsung,pins = "gpd7-0";
 		samsung,pin-function = <2>;	/* CIS_CLK0 */
 		samsung,pin-pud = <0>;
 		samsung,pin-drv = <3>;
 	};
 
-	fcam_mclk_pin: fcam-mclk-pin {
+	fcam_mclk_pin: fcam-mclk-pins {
 		samsung,pins = "gpd7-1";
 		samsung,pin-function = <2>;	/* CIS_CLK1 */
 		samsung,pin-pud = <0>;
@@ -2064,7 +2064,7 @@
 };
 
 &pinctrl_bus1 {
-	bcam_xbootldo_pin: bcam-xbootldo-pin {
+	bcam_xbootldo_pin: bcam-xbootldo-pins {
 		samsung,pins = "gpv6-2";
 		samsung,pin-function = <1>;
 		samsung,pin-pud = <0>;

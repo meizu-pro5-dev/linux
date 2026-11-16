@@ -98,6 +98,10 @@ properties:
   arm,no-tick-in-suspend:
     type: boolean
     description: The main counter does not tick when the system is in
+
+  samsung,exynos7420-erratum-cntvoff:
+    type: boolean
+    description: Enable Exynos7420 unstable CNTVCT/CNTVOFF trapping workaround.
       low-power system suspend on some SoCs. This behavior does not match the
       Architecture Reference Manual's specification that the system counter "must
       be implemented in an always-on power domain."

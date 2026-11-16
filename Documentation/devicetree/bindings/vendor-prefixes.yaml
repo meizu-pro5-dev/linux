@@ -160,6 +160,8 @@ patternProperties:
     description: Atlas Scientific LLC
   "^atmel,.*":
     description: Atmel Corporation
+  "^audience,.*":
+    description: Audience, Inc.
   "^auo,.*":
     description: AU Optronics Corporation
   "^auvidea,.*":
@@ -442,6 +444,8 @@ patternProperties:
     description: Seiko Epson Corp.
   "^esp,.*":
     description: Espressif Systems Co. Ltd.
+  "^ess,.*":
+    description: ESS Technology, Inc.
   "^est,.*":
     description: ESTeem Wireless Modems
   "^ettus,.*":
@@ -484,6 +488,8 @@ patternProperties:
     description: FocalTech Systems Co.,Ltd
   "^forlinx,.*":
     description: Baoding Forlinx Embedded Technology Co., Ltd.
+  "^fpc,.*":
+    description: Fingerprint Cards AB
   "^frida,.*":
     description: Shenzhen Frida LCD Co., Ltd.
   "^friendlyarm,.*":
@@ -657,6 +663,8 @@ patternProperties:
     description: Inventec
   "^inversepath,.*":
     description: Inverse Path
+  "^iod,.*":
+    description: Samsung Shannon Modem I/O device properties
   "^iom,.*":
     description: Iomega Corporation
   "^irondevice,.*":
@@ -825,6 +833,8 @@ patternProperties:
     description: MediaTek Inc.
   "^megachips,.*":
     description: MegaChips
+  "^meizu,.*":
+    description: Meizu Technology Co., Ltd.
   "^mele,.*":
     description: Shenzhen MeLE Digital Technology Ltd.
   "^melexis,.*":
@@ -859,6 +869,8 @@ patternProperties:
     description: Microsoft Corporation
   "^microsys,.*":
     description: MicroSys Electronics GmbH
+  "^mif,.*":
+    description: Samsung Shannon Modem Interface properties
   "^mikroe,.*":
     description: MikroElektronika d.o.o.
   "^mikrotik,.*":
@@ -1420,6 +1432,8 @@ patternProperties:
     description: Truly Semiconductors Limited
   "^tsd,.*":
     description: Theobroma Systems Design und Consulting GmbH
+  "^txc,.*":
+    description: TXC Corporation
   "^tyan,.*":
     description: Tyan Computer Corporation
   "^u-blox,.*":

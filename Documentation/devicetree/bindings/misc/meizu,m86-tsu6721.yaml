@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/meizu,m86-tsu6721.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: TI TSU6721 Micro-USB Switch (Meizu PRO 5)
+
+maintainers:
+  - 404698-FDU <pro5-mainline@local>
+
+properties:
+  compatible:
+    const: meizu,m86-tsu6721
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
