@@ -531,12 +531,7 @@
 	sound {
 		compatible = "samsung,meizu-m86-audio";
 		model = "Meizu-PRO5";
-		samsung,pmu = <&pmu_system_controller>;
-		samsung,rtc = <&rtc>;
 		samsung,dsp = <&es705>;
-		dsp-reset-gpios = <&gpf5 5 GPIO_ACTIVE_HIGH>;
-		dsp-wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
-		dsp-core-supply = <&m86_es705_1v1>;
 		audio-amplifier = <&audio_pa_tfa9890>;
 		hifi-cpu = <&i2s0 0>;
 		hifi-dac = <&ess9018k2m>;
@@ -544,8 +539,6 @@
 			"Headphone", "HPOUTL",
 			"Headphone", "HPOUTR",
 			"Earpiece", "EPOUT",
-			"AIFINL", "AIF3TX1",
-			"AIFINR", "AIF3TX2",
 			"Speaker", "OUT",
 			"Headset Mic", "MICBIAS1",
 			"IN2B", "Headset Mic",
@@ -1005,6 +998,8 @@
 		wlf,micd-open-circuit-declare = <1>;
 
 		#sound-dai-cells = <1>;
+		clocks = <&pmu_system_controller 0>, <&rtc>;
+		clock-names = "mclk1", "mclk2";
 
 		AVDD-supply = <&m86_wm8998_1v8>;
 		LDOVDD-supply = <&m86_wm8998_1v8>;
@@ -1705,6 +1700,12 @@
 };
 
 &pmu_system_controller {
+	#clock-cells = <1>;
+	clock-names = "clkout16";
+	clocks = <&fin_pll>;
+	assigned-clocks = <&pmu_system_controller 0>;
+	assigned-clock-parents = <&fin_pll>;
+
 	/*
 	 * S-Boot reads SYSIP_DAT0 after SWRESET (vendor common.c
 	 * exynos_restart()). Only the modes S-Boot was seen to honour are
@@ -1725,12 +1726,15 @@
 
 /*
  * SoC RTC alarm (GIC SPI 355) is the only RTC wake source: the S2MPS15 IRQ
- * line is not wired in this DT. RTCCON CLKOUTEN[9] stays owned by m86-audio;
- * rtc-s3c only read-modify-writes RTCEN/CNTSEL/CLKRST/TICEN.
+ * line is not wired in this DT. rtc-s3c also exports RTCCON CLKOUTEN[9] as a
+ * CCF clock provider consumed by WM8998 (mclk2) and ES705 (clk32k).
  */
 &rtc {
 	clocks = <&clock_ccore PCLK_RTC>, <&m86_rtc_32k>;
 	clock-names = "rtc", "rtc_src";
+	#clock-cells = <0>;
+	clock-output-names = "rtc_clkout";
+	samsung,pmu-syscon = <&pmu_system_controller>;
 	status = "okay";
 };
 
@@ -1839,6 +1843,12 @@
 		reg = <0>;
 		spi-max-frequency = <4000000>;
 		spi-cpha;
+		clocks = <&pmu_system_controller 0>, <&rtc>;
+		clock-names = "mclk", "clk32k";
+		vdd-core-supply = <&m86_es705_1v1>;
+		reset-gpios = <&gpf5 5 GPIO_ACTIVE_HIGH>;
+		wakeup-gpios = <&gpd5 1 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <1>;
 
 		controller-data {
 			samsung,spi-feedback-delay = <0>;

@@ -16,25 +16,9 @@ properties:
   model:
     $ref: /schemas/types.yaml#/definitions/string
 
-  samsung,pmu:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: Phandle to the PMU system controller.
-
-  samsung,rtc:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: Phandle to the SoC RTC controller for audio clock control.
-
   samsung,dsp:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: Phandle to the eS705 SPI DSP device node.
-
-  dsp-reset-gpios:
-    maxItems: 1
-
-  dsp-wakeup-gpios:
-    maxItems: 1
-
-  dsp-core-supply: true
 
   audio-amplifier:
     $ref: /schemas/types.yaml#/definitions/phandle

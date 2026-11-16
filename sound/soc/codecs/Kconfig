@@ -106,6 +106,7 @@ config SND_SOC_ALL_CODECS
 	imply SND_SOC_DA732X
 	imply SND_SOC_DA9055
 	imply SND_SOC_DMIC
+	imply SND_SOC_ES705
 	imply SND_SOC_ES8316
 	imply SND_SOC_ES8326
 	imply SND_SOC_ES8328_SPI
@@ -1043,6 +1044,13 @@ config SND_SOC_HDMI_CODEC
 	select SND_PCM_ELD
 	select SND_PCM_IEC958
 	select HDMI
+
+config SND_SOC_ES705
+	tristate "Audience ES705 SPI Audio DSP"
+	depends on SPI_MASTER
+	help
+	  Enable support for the Audience ES705 SPI audio DSP in
+	  Direct Hardware Pass-Through (DHWPT) mode.
 
 config SND_SOC_ES7134
 	tristate "Everest Semi ES7134 CODEC"

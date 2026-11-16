@@ -19,6 +19,26 @@ properties:
   spi-max-frequency: true
   spi-cpha: true
 
+  clocks:
+    minItems: 1
+    maxItems: 2
+
+  clock-names:
+    items:
+      - const: mclk
+      - const: clk32k
+
+  vdd-core-supply: true
+
+  reset-gpios:
+    maxItems: 1
+
+  wakeup-gpios:
+    maxItems: 1
+
+  "#sound-dai-cells":
+    const: 1
+
   controller-data:
     type: object
     additionalProperties: true
