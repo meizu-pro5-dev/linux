@@ -857,13 +857,6 @@ static int fimc_bns_probe(struct platform_device *pdev)
 
 	bns->mdev.dev = dev;
 	strscpy(bns->mdev.model, "Exynos7420 FIMC-BNS", sizeof(bns->mdev.model));
-	/*
-	 * Advertise a driver name listed in libcamera's SimplePipelineHandler
-	 * supportedDevices[] table with swIspEnabled=true so libcamera/PipeWire
-	 * and GNOME Snapshot bind to FIMC-BNS out of the box.
-	 */
-	strscpy(bns->mdev.driver_name, "qcom-camss",
-		sizeof(bns->mdev.driver_name));
 	media_device_init(&bns->mdev);
 
 	bns->v4l2_dev.mdev = &bns->mdev;

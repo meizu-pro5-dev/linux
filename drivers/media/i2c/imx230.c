@@ -43,15 +43,11 @@ extern int vl6180_read_range_mm(int *range_mm, int *prox_raw, int *range_err);
 #define IMX230_EXPOSURE_OFFSET		10
 #define IMX230_EXPOSURE_STEP		1
 
-/*
- * Expose linear analogue gain (32 = 1.0x .. 512 = 16.0x) to V4L2/libcamera
- * and convert to IMX230 SMIA hyperbolic code:
- *   gain = 512 / (512 - code)  =>  code = 512 - (512 * 32) / val
- */
+/* SMIA hyperbolic analogue gain code: gain = 512 / (512 - code), 0..480 (1x..16x) */
 #define IMX230_REG_ANALOG_GAIN		CCI_REG16(0x0204)
-#define IMX230_ANA_GAIN_MIN		32
-#define IMX230_ANA_GAIN_MAX		512
-#define IMX230_ANA_GAIN_DEFAULT		32
+#define IMX230_ANA_GAIN_MIN		0
+#define IMX230_ANA_GAIN_MAX		480
+#define IMX230_ANA_GAIN_DEFAULT		0
 
 /* Companion EEPROM (0x50) and LC898212XD closed-loop Hall VCM (0x72) */
 #define IMX230_EEPROM_I2C_ADDR		0x50
@@ -560,7 +556,6 @@ static void imx230_update_pad_format(const struct imx230_mode *mode,
 static int imx230_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct imx230 *imx230 = container_of(ctrl->handler, struct imx230, ctrls);
-	u16 ana_gain_code;
 	int ret = 0;
 
 	if (ctrl->id == V4L2_CID_VBLANK) {
@@ -580,10 +575,7 @@ static int imx230_set_ctrl(struct v4l2_ctrl *ctrl)
 
 	switch (ctrl->id) {
 	case V4L2_CID_ANALOGUE_GAIN:
-		ana_gain_code = clamp_t(int,
-			512 - DIV_ROUND_CLOSEST(512 * IMX230_ANA_GAIN_MIN, ctrl->val),
-			0, 480);
-		cci_write(imx230->regmap, IMX230_REG_ANALOG_GAIN, ana_gain_code, &ret);
+		cci_write(imx230->regmap, IMX230_REG_ANALOG_GAIN, ctrl->val, &ret);
 		break;
 	case V4L2_CID_DIGITAL_GAIN:
 		cci_write(imx230->regmap, IMX230_REG_DIGITAL_GAIN, ctrl->val, &ret);
