@@ -82,7 +82,7 @@
 			no-map;
 		};
 
-		/* Observed on 860BCMT226FG; matches the original Recovery SECLOG. */
+		/* Matches the original Recovery SECLOG carveout. */
 		seclog@f9780000 {
 			reg = <0x0 0xf9780000 0x0 0x00080000>;
 			no-map;
